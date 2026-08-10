@@ -1,0 +1,429 @@
+diff --git a/original/mouse_chase_attack_high_recall.py b/mouse_chase_attack_high_recall.py
+index 64f87e5..e879376 100644
+--- a/original/mouse_chase_attack_high_recall.py
++++ b/mouse_chase_attack_high_recall.py
+@@ -99,11 +99,11 @@ KP = base.KP
+ LABELS = base.LABELS
+ CLIP_DIRS = base.CLIP_DIRS
+ VIDEO_EXTENSIONS = base.VIDEO_EXTENSIONS
+ 
+ # v1.39：DISK启发的因果序列一致性、轨迹缺口局部恢复、标注片段和资源计时。
+-PROGRAM_VERSION = "1.40.0-two-stage-arena-id-stability"
++PROGRAM_VERSION = "1.40.1-performance-preserving"
+ # Server layout: code is uploaded to /NVme1/zhaojun/projects and data lives
+ # beside it in datasets/, outputs/ and checkpoints/.  The environment variable
+ # keeps the package relocatable while retaining the requested data-disk default.
+ PROJECT_DIR = Path(__file__).resolve().parent
+ DATA_ROOT = Path(os.environ.get("MOUSE_BEHAVIOR_DATA_ROOT", "/NVme1/zhaojun"))
+@@ -1966,59 +1966,135 @@ class PairFeatureComputer:
+         )
+         self.lookback_frames = max(
+             int(round(self.fps * float(self.features_cfg.get("response_lookback_seconds", 0.3)))), 1
+         )
+ 
++        # Per-frame memoization is safe because history is fully populated
++        # before pair enumeration and is not mutated until the next frame.
++        self._cache_frame = -1
++        self._history_map_cache: Dict[int, Dict[int, base.MouseObservation]] = {}
++        self._trajectory_cache: Dict[Tuple[int, int], Tuple[float, float, float]] = {}
++        self._target_turn_cache: Dict[int, float] = {}
++        self._distance_drop_cache: Dict[Tuple[int, int], float] = {}
++
++    def _ensure_frame_cache(self, frame: int) -> None:
++        frame = int(frame)
++        if frame == self._cache_frame:
++            return
++        self._cache_frame = frame
++        self._history_map_cache.clear()
++        self._trajectory_cache.clear()
++        self._target_turn_cache.clear()
++        self._distance_drop_cache.clear()
++
++    def _history_map(
++        self, logical_id: int, history: base.ObservationHistory
++    ) -> Dict[int, base.MouseObservation]:
++        logical_id = int(logical_id)
++        cached = self._history_map_cache.get(logical_id)
++        if cached is not None:
++            return cached
++        if hasattr(history, "get_window"):
++            values = history.get_window(logical_id, self.history_frames)
++        else:
++            values = history.get(logical_id)[-self.history_frames :]
++        cached = {observation.frame: observation for observation in values}
++        self._history_map_cache[logical_id] = cached
++        return cached
++
+     def _trajectory_features(
+         self,
+         actor_id: int,
+         target_id: int,
+         history: base.ObservationHistory,
++        frame: int,
+     ) -> Tuple[float, float, float]:
+-        actor_hist = history.get(actor_id)[-self.history_frames :]
+-        target_hist = history.get(target_id)[-self.history_frames :]
+-        actor_by_frame = {x.frame: x for x in actor_hist}
+-        target_by_frame = {x.frame: x for x in target_hist}
++        self._ensure_frame_cache(frame)
++        key = (int(actor_id), int(target_id))
++        cached = self._trajectory_cache.get(key)
++        if cached is not None:
++            return cached
++        actor_by_frame = self._history_map(actor_id, history)
++        target_by_frame = self._history_map(target_id, history)
+         common = sorted(set(actor_by_frame) & set(target_by_frame))
++        a = np.empty((0, 2), dtype=np.float64)
++        b = np.empty((0, 2), dtype=np.float64)
++        da = np.empty((0, 2), dtype=np.float64)
++        db = np.empty((0, 2), dtype=np.float64)
+         if len(common) < 4:
+-            return 0.0, 0.0, 0.0
+-        a = np.stack([actor_by_frame[f].center_cm for f in common])
+-        b = np.stack([target_by_frame[f].center_cm for f in common])
+-        valid = np.all(np.isfinite(a), axis=1) & np.all(np.isfinite(b), axis=1)
+-        a, b = a[valid], b[valid]
+-        if len(a) < 4:
+-            return 0.0, 0.0, 0.0
+-        da, db = np.diff(a, axis=0), np.diff(b, axis=0)
+-        # 对水平/垂直直线运动，单轴可能是常数，逐轴Pearson会错误给0。
+-        # 展平二维位移后再计算相关性，保持“同轨迹>0.7”的文档含义。
+-        corr = float(np.clip(safe_corr(da.reshape(-1), db.reshape(-1)), -1.0, 1.0))
+-        return corr, float(np.linalg.norm(da, axis=1).sum()), float(np.linalg.norm(db, axis=1).sum())
++            result = (0.0, 0.0, 0.0)
++        else:
++            a = np.stack([actor_by_frame[f].center_cm for f in common])
++            b = np.stack([target_by_frame[f].center_cm for f in common])
++            valid = np.all(np.isfinite(a), axis=1) & np.all(np.isfinite(b), axis=1)
++            a, b = a[valid], b[valid]
++            if len(a) < 4:
++                result = (0.0, 0.0, 0.0)
++            else:
++                da, db = np.diff(a, axis=0), np.diff(b, axis=0)
++                # 对水平/垂直直线运动，单轴可能是常数，逐轴Pearson会错误给0。
++                # 展平二维位移后再计算相关性，保持“同轨迹>0.7”的文档含义。
++                corr = float(
++                    np.clip(safe_corr(da.reshape(-1), db.reshape(-1)), -1.0, 1.0)
++                )
++                result = (
++                    corr,
++                    float(np.linalg.norm(da, axis=1).sum()),
++                    float(np.linalg.norm(db, axis=1).sum()),
++                )
++        self._trajectory_cache[key] = result
++        if key[0] != key[1]:
++            # np.corrcoef can differ by one ULP when its arguments are swapped.
++            # Reproduce the historical directed order so CSV values stay exact.
++            if len(common) < 4 or len(a) < 4:
++                reverse_corr = 0.0
++            else:
++                reverse_corr = float(
++                    np.clip(safe_corr(db.reshape(-1), da.reshape(-1)), -1.0, 1.0)
++                )
++            self._trajectory_cache[(key[1], key[0])] = (
++                reverse_corr, result[2], result[1]
++            )
++        return result
+ 
+     def _distance_drop(
+         self,
+         actor: base.MouseObservation,
+         target: base.MouseObservation,
+         history: base.ObservationHistory,
+     ) -> float:
++        self._ensure_frame_cache(actor.frame)
++        key = tuple(sorted((int(actor.logical_id), int(target.logical_id))))
++        cached = self._distance_drop_cache.get(key)
++        if cached is not None:
++            return cached
+         old_frame = actor.frame - self.lookback_frames
+         old_actor = history.near_frame(actor.logical_id, old_frame)
+         old_target = history.near_frame(target.logical_id, old_frame)
+         current = point_distance(actor.center_cm, target.center_cm)
+         if old_actor is None or old_target is None or not np.isfinite(current):
+-            return 0.0
+-        previous = point_distance(old_actor.center_cm, old_target.center_cm)
+-        return float(previous - current) if np.isfinite(previous) else 0.0
++            value = 0.0
++        else:
++            previous = point_distance(old_actor.center_cm, old_target.center_cm)
++            value = float(previous - current) if np.isfinite(previous) else 0.0
++        self._distance_drop_cache[key] = float(value)
++        return float(value)
+ 
+     def _target_turn(
+         self,
+         target: base.MouseObservation,
+         history: base.ObservationHistory,
+     ) -> float:
+-        old = history.near_frame(target.logical_id, target.frame - self.lookback_frames)
+-        if old is None:
+-            return 0.0
+-        return angle_difference_deg(old.heading, target.heading)
++        self._ensure_frame_cache(target.frame)
++        logical_id = int(target.logical_id)
++        cached = self._target_turn_cache.get(logical_id)
++        if cached is not None:
++            return cached
++        old = history.near_frame(logical_id, target.frame - self.lookback_frames)
++        value = 0.0 if old is None else angle_difference_deg(old.heading, target.heading)
++        self._target_turn_cache[logical_id] = float(value)
++        return float(value)
+ 
+     @staticmethod
+     def _evaluate_chase(
+         cfg: Mapping[str, Any],
+         center_distance: float,
+@@ -2158,11 +2234,11 @@ class PairFeatureComputer:
+             and finite_point(target.center_cm)
+             and np.all(np.isfinite(target.heading))
+             and np.dot(actor.center_cm - target.center_cm, target.heading) < 0
+         )
+         trajectory_corr, actor_path, target_path = self._trajectory_features(
+-            actor.logical_id, target.logical_id, history
++            actor.logical_id, target.logical_id, history, actor.frame
+         )
+         distance_drop = self._distance_drop(actor, target, history)
+         target_turn = self._target_turn(target, history)
+ 
+         weak_chase_score, weak_chase = self._evaluate_chase(
+@@ -4692,23 +4768,35 @@ class PairSQLiteStore:
+             self.initialized = False
+         elif resume and self.initialized:
+             self.conn.execute("DELETE FROM pair_raw WHERE frame >= ?", (int(resume_frame),))
+             self.conn.commit()
+ 
+-    def add(self, row: Mapping[str, Any]) -> None:
++    @staticmethod
++    def _clean_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+         clean: Dict[str, Any] = {}
+         for key, value in row.items():
+             value = to_builtin(value)
+             if isinstance(value, float) and not np.isfinite(value):
+                 value = None
+             elif isinstance(value, bool):
+                 value = int(value)
+             clean[str(key)] = value
+-        self.buffer.append(clean)
++        return clean
++
++    def add(self, row: Mapping[str, Any]) -> None:
++        self.buffer.append(self._clean_row(row))
+         if len(self.buffer) >= self.batch_size:
+             self.flush()
+ 
++    def add_many(self, rows: Iterable[Mapping[str, Any]]) -> None:
++        """Append one deterministic frame/chunk with fewer call boundaries."""
++        clean_row = self._clean_row
++        for row in rows:
++            self.buffer.append(clean_row(row))
++            if len(self.buffer) >= self.batch_size:
++                self.flush()
++
+     def flush(self) -> None:
+         if not self.buffer:
+             return
+         df = pd.DataFrame(self.buffer)
+         df.to_sql(
+@@ -5567,10 +5655,11 @@ def _pair_record_from_features(
+     target_to_actor: HighRecallPairFeatures,
+     selected: HighRecallPairFeatures,
+     repeated_contact_count: int,
+     cluster_attack_hint: bool,
+     pair_cluster_evidence: Mapping[str, Any],
++    record_template: Optional[Mapping[str, Any]] = None,
+ ) -> Dict[str, Any]:
+     """Serialize one directional feature computation into the legacy CSV row.
+ 
+     Keeping this serializer in one place is important: inline and staged
+     pipelines must produce byte-for-byte equivalent behavior evidence before
+@@ -5581,11 +5670,15 @@ def _pair_record_from_features(
+     strong_chase = bool(actor_to_target.strong_chase or target_to_actor.strong_chase)
+     strong_attack = bool(actor_to_target.strong_attack or target_to_actor.strong_attack)
+     conf_values = np.concatenate([actor.keypoint_conf, target.keypoint_conf])
+     valid_conf = conf_values[np.isfinite(conf_values)]
+     pose_quality = float(np.mean(valid_conf)) if len(valid_conf) else 0.0
+-    record = empty_frame_record(frame_idx, fps, transformer)
++    record = (
++        dict(record_template)
++        if record_template is not None
++        else empty_frame_record(frame_idx, fps, transformer)
++    )
+     record.update({
+         "pair_key": _pair_key(actor.logical_id, target.logical_id),
+         "valid_pair": True,
+         "mouse_a_id": actor.logical_id,
+         "mouse_b_id": target.logical_id,
+@@ -5650,13 +5743,18 @@ def _cluster_fallback_record(
+     transformer: Any,
+     id_a: int,
+     id_b: int,
+     cluster_attack_evidence: Mapping[str, Any],
+     cluster_reid_active_count: int,
++    record_template: Optional[Mapping[str, Any]] = None,
+ ) -> Dict[str, Any]:
+     """Create the legacy missing-detection cluster fallback row."""
+-    record = empty_frame_record(frame_idx, fps, transformer)
++    record = (
++        dict(record_template)
++        if record_template is not None
++        else empty_frame_record(frame_idx, fps, transformer)
++    )
+     pair_key = _pair_key(id_a, id_b)
+     record.update({
+         "pair_key": pair_key,
+         "valid_pair": True,
+         "mouse_a_id": int(id_a),
+@@ -5768,10 +5866,14 @@ def _compute_behavior_frame_records(
+     chunking is handled outside this frame-level function so stateful history
+     and contact windows remain ordered.
+     """
+     if tracking_only:
+         return []
++    # Every pair row starts from the same frame metadata. Copying one
++    # prepared template preserves key order and values while avoiding
++    # construction of the large record dictionary up to 190 times/frame.
++    record_template = empty_frame_record(frame_idx, fps, transformer)
+     behavior_observations = _behavior_eligible_observations(observations)
+     wall_jump_flags = individual_behavior_gate.update(
+         frame_idx, behavior_observations, width, height
+     )
+     cluster_attack_evidence = _cluster_attack_evidence_by_pair(cluster_context)
+@@ -5848,10 +5950,11 @@ def _compute_behavior_frame_records(
+             target_to_actor,
+             selected,
+             repeated,
+             pair_tuple in cluster_attack_pairs,
+             pair_cluster_evidence,
++            record_template=record_template,
+         )
+         records.append(record)
+         existing_pair_keys.add(str(record["pair_key"]))
+ 
+     # Preserve the existing occlusion-cluster fallback rows exactly.  These rows
+@@ -5867,10 +5970,11 @@ def _compute_behavior_frame_records(
+                 transformer,
+                 id_a,
+                 id_b,
+                 cluster_attack_evidence.get(tuple(sorted((int(id_a), int(id_b)))), {}),
+                 cluster_reid_active_count,
++                record_template=record_template,
+             )
+         )
+         existing_pair_keys.add(pair_key)
+     return records
+ 
+@@ -5937,12 +6041,11 @@ def populate_pair_store_from_stage3_cache(
+             mp_context=mp.get_context("spawn"),
+             initializer=_stage3_worker_initializer,
+         ) as executor:
+             for core_count, records in executor.map(_stage3_chunk_worker, payloads):
+                 write_started = time.perf_counter()
+-                for record in records:
+-                    raw_store.add(record)
++                raw_store.add_many(records)
+                 sqlite_seconds += time.perf_counter() - write_started
+                 processed_frames += int(core_count)
+         if profiler is not None:
+             total_seconds = time.perf_counter() - multiprocess_started
+             profiler.add("csv_sqlite", sqlite_seconds)
+@@ -5999,12 +6102,11 @@ def populate_pair_store_from_stage3_cache(
+             cluster_reid_active_count=0,
+         )
+         if profiler is not None:
+             profiler.add("behavior_pair", time.perf_counter() - pair_started)
+         write_started = time.perf_counter()
+-        for record in records:
+-            raw_store.add(record)
++        raw_store.add_many(records)
+         if profiler is not None:
+             profiler.add("csv_sqlite", time.perf_counter() - write_started)
+         processed_frames += 1
+         if profiler is not None:
+             profiler.add("behavior_io", time.perf_counter() - frame_started)
+@@ -6263,18 +6365,31 @@ class PairDataFrameStore:
+         # 一次性载入当前短视频的鼠对特征；这里只用于快速行为规则复算。
+         self.table = pd.read_csv(path, encoding="utf-8-sig")
+         # 缓存文件必须保留原始鼠对键，否则无法按独立鼠对执行时序滤波。
+         if "pair_key" not in self.table.columns:
+             raise ValueError(f"行为缓存缺少pair_key字段：{path}")
++        # Build the row index once. The previous implementation converted and
++        # scanned the complete pair_key column for every pair: O(K × N).
++        key_series = self.table["pair_key"].astype("string")
++        grouped = key_series.groupby(key_series, sort=False).groups
++        self._pair_indices: Dict[str, np.ndarray] = {
++            str(key): np.asarray(indices, dtype=np.int64)
++            for key, indices in grouped.items()
++            if not pd.isna(key)
++        }
++        self._pair_keys = sorted(self._pair_indices)
+ 
+     def pair_keys(self) -> List[str]:
+-        # 排序保证缓存复算与正常推理的事件编号顺序可重复。
+-        return sorted(self.table["pair_key"].dropna().astype(str).unique().tolist())
++        # 返回副本，避免调用方修改内部稳定顺序。
++        return list(self._pair_keys)
+ 
+     def read_pair(self, pair_key: str) -> pd.DataFrame:
++        indices = self._pair_indices.get(str(pair_key))
++        if indices is None:
++            return self.table.iloc[0:0].copy()
+         # 返回副本，避免后处理新增列时污染其他鼠对或后续重复读取。
+-        pair = self.table[self.table["pair_key"].astype(str) == str(pair_key)].copy()
++        pair = self.table.iloc[indices].copy()
+         # 帧号排序保持时间滤波输入严格单调。
+         return pair.sort_values("frame", kind="stable").reset_index(drop=True)
+ 
+ 
+ def _open_dict_writer(
+@@ -9528,14 +9643,15 @@ def process_video(
+                     frame,
+                     detections,
+                     frame_idx=frame_idx,
+                 )
+                 profiler.add("mask", time.perf_counter() - mask_started)
+-                for row in mask_stats.debug_rows:
+-                    out_row = dict(row)
+-                    out_row["frame"] = int(frame_idx)
+-                    mask_writer.writerow(out_row)
++                if mask_stats.debug_rows:
++                    mask_writer.writerows(
++                        {**dict(row), "frame": int(frame_idx)}
++                        for row in mask_stats.debug_rows
++                    )
+ 
+                 identity_started = time.perf_counter()
+                 transformer.update(detections)
+                 guarded_context = cluster_reid.prepare(
+                     frame_idx, detections, cluster_context, identity, frame.shape[:2]
+@@ -10222,21 +10338,22 @@ def process_video(
+                     active_raw_records.append(record)
+                     existing_pair_keys.add(pair_key)
+ 
+                 profiler.add("behavior_io", time.perf_counter() - behavior_started)
+                 local_added = len(local_recovery_detections)
+-                for row in occlusion_manager.debug_rows:
+-                    row = dict(row)
+-                    row["local_recovery_added"] = local_added
+-                    cluster_writer.writerow(row)
++                if occlusion_manager.debug_rows:
++                    cluster_writer.writerows(
++                        {**dict(row), "local_recovery_added": local_added}
++                        for row in occlusion_manager.debug_rows
++                    )
+                 occlusion_manager.debug_rows.clear()
+-                for row in cluster_reid.debug_rows:
+-                    reid_writer.writerow(dict(row))
++                if cluster_reid.debug_rows:
++                    reid_writer.writerows(dict(row) for row in cluster_reid.debug_rows)
+                 cluster_reid.debug_rows.clear()
+ 
+-                for debug in identity.debug_records:
+-                    debug_writer.writerow(asdict(debug))
++                if identity.debug_records:
++                    debug_writer.writerows(asdict(debug) for debug in identity.debug_records)
+                 identity.debug_records.clear()
+ 
+                 if checkpoint_video_writer is not None:
+                     checkpoint_video_writer.submit(
+                         frame,

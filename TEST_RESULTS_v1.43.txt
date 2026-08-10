@@ -1,0 +1,29 @@
+v1.43 STANDARD BEHAVIOR ENGINE - FINAL LOCAL TEST RESULTS
+Date: 2026-08-10
+
+== pytest ==
+..............                                                           [100%]
+14 passed in 7.78s
+
+== regression_performance_test ==
+REGRESSION: PASS
+derived_geometry_old_seconds=0.665046
+derived_geometry_new_seconds=0.002144
+derived_geometry_speedup=310.163398
+pair_features_old_seconds=2.441502
+pair_features_new_seconds=1.176731
+pair_features_speedup=2.074818
+pair_store_old_seconds=1.658259
+pair_store_new_seconds=0.033669
+pair_store_speedup=49.252111
+
+== identity_cascade_fuzz ==
+IDENTITY CASCADE FUZZ: PASS 50/50 exact matrices
+candidate_density_min=0.085000
+candidate_density_max=0.440000
+
+== compileall ==
+COMPILEALL: PASS
+
+== yaml / FSM invariants ==
+CONFIG/FSM INVARIANTS: PASS

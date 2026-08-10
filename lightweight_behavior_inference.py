@@ -1,0 +1,1637 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Mouse Behavior Lightweight Inference entry point.
+
+Analyze one completed YOLO cache without rerunning the heavy tracker.
+
+This is intentionally a bounded, single-video fallback for long Windows
+videos.  It reads only ``yolo_precompute`` records for the requested video,
+keeps at most ``expected_mice`` tracks with position+keypoint matching, builds
+the pair-wise kinematics required by the v1.43 standard behavior engine, and
+then runs the same standard chase/attack FSM and thresholds offline.
+
+It does not claim to replace the full occlusion/ReID pipeline.  The output
+metadata explicitly records that limitation so a detected event can be
+reviewed separately from a full-pipeline result.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import gzip
+import json
+import math
+import pickle
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Iterable, Iterator, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+import yaml
+
+try:
+    from scipy.optimize import linear_sum_assignment
+except Exception:  # pragma: no cover - a deterministic greedy fallback is below
+    linear_sum_assignment = None
+
+import standard_behavior_engine as behavior_engine
+
+
+PROJECT_NAME = "mouse-behavior-lightweight-inference"
+
+
+KP_NOSE = 0
+KP_LEFT_EAR = 1
+KP_RIGHT_EAR = 2
+KP_NECK = 3
+KP_LEFT_HIP = 4
+KP_RIGHT_HIP = 5
+KP_TAIL = 6
+KEYPOINTS = 7
+
+# This is the exact eight-edge graph used by the user's reference image:
+# nose -> ears, ears -> neck, neck -> hips, hips -> tail.
+SKELETON_EDGES = (
+    (KP_NOSE, KP_LEFT_EAR),
+    (KP_NOSE, KP_RIGHT_EAR),
+    (KP_LEFT_EAR, KP_NECK),
+    (KP_RIGHT_EAR, KP_NECK),
+    (KP_NECK, KP_LEFT_HIP),
+    (KP_NECK, KP_RIGHT_HIP),
+    (KP_LEFT_HIP, KP_TAIL),
+    (KP_RIGHT_HIP, KP_TAIL),
+)
+
+
+def _finite_point(value: Any) -> bool:
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    return bool(arr.size >= 2 and np.all(np.isfinite(arr[:2])))
+
+
+def _unit(vector: np.ndarray) -> np.ndarray:
+    vector = np.asarray(vector, dtype=float)
+    norm = float(np.linalg.norm(vector))
+    return vector / norm if norm > 1e-9 and np.isfinite(norm) else np.full(2, np.nan)
+
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Cosine similarity for [..., 2] arrays, with zero for invalid vectors."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    dot = np.sum(a * b, axis=-1)
+    denom = np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1)
+    out = np.zeros_like(dot, dtype=float)
+    valid = np.isfinite(dot) & np.isfinite(denom) & (denom > 1e-9)
+    out[valid] = np.clip(dot[valid] / denom[valid], -1.0, 1.0)
+    return out
+
+
+def _angle_deg(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    cosine = _cosine(a, b)
+    valid = np.all(np.isfinite(a), axis=-1) & np.all(np.isfinite(b), axis=-1)
+    out = np.zeros(cosine.shape, dtype=float)
+    out[valid] = np.degrees(np.arccos(np.clip(cosine[valid], -1.0, 1.0)))
+    return out
+
+
+def _weighted_mean(points: np.ndarray, confidence: np.ndarray, indices: Sequence[int]) -> np.ndarray:
+    points = np.asarray(points, dtype=float)
+    confidence = np.asarray(confidence, dtype=float).reshape(-1)
+    valid_indices = [
+        int(index)
+        for index in indices
+        if int(index) < len(points)
+        and int(index) < len(confidence)
+        and np.all(np.isfinite(points[int(index)]))
+        and np.isfinite(confidence[int(index)])
+        and float(confidence[int(index)]) >= 0.10
+    ]
+    if not valid_indices:
+        return np.full(2, np.nan, dtype=float)
+    values = points[valid_indices]
+    weights = np.maximum(confidence[valid_indices], 0.01)
+    return np.average(values, axis=0, weights=weights).astype(float)
+
+
+def _box_iou(a: np.ndarray, b: np.ndarray) -> float:
+    a = np.asarray(a, dtype=float).reshape(-1)
+    b = np.asarray(b, dtype=float).reshape(-1)
+    if a.size < 4 or b.size < 4 or not np.all(np.isfinite(a[:4])) or not np.all(np.isfinite(b[:4])):
+        return 0.0
+    x1 = max(float(a[0]), float(b[0]))
+    y1 = max(float(a[1]), float(b[1]))
+    x2 = min(float(a[2]), float(b[2]))
+    y2 = min(float(a[3]), float(b[3]))
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area_a = max(0.0, float(a[2] - a[0])) * max(0.0, float(a[3] - a[1]))
+    area_b = max(0.0, float(b[2] - b[0])) * max(0.0, float(b[3] - b[1]))
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 1e-9 else 0.0
+
+
+def _payload_detection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    points = np.asarray(payload.get("keypoints_px", []), dtype=float)
+    confidence = np.asarray(payload.get("keypoint_conf", []), dtype=float).reshape(-1)
+    bbox = np.asarray(payload.get("bbox_xyxy", []), dtype=float).reshape(-1)
+    if points.shape != (KEYPOINTS, 2) or confidence.shape != (KEYPOINTS,) or bbox.shape != (4,):
+        return None
+    valid = (
+        np.all(np.isfinite(points), axis=1)
+        & np.isfinite(confidence)
+        & (confidence >= 0.10)
+    )
+    if int(valid.sum()) < 4:
+        return None
+    center = _weighted_mean(points, confidence, (KP_NECK, KP_LEFT_HIP, KP_RIGHT_HIP))
+    if not _finite_point(center):
+        center = _weighted_mean(points, confidence, range(KEYPOINTS))
+    head = _weighted_mean(points, confidence, (KP_NOSE, KP_LEFT_EAR, KP_RIGHT_EAR))
+    body_length = float(np.linalg.norm(points[KP_NOSE] - points[KP_TAIL]))
+    if not np.isfinite(body_length) or body_length < 8.0:
+        return None
+    pose_quality = float(payload.get("pose_quality", np.mean(confidence[valid])))
+    box_conf = float(payload.get("box_conf", 0.0))
+    return {
+        "points": points,
+        "confidence": confidence,
+        "bbox": bbox,
+        "center": center,
+        "head": head,
+        "body_length": body_length,
+        "pose_quality": pose_quality if np.isfinite(pose_quality) else 0.0,
+        "box_conf": box_conf if np.isfinite(box_conf) else 0.0,
+        "score": (box_conf if np.isfinite(box_conf) else 0.0) + 0.10 * (pose_quality if np.isfinite(pose_quality) else 0.0),
+    }
+
+
+def _deduplicate(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove only near-identical pose boxes; preserve close distinct mice."""
+    ordered = sorted(detections, key=lambda item: float(item["score"]), reverse=True)
+    kept: list[dict[str, Any]] = []
+    for candidate in ordered:
+        duplicate = False
+        for previous in kept:
+            distance = float(np.linalg.norm(candidate["center"] - previous["center"]))
+            scale = max(float(candidate["body_length"]), float(previous["body_length"]), 8.0)
+            if distance <= 0.24 * scale and _box_iou(candidate["bbox"], previous["bbox"]) >= 0.18:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(candidate)
+    return kept
+
+
+def _iter_cache_records(cache_dir: Path) -> Iterator[Mapping[str, Any]]:
+    parts = sorted(cache_dir.glob("yolo_results.*.*.pkl.gz"))
+    if not parts:
+        raise FileNotFoundError(f"没有找到 YOLO 缓存分块: {cache_dir}")
+    for part in parts:
+        with gzip.open(part, "rb") as handle:
+            records = pickle.load(handle)
+        if not isinstance(records, list):
+            raise ValueError(f"缓存分块格式错误: {part}")
+        for record in records:
+            if isinstance(record, Mapping):
+                yield record
+
+
+def _cache_total_frames(cache_dir: Path) -> int:
+    status_path = cache_dir / "yolo_results_status.json"
+    with status_path.open("r", encoding="utf-8") as handle:
+        status = json.load(handle)
+    if str(status.get("status")) != "complete":
+        raise RuntimeError(f"YOLO 缓存尚未完成: {status_path}")
+    total = int(status.get("total_frames", 0))
+    if total <= 0 or int(status.get("next_frame", -1)) != total:
+        raise RuntimeError(f"YOLO 缓存帧数不完整: {status_path}")
+    return total
+
+
+def _assign_tracks(
+    detections: list[dict[str, Any]],
+    last_center: np.ndarray,
+    last_points: np.ndarray,
+    last_body: np.ndarray,
+    last_velocity: np.ndarray,
+    missed: np.ndarray,
+    initialized: bool,
+    expected_mice: int,
+) -> tuple[dict[int, dict[str, Any]], bool]:
+    detections = _deduplicate(detections)
+    assignments: dict[int, dict[str, Any]] = {}
+    if not detections:
+        missed[:] = missed + 1
+        last_velocity[:] = last_velocity * 0.90
+        return assignments, initialized
+
+    if not initialized:
+        selected = sorted(detections, key=lambda item: (float(item["center"][1]), float(item["center"][0])))[:expected_mice]
+        for logical_id, detection in enumerate(selected):
+            assignments[logical_id] = detection
+            last_center[logical_id] = detection["center"]
+            last_points[logical_id] = detection["points"]
+            last_body[logical_id] = detection["body_length"]
+            last_velocity[logical_id] = 0.0
+            missed[logical_id] = 0
+        missed[:] = np.where(np.arange(expected_mice) < len(selected), missed, 1)
+        return assignments, True
+
+    detection_count = len(detections)
+    active_ids = np.flatnonzero(np.all(np.isfinite(last_center), axis=1))
+    if len(active_ids) == 0:
+        missed[:] = missed + 1
+        return assignments, initialized
+
+    cost = np.full((len(active_ids), detection_count), 1e6, dtype=float)
+    for row, logical_id in enumerate(active_ids):
+        prediction = last_center[logical_id] + last_velocity[logical_id] * max(int(missed[logical_id]) + 1, 1)
+        for column, detection in enumerate(detections):
+            scale = max(float(last_body[logical_id]), float(detection["body_length"]), 20.0)
+            center_cost = float(np.linalg.norm(prediction - detection["center"])) / scale
+            previous_points = last_points[logical_id]
+            current_points = detection["points"]
+            valid = np.all(np.isfinite(previous_points), axis=1) & np.all(np.isfinite(current_points), axis=1)
+            if int(valid.sum()) >= 4:
+                pose_cost = float(np.mean(np.linalg.norm(previous_points[valid] - current_points[valid], axis=1))) / scale
+            else:
+                pose_cost = center_cost
+            cost[row, column] = 0.58 * center_cost + 0.42 * pose_cost
+
+    if linear_sum_assignment is not None:
+        rows, columns = linear_sum_assignment(cost)
+    else:  # pragma: no cover
+        rows, columns = [], []
+        used: set[int] = set()
+        for row in range(cost.shape[0]):
+            column = int(np.argmin(np.where(np.isin(np.arange(detection_count), list(used)), 1e6, cost[row])))
+            if column not in used:
+                rows.append(row)
+                columns.append(column)
+                used.add(column)
+
+    matched_ids: set[int] = set()
+    for row, column in zip(rows, columns):
+        logical_id = int(active_ids[int(row)])
+        scale = max(float(last_body[logical_id]), float(detections[int(column)]["body_length"]), 20.0)
+        center_distance = float(np.linalg.norm(
+            last_center[logical_id] + last_velocity[logical_id] * max(int(missed[logical_id]) + 1, 1)
+            - detections[int(column)]["center"]
+        )) / scale
+        gate = 3.2 if int(missed[logical_id]) <= 3 else 5.0
+        if float(cost[int(row), int(column)]) > gate or center_distance > gate:
+            continue
+        detection = detections[int(column)]
+        assignments[logical_id] = detection
+        new_center = np.asarray(detection["center"], dtype=float)
+        if np.all(np.isfinite(last_center[logical_id])):
+            dt = max(int(missed[logical_id]) + 1, 1)
+            last_velocity[logical_id] = (new_center - last_center[logical_id]) / dt
+        last_center[logical_id] = new_center
+        last_points[logical_id] = detection["points"]
+        last_body[logical_id] = detection["body_length"]
+        missed[logical_id] = 0
+        matched_ids.add(logical_id)
+
+    for logical_id in range(expected_mice):
+        if logical_id not in matched_ids:
+            missed[logical_id] += 1
+            last_velocity[logical_id] *= 0.90
+    return assignments, initialized
+
+
+def _track_cache(cache_dir: Path, total_frames: int, expected_mice: int) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    centers = np.full((total_frames, expected_mice, 2), np.nan, dtype=np.float32)
+    keypoints = np.full((total_frames, expected_mice, KEYPOINTS, 2), np.nan, dtype=np.float32)
+    confidences = np.zeros((total_frames, expected_mice, KEYPOINTS), dtype=np.float32)
+    bboxes = np.full((total_frames, expected_mice, 4), np.nan, dtype=np.float32)
+    pose_quality = np.zeros((total_frames, expected_mice), dtype=np.float32)
+    body_lengths = np.full((total_frames, expected_mice), np.nan, dtype=np.float32)
+    last_center = np.full((expected_mice, 2), np.nan, dtype=float)
+    last_points = np.full((expected_mice, KEYPOINTS, 2), np.nan, dtype=float)
+    last_body = np.full(expected_mice, np.nan, dtype=float)
+    last_velocity = np.zeros((expected_mice, 2), dtype=float)
+    missed = np.full(expected_mice, 999, dtype=np.int32)
+    initialized = False
+    raw_counts: list[int] = []
+    frame_seen = 0
+    for record in _iter_cache_records(cache_dir):
+        frame = int(record.get("frame", -1))
+        if frame < 0 or frame >= total_frames:
+            continue
+        payloads = record.get("pose_detections", [])
+        detections = [
+            detection
+            for payload in payloads
+            if isinstance(payload, Mapping)
+            for detection in [_payload_detection(payload)]
+            if detection is not None
+        ]
+        raw_counts.append(len(detections))
+        assignments, initialized = _assign_tracks(
+            detections,
+            last_center,
+            last_points,
+            last_body,
+            last_velocity,
+            missed,
+            initialized,
+            expected_mice,
+        )
+        for logical_id, detection in assignments.items():
+            centers[frame, logical_id] = detection["center"]
+            keypoints[frame, logical_id] = detection["points"]
+            confidences[frame, logical_id] = detection["confidence"]
+            bboxes[frame, logical_id] = detection["bbox"]
+            pose_quality[frame, logical_id] = detection["pose_quality"]
+            body_lengths[frame, logical_id] = detection["body_length"]
+        frame_seen += 1
+        if frame_seen == 1 or frame_seen % 1000 == 0 or frame_seen == total_frames:
+            print(
+                f"[cache tracking] {frame_seen}/{total_frames} frames",
+                flush=True,
+            )
+
+    valid = np.all(np.isfinite(centers), axis=2)
+    stats = {
+        "cache_frames_seen": int(frame_seen),
+        "raw_detection_min": int(min(raw_counts)) if raw_counts else 0,
+        "raw_detection_max": int(max(raw_counts)) if raw_counts else 0,
+        "raw_detection_mean": float(np.mean(raw_counts)) if raw_counts else 0.0,
+        "track_valid_rate": float(np.mean(valid)),
+        "track_valid_frames_mean": float(np.mean(valid.sum(axis=1))),
+        "track_valid_frames_min": int(np.min(valid.sum(axis=1))) if len(valid) else 0,
+        "track_valid_frames_max": int(np.max(valid.sum(axis=1))) if len(valid) else 0,
+    }
+    return {
+        "centers_px": centers,
+        "keypoints_px": keypoints,
+        "confidences": confidences,
+        "bboxes": bboxes,
+        "pose_quality": pose_quality,
+        "body_lengths_px": body_lengths,
+        "valid": valid,
+    }, stats
+
+
+def _ema_smooth(values: np.ndarray, valid: np.ndarray, alpha: float = 0.70) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    out = np.full_like(values, np.nan, dtype=float)
+    tracks = values.shape[1]
+    previous = np.full(values.shape[1:], np.nan, dtype=float)
+    for frame in range(values.shape[0]):
+        for track in range(tracks):
+            if not bool(valid[frame, track]):
+                continue
+            current = values[frame, track]
+            if not np.all(np.isfinite(current)):
+                continue
+            if np.all(np.isfinite(previous[track])):
+                previous[track] = alpha * current + (1.0 - alpha) * previous[track]
+            else:
+                previous[track] = current
+            out[frame, track] = previous[track]
+    return out
+
+
+def _ema_smooth_keypoints(values: np.ndarray, valid: np.ndarray, alpha: float = 0.70) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    out = np.full_like(values, np.nan, dtype=float)
+    tracks = values.shape[1]
+    previous = np.full(values.shape[1:], np.nan, dtype=float)
+    for frame in range(values.shape[0]):
+        for track in range(tracks):
+            if not bool(valid[frame, track]):
+                continue
+            for point in range(values.shape[2]):
+                current = values[frame, track, point]
+                if not np.all(np.isfinite(current)):
+                    continue
+                if np.all(np.isfinite(previous[track, point])):
+                    previous[track, point] = alpha * current + (1.0 - alpha) * previous[track, point]
+                else:
+                    previous[track, point] = current
+                out[frame, track, point] = previous[track, point]
+    return out
+
+
+def _rolling_sum(values: np.ndarray, window: int) -> np.ndarray:
+    values = np.nan_to_num(np.asarray(values, dtype=float), nan=0.0)
+    window = max(int(window), 1)
+    cumulative = np.concatenate([np.zeros((1, values.shape[1])), np.cumsum(values, axis=0)], axis=0)
+    index = np.arange(values.shape[0])
+    starts = np.maximum(index - window + 1, 0)
+    return cumulative[index + 1] - cumulative[starts]
+
+
+def _rolling_corr(velocity_a: np.ndarray, velocity_b: np.ndarray, valid: np.ndarray, window: int) -> np.ndarray:
+    """Rolling Pearson correlation over flattened 2-D displacement vectors."""
+    frames, pairs, _ = velocity_a.shape
+    window = max(int(window), 4)
+    result = np.zeros((frames, pairs), dtype=np.float32)
+    buffer_a = np.zeros((window, pairs, 2), dtype=float)
+    buffer_b = np.zeros((window, pairs, 2), dtype=float)
+    buffer_valid = np.zeros((window, pairs), dtype=bool)
+    sum_a = np.zeros(pairs, dtype=float)
+    sum_b = np.zeros(pairs, dtype=float)
+    sum_a2 = np.zeros(pairs, dtype=float)
+    sum_b2 = np.zeros(pairs, dtype=float)
+    sum_ab = np.zeros(pairs, dtype=float)
+    count = np.zeros(pairs, dtype=int)
+    for frame in range(frames):
+        slot = frame % window
+        if frame >= window:
+            old_valid = buffer_valid[slot]
+            old_a = buffer_a[slot]
+            old_b = buffer_b[slot]
+            sum_a -= np.where(old_valid, old_a.sum(axis=1), 0.0)
+            sum_b -= np.where(old_valid, old_b.sum(axis=1), 0.0)
+            sum_a2 -= np.where(old_valid, (old_a * old_a).sum(axis=1), 0.0)
+            sum_b2 -= np.where(old_valid, (old_b * old_b).sum(axis=1), 0.0)
+            sum_ab -= np.where(old_valid, (old_a * old_b).sum(axis=1), 0.0)
+            count -= old_valid.astype(int)
+        current_valid = np.asarray(valid[frame], dtype=bool)
+        current_a = np.nan_to_num(velocity_a[frame], nan=0.0)
+        current_b = np.nan_to_num(velocity_b[frame], nan=0.0)
+        buffer_a[slot] = current_a
+        buffer_b[slot] = current_b
+        buffer_valid[slot] = current_valid
+        sum_a += np.where(current_valid, current_a.sum(axis=1), 0.0)
+        sum_b += np.where(current_valid, current_b.sum(axis=1), 0.0)
+        sum_a2 += np.where(current_valid, (current_a * current_a).sum(axis=1), 0.0)
+        sum_b2 += np.where(current_valid, (current_b * current_b).sum(axis=1), 0.0)
+        sum_ab += np.where(current_valid, (current_a * current_b).sum(axis=1), 0.0)
+        count += current_valid.astype(int)
+        n = 2.0 * count.astype(float)
+        numerator = n * sum_ab - sum_a * sum_b
+        variance_a = np.maximum(n * sum_a2 - sum_a * sum_a, 0.0)
+        variance_b = np.maximum(n * sum_b2 - sum_b * sum_b, 0.0)
+        denominator = np.sqrt(variance_a * variance_b)
+        good = (count >= 4) & (denominator > 1e-9)
+        result[frame, good] = np.clip(numerator[good] / denominator[good], -1.0, 1.0)
+    return result
+
+
+def _kinematics(tracks: Mapping[str, np.ndarray], fps: float, body_length_cm: float = 8.0) -> dict[str, np.ndarray | float]:
+    valid = np.asarray(tracks["valid"], dtype=bool)
+    pose_quality = np.asarray(tracks["pose_quality"], dtype=float)
+    raw_kp = np.asarray(tracks["keypoints_px"], dtype=float)
+    raw_centers = np.asarray(tracks["centers_px"], dtype=float)
+    body_values = np.asarray(tracks["body_lengths_px"], dtype=float)
+    body_values = body_values[np.isfinite(body_values) & (body_values >= 10.0) & (body_values <= 300.0)]
+    reference_body_px = float(np.median(body_values)) if body_values.size else 60.0
+    cm_per_pixel = float(body_length_cm / max(reference_body_px, 1e-6))
+    smooth_kp = _ema_smooth_keypoints(raw_kp, valid, alpha=0.70)
+    smooth_centers = _ema_smooth(raw_centers, valid, alpha=0.70)
+    frames, mice = valid.shape
+    keypoints_cm = smooth_kp * cm_per_pixel
+    centers_cm = smooth_centers * cm_per_pixel
+    head_cm = np.full((frames, mice, 2), np.nan, dtype=float)
+    heading = np.full((frames, mice, 2), np.nan, dtype=float)
+    body_cm = np.full((frames, mice), np.nan, dtype=float)
+    for frame in range(frames):
+        for mouse in range(mice):
+            if not valid[frame, mouse]:
+                continue
+            points = keypoints_cm[frame, mouse]
+            head_cm[frame, mouse] = np.nanmean(points[[KP_NOSE, KP_LEFT_EAR, KP_RIGHT_EAR]], axis=0)
+            center = np.nanmean(points[[KP_NECK, KP_LEFT_HIP, KP_RIGHT_HIP]], axis=0)
+            if np.all(np.isfinite(center)):
+                centers_cm[frame, mouse] = center
+            axis = points[KP_NOSE] - points[KP_NECK]
+            if np.all(np.isfinite(axis)):
+                heading[frame, mouse] = _unit(axis)
+            if np.all(np.isfinite(points[[KP_NOSE, KP_TAIL]])):
+                body_cm[frame, mouse] = float(np.linalg.norm(points[KP_NOSE] - points[KP_TAIL]))
+
+    velocity = np.zeros((frames, mice, 2), dtype=float)
+    nose_velocity = np.zeros((frames, mice, 2), dtype=float)
+    acceleration = np.zeros((frames, mice), dtype=float)
+    angular_speed = np.zeros((frames, mice), dtype=float)
+    last_valid = np.full(mice, -1, dtype=int)
+    for frame in range(frames):
+        for mouse in range(mice):
+            if not valid[frame, mouse]:
+                continue
+            previous = int(last_valid[mouse])
+            if previous >= 0 and frame - previous <= 3 and np.all(np.isfinite(centers_cm[[previous, frame], mouse])):
+                dt = max(frame - previous, 1) / fps
+                velocity[frame, mouse] = (centers_cm[frame, mouse] - centers_cm[previous, mouse]) / dt
+                if np.all(np.isfinite(keypoints_cm[[previous, frame], mouse, KP_NOSE])):
+                    nose_velocity[frame, mouse] = (keypoints_cm[frame, mouse, KP_NOSE] - keypoints_cm[previous, mouse, KP_NOSE]) / dt
+                if previous > 0:
+                    acceleration[frame, mouse] = abs(
+                        np.linalg.norm(velocity[frame, mouse]) - np.linalg.norm(velocity[previous, mouse])
+                    ) / dt
+                if np.all(np.isfinite(heading[[previous, frame], mouse])):
+                    angular_speed[frame, mouse] = float(_angle_deg(heading[frame, mouse], heading[previous, mouse])) / dt
+            last_valid[mouse] = frame
+    speed = np.linalg.norm(velocity, axis=2)
+    nose_speed = np.linalg.norm(nose_velocity, axis=2)
+    velocity[~valid] = 0.0
+    speed[~valid] = 0.0
+    acceleration[~valid] = 0.0
+    angular_speed[~valid] = 0.0
+    nose_speed[~valid] = 0.0
+    return {
+        "valid": valid,
+        "pose_quality": pose_quality,
+        "keypoints_cm": keypoints_cm,
+        "centers_cm": centers_cm,
+        "head_cm": head_cm,
+        "heading": heading,
+        "body_cm": body_cm,
+        "velocity": velocity,
+        "speed": speed,
+        "nose_speed": nose_speed,
+        "acceleration": acceleration,
+        "angular_speed": angular_speed,
+        "cm_per_pixel": cm_per_pixel,
+        "reference_body_px": reference_body_px,
+    }
+
+
+def _pair_dataframe(
+    metrics: Mapping[str, Any],
+    pair_index: int,
+    mouse_a: int,
+    mouse_b: int,
+    pair_i: np.ndarray,
+    pair_j: np.ndarray,
+    fps: float,
+    cm_per_pixel: float,
+) -> pd.DataFrame:
+    valid = np.asarray(metrics["valid_pair"][:, pair_index], dtype=bool)
+    distance = np.asarray(metrics["distance"][:, pair_index], dtype=float)
+    speed = np.asarray(metrics["speed"], dtype=float)
+    nose_speed = np.asarray(metrics["nose_speed"], dtype=float)
+    acceleration = np.asarray(metrics["acceleration"], dtype=float)
+    angular = np.asarray(metrics["angular_speed"], dtype=float)
+    i, j = int(mouse_a), int(mouse_b)
+    p = len(valid)
+    direction = np.asarray(metrics["direction"][:, pair_index], dtype=float)
+    pursuit_ab = np.asarray(metrics["pursuit_ab"][:, pair_index], dtype=float)
+    pursuit_ba = np.asarray(metrics["pursuit_ba"][:, pair_index], dtype=float)
+    escape_ab = np.asarray(metrics["escape_ab"][:, pair_index], dtype=float)
+    escape_ba = np.asarray(metrics["escape_ba"][:, pair_index], dtype=float)
+    behind_ab = np.asarray(metrics["behind_ab"][:, pair_index], dtype=bool)
+    behind_ba = np.asarray(metrics["behind_ba"][:, pair_index], dtype=bool)
+    turn = np.asarray(metrics["turn"], dtype=float)
+    corr = np.asarray(metrics["trajectory_corr"][:, pair_index], dtype=float)
+    drop = np.asarray(metrics["distance_drop"][:, pair_index], dtype=float)
+    nose_body_ab = np.asarray(metrics["nose_body_ab"][:, pair_index], dtype=float)
+    nose_body_ba = np.asarray(metrics["nose_body_ba"][:, pair_index], dtype=float)
+    nose_tail_ab = np.asarray(metrics["nose_tail_ab"][:, pair_index], dtype=float)
+    nose_tail_ba = np.asarray(metrics["nose_tail_ba"][:, pair_index], dtype=float)
+    nose_head_ab = np.asarray(metrics["nose_head_ab"][:, pair_index], dtype=float)
+    nose_head_ba = np.asarray(metrics["nose_head_ba"][:, pair_index], dtype=float)
+    repeated = np.asarray(metrics["repeated_contact"][:, pair_index], dtype=int)
+    score_ab = pursuit_ab + escape_ab + 0.15 * speed[:, i]
+    score_ba = pursuit_ba + escape_ba + 0.15 * speed[:, j]
+    tie = np.abs(score_ab - score_ba) <= 0.05
+    selected_ab = score_ab >= score_ba
+    selected_actor = np.where(tie, -1, np.where(selected_ab, i, j))
+    selected_target = np.where(tie, -1, np.where(selected_ab, j, i))
+    selected_nose_body = np.where(selected_ab, nose_body_ab, nose_body_ba)
+    selected_turn = np.where(selected_ab, turn[:, j], turn[:, i])
+    closing_speed = drop / max(0.30, 1.0 / fps)
+    frame = np.arange(p, dtype=int)
+    data: dict[str, Any] = {
+        "frame": frame,
+        "time_s": frame / fps,
+        "pair_key": f"{i}_{j}",
+        "mouse_a_id": i,
+        "mouse_b_id": j,
+        "mouse_a_raw_track_id": i,
+        "mouse_b_raw_track_id": j,
+        "mouse_a_track_state": "tracked",
+        "mouse_b_track_state": "tracked",
+        "valid_pair": valid,
+        "center_distance_cm": distance,
+        "center_distance_body_lengths": distance / 8.0,
+        "head_distance_cm": np.asarray(metrics["head_distance"][:, pair_index], dtype=float),
+        "mouse_a_speed_cm_s": speed[:, i],
+        "mouse_b_speed_cm_s": speed[:, j],
+        "pose_pair_quality": np.asarray(metrics["pose_pair_quality"][:, pair_index], dtype=float),
+        "identity_pair_quality": valid.astype(float),
+        "pair_wall_jump_excluded": np.zeros(p, dtype=bool),
+        "cluster_attack_hint": np.zeros(p, dtype=bool),
+        "cluster_overlap_iou": np.zeros(p, dtype=float),
+        "cluster_motion_bl_per_frame": np.zeros(p, dtype=float),
+        "cluster_active_frames": np.zeros(p, dtype=int),
+        "selected_actor_id": selected_actor,
+        "selected_target_id": selected_target,
+        "selected_nose_body_distance_cm": selected_nose_body,
+        "selected_target_turn_angle_deg": selected_turn,
+        "selected_distance_drop_cm": drop,
+        "selected_actor_speed_cm_s": np.where(selected_ab, speed[:, i], speed[:, j]),
+        "selected_target_speed_cm_s": np.where(selected_ab, speed[:, j], speed[:, i]),
+        "selected_weak_chase_score": np.zeros(p, dtype=float),
+        "selected_strong_chase_score": np.zeros(p, dtype=float),
+        "selected_weak_attack_evidence": np.zeros(p, dtype=float),
+        "selected_strong_attack_evidence": np.zeros(p, dtype=float),
+        "weak_contact": (np.minimum(nose_body_ab, nose_body_ba) <= 4.0),
+        "strong_contact": (np.minimum(nose_body_ab, nose_body_ba) <= 3.0),
+        "weak_potential_attack": (np.minimum(nose_body_ab, nose_body_ba) <= 4.0),
+        "strong_potential_attack": (np.minimum(nose_body_ab, nose_body_ba) <= 3.0),
+        "weak_raw_chase": np.zeros(p, dtype=bool),
+        "strong_raw_chase": np.zeros(p, dtype=bool),
+        "weak_raw_attack": np.zeros(p, dtype=bool),
+        "strong_raw_attack": np.zeros(p, dtype=bool),
+        "scale_mode": "body_length",
+        "cm_per_pixel": cm_per_pixel,
+    }
+    for level in ("weak", "strong"):
+        for provider in ("strict_chase", "window_chase", "near_recovery_chase", "close_follow_chase", "strict_attack", "impulse_attack", "grapple_attack", "occlusion_overlap_attack"):
+            data[f"{level}_{provider}"] = np.zeros(p, dtype=bool)
+
+    direction_columns = {
+        "a_to_b": (i, j, pursuit_ab, escape_ab, behind_ab, turn[:, j], nose_body_ab, nose_tail_ab, nose_head_ab),
+        "b_to_a": (j, i, pursuit_ba, escape_ba, behind_ba, turn[:, i], nose_body_ba, nose_tail_ba, nose_head_ba),
+    }
+    for prefix, (actor, target, pursuit, escape, behind, target_turn, nose_body, nose_tail, nose_head) in direction_columns.items():
+        actor_speed = speed[:, actor]
+        target_speed = speed[:, target]
+        actor_nose_speed = nose_speed[:, actor]
+        target_nose_speed = nose_speed[:, target]
+        actor_acceleration = acceleration[:, actor]
+        target_acceleration = acceleration[:, target]
+        actor_angular = angular[:, actor]
+        target_angular = angular[:, target]
+        data.update({
+            f"{prefix}_actor_speed_cm_s": actor_speed,
+            f"{prefix}_target_speed_cm_s": target_speed,
+            f"{prefix}_actor_acceleration_cm_s2": actor_acceleration,
+            f"{prefix}_target_acceleration_cm_s2": target_acceleration,
+            f"{prefix}_actor_nose_speed_cm_s": actor_nose_speed,
+            f"{prefix}_target_nose_speed_cm_s": target_nose_speed,
+            f"{prefix}_actor_head_relative_speed_cm_s": np.maximum(actor_nose_speed - actor_speed, 0.0),
+            f"{prefix}_actor_angular_speed_deg_s": actor_angular,
+            f"{prefix}_target_angular_speed_deg_s": target_angular,
+            f"{prefix}_direction_similarity": direction,
+            f"{prefix}_pursuit_alignment": pursuit,
+            f"{prefix}_target_escape_alignment": escape,
+            f"{prefix}_trajectory_correlation": corr,
+            f"{prefix}_closing_speed_cm_s": closing_speed,
+            f"{prefix}_center_distance_body_lengths": distance / 8.0,
+            f"{prefix}_actor_behind_target": behind,
+            f"{prefix}_behind_score": behind.astype(float),
+            f"{prefix}_target_turn_angle_deg": target_turn,
+            f"{prefix}_nose_body_distance_cm": nose_body,
+            f"{prefix}_nose_tail_distance_cm": nose_tail,
+            f"{prefix}_nose_head_distance_cm": nose_head,
+            f"{prefix}_actor_pose_deformation_energy": np.zeros(p, dtype=float),
+            f"{prefix}_target_pose_deformation_energy": np.zeros(p, dtype=float),
+        })
+    return pd.DataFrame(data)
+
+
+def _pair_metrics(kin: Mapping[str, Any], fps: float) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
+    centers = np.asarray(kin["centers_cm"], dtype=float)
+    heads = np.asarray(kin["head_cm"], dtype=float)
+    kp = np.asarray(kin["keypoints_cm"], dtype=float)
+    heading = np.asarray(kin["heading"], dtype=float)
+    velocity = np.asarray(kin["velocity"], dtype=float)
+    valid = np.asarray(kin["valid"], dtype=bool)
+    speed = np.asarray(kin["speed"], dtype=float)
+    nose_speed = np.asarray(kin["nose_speed"], dtype=float)
+    acceleration = np.asarray(kin["acceleration"], dtype=float)
+    angular_speed = np.asarray(kin["angular_speed"], dtype=float)
+    frames, mice = valid.shape
+    pair_i, pair_j = np.triu_indices(mice, k=1)
+    pairs = len(pair_i)
+    valid_pair = valid[:, pair_i] & valid[:, pair_j]
+    delta = centers[:, pair_j] - centers[:, pair_i]
+    distance = np.linalg.norm(delta, axis=2)
+    head_distance = np.linalg.norm(heads[:, pair_j] - heads[:, pair_i], axis=2)
+    direction = _cosine(velocity[:, pair_i], velocity[:, pair_j])
+    pursuit_ab = _cosine(velocity[:, pair_i], delta)
+    pursuit_ba = _cosine(velocity[:, pair_j], -delta)
+    escape_ab = _cosine(velocity[:, pair_j], delta)
+    escape_ba = _cosine(velocity[:, pair_i], -delta)
+    behind_ab = np.sum((centers[:, pair_i] - centers[:, pair_j]) * heading[:, pair_j], axis=2) < 0.0
+    behind_ba = np.sum((centers[:, pair_j] - centers[:, pair_i]) * heading[:, pair_i], axis=2) < 0.0
+    for array in (distance, head_distance, direction, pursuit_ab, pursuit_ba, escape_ab, escape_ba):
+        array[~valid_pair] = np.nan
+    behind_ab[~valid_pair] = False
+    behind_ba[~valid_pair] = False
+
+    nose_body_ab = np.full((frames, pairs), np.nan, dtype=np.float32)
+    nose_body_ba = np.full((frames, pairs), np.nan, dtype=np.float32)
+    nose_tail_ab = np.full((frames, pairs), np.nan, dtype=np.float32)
+    nose_tail_ba = np.full((frames, pairs), np.nan, dtype=np.float32)
+    nose_head_ab = np.full((frames, pairs), np.nan, dtype=np.float32)
+    nose_head_ba = np.full((frames, pairs), np.nan, dtype=np.float32)
+    for start in range(0, frames, 500):
+        end = min(start + 500, frames)
+        body_b = kp[start:end, pair_j]
+        body_a = kp[start:end, pair_i]
+        nose_a = kp[start:end, pair_i, KP_NOSE]
+        nose_b = kp[start:end, pair_j, KP_NOSE]
+        distances_ab = np.linalg.norm(body_b - nose_a[:, :, None, :], axis=3)
+        distances_ba = np.linalg.norm(body_a - nose_b[:, :, None, :], axis=3)
+        nose_body_ab[start:end] = np.nanmin(distances_ab, axis=2)
+        nose_body_ba[start:end] = np.nanmin(distances_ba, axis=2)
+        nose_tail_ab[start:end] = np.linalg.norm(nose_a - kp[start:end, pair_j, KP_TAIL], axis=2)
+        nose_tail_ba[start:end] = np.linalg.norm(nose_b - kp[start:end, pair_i, KP_TAIL], axis=2)
+        nose_head_ab[start:end] = np.linalg.norm(nose_a - heads[start:end, pair_j], axis=2)
+        nose_head_ba[start:end] = np.linalg.norm(nose_b - heads[start:end, pair_i], axis=2)
+    nose_body_ab[~valid_pair] = np.nan
+    nose_body_ba[~valid_pair] = np.nan
+    nose_tail_ab[~valid_pair] = np.nan
+    nose_tail_ba[~valid_pair] = np.nan
+    nose_head_ab[~valid_pair] = np.nan
+    nose_head_ba[~valid_pair] = np.nan
+
+    lookback = max(int(round(fps * 0.30)), 1)
+    distance_drop = np.zeros((frames, pairs), dtype=np.float32)
+    if lookback < frames:
+        distance_drop[lookback:] = distance[:-lookback] - distance[lookback:]
+    distance_drop[~valid_pair] = 0.0
+    turn = np.zeros((frames, mice), dtype=np.float32)
+    if lookback < frames:
+        turn[lookback:] = _angle_deg(heading[lookback:], heading[:-lookback])
+    turn[~valid] = 0.0
+    velocity_a = velocity[:, pair_i]
+    velocity_b = velocity[:, pair_j]
+    trajectory_valid = valid_pair & np.all(np.isfinite(velocity_a), axis=2) & np.all(np.isfinite(velocity_b), axis=2)
+    trajectory_corr = _rolling_corr(velocity_a, velocity_b, trajectory_valid, max(int(round(fps * 2.5)), 4))
+    path_a = _rolling_sum(speed[:, pair_i], max(int(round(fps * 2.5)), 4)) / fps
+    path_b = _rolling_sum(speed[:, pair_j], max(int(round(fps * 2.5)), 4)) / fps
+    contact = np.minimum(nose_body_ab, nose_body_ba) <= 4.0
+    contact &= valid_pair
+    repeated_contact = _rolling_sum(contact.astype(float), max(int(round(fps * 2.0)), 1)).astype(np.int16)
+    pose_pair_quality = np.sqrt(
+        np.asarray(kin["pose_quality"][:, pair_i], dtype=float)
+        * np.asarray(kin["pose_quality"][:, pair_j], dtype=float)
+    )
+    pose_pair_quality[~valid_pair] = 0.0
+    metrics = {
+        "valid_pair": valid_pair,
+        "distance": distance,
+        "head_distance": head_distance,
+        "direction": direction,
+        "pursuit_ab": pursuit_ab,
+        "pursuit_ba": pursuit_ba,
+        "escape_ab": escape_ab,
+        "escape_ba": escape_ba,
+        "behind_ab": behind_ab,
+        "behind_ba": behind_ba,
+        "nose_body_ab": nose_body_ab,
+        "nose_body_ba": nose_body_ba,
+        "nose_tail_ab": nose_tail_ab,
+        "nose_tail_ba": nose_tail_ba,
+        "nose_head_ab": nose_head_ab,
+        "nose_head_ba": nose_head_ba,
+        "distance_drop": distance_drop,
+        "turn": turn,
+        "trajectory_corr": trajectory_corr,
+        "path_a": path_a,
+        "path_b": path_b,
+        "repeated_contact": repeated_contact,
+        "pose_pair_quality": pose_pair_quality,
+        "speed": np.asarray(kin["speed"], dtype=float),
+        "nose_speed": np.asarray(kin["nose_speed"], dtype=float),
+        "acceleration": np.asarray(kin["acceleration"], dtype=float),
+        "angular_speed": np.asarray(kin["angular_speed"], dtype=float),
+    }
+    return metrics, pair_i, pair_j
+
+
+def _write_csv(path: Path, rows: list[Mapping[str, Any]]) -> None:
+    if not rows:
+        pd.DataFrame().to_csv(path, index=False, encoding="utf-8-sig")
+        return
+    pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def render_behavior_video(
+    video_path: Path,
+    cache_dir: Path,
+    events_path: Path,
+    output_path: Path,
+    expected_mice: int = 20,
+    max_frames: int | None = None,
+) -> Path:
+    """Render exactly one annotated MP4 for one source video.
+
+    The renderer deliberately consumes the lightweight track IDs and event
+    CSV produced by this module.  It does not create event clips or any other
+    video outputs.
+    """
+    import cv2
+
+    total_cache_frames = _cache_total_frames(cache_dir)
+    if max_frames is not None:
+        total_cache_frames = min(total_cache_frames, max(int(max_frames), 1))
+    tracks, tracking_stats = _track_cache(cache_dir, total_cache_frames, expected_mice)
+
+    event_frame_map: list[list[dict[str, Any]]] = [
+        [] for _ in range(total_cache_frames)
+    ]
+    if not events_path.exists():
+        raise FileNotFoundError(f"行为事件 CSV 不存在: {events_path}")
+    events_df = pd.read_csv(events_path)
+    required = {"start_frame", "end_frame", "candidate_level", "behavior"}
+    missing = sorted(required.difference(events_df.columns))
+    if missing:
+        raise ValueError(f"行为事件 CSV 缺少字段: {missing}")
+    for event in events_df.to_dict("records"):
+        try:
+            start = max(int(event.get("start_frame", 0)), 0)
+            end = min(int(event.get("end_frame", -1)), total_cache_frames - 1)
+        except (TypeError, ValueError):
+            continue
+        if end < start:
+            continue
+        for frame_index in range(start, end + 1):
+            event_frame_map[frame_index].append(event)
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"无法打开源视频: {video_path}")
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    video_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if width <= 0 or height <= 0:
+        cap.release()
+        raise RuntimeError(f"无法读取源视频尺寸: {video_path}")
+    if not np.isfinite(fps) or fps <= 0:
+        fps = 29.329
+    frame_limit = total_cache_frames
+    if video_frame_count > 0:
+        frame_limit = min(frame_limit, video_frame_count)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"无法创建渲染视频: {output_path}")
+
+    skeleton_edges = SKELETON_EDGES
+    default_color = (80, 220, 80)
+    role_colors = {
+        ("strong", "chase", "actor"): (0, 165, 255),
+        ("strong", "chase", "target"): (255, 140, 0),
+        ("strong", "attack", "actor"): (0, 0, 255),
+        ("strong", "attack", "target"): (255, 0, 255),
+        ("weak", "chase", "actor"): (0, 215, 255),
+        ("weak", "chase", "target"): (255, 200, 80),
+        ("weak", "attack", "actor"): (80, 80, 255),
+        ("weak", "attack", "target"): (255, 100, 200),
+    }
+
+    frame_index = 0
+    try:
+        while frame_index < frame_limit:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            active_events = event_frame_map[frame_index]
+            # Keep one best row per pair/level/behavior so overlapping FSM
+            # rows do not cover the whole top panel.
+            best_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for event in active_events:
+                key = (
+                    str(event.get("candidate_level", "weak")),
+                    str(event.get("behavior", "")),
+                    str(event.get("pair_key", "")),
+                )
+                previous = best_by_key.get(key)
+                if previous is None or float(event.get("peak_score", 0.0)) > float(previous.get("peak_score", 0.0)):
+                    best_by_key[key] = event
+            display_events = sorted(
+                best_by_key.values(),
+                key=lambda item: (
+                    0 if str(item.get("candidate_level")) == "strong" else 1,
+                    -float(item.get("peak_score", 0.0)),
+                ),
+            )
+
+            role_map: dict[int, tuple[int, tuple[int, int, int]]] = {}
+            active_actor_ids: set[int] = set()
+            active_target_ids: set[int] = set()
+            for event in display_events:
+                level = str(event.get("candidate_level", "weak"))
+                behavior = str(event.get("behavior", ""))
+                priority = 2 if level == "strong" else 1
+                for role_name, column in (("actor", "actor_id"), ("target", "target_id")):
+                    try:
+                        logical_id = int(event.get(column, -1))
+                    except (TypeError, ValueError):
+                        logical_id = -1
+                    if logical_id < 0 or logical_id >= expected_mice:
+                        continue
+                    if role_name == "actor":
+                        active_actor_ids.add(logical_id)
+                    else:
+                        active_target_ids.add(logical_id)
+                    old = role_map.get(logical_id)
+                    if old is None or priority > old[0]:
+                        role_map[logical_id] = (
+                            priority,
+                            role_colors.get((level, behavior, role_name), default_color),
+                        )
+
+            for logical_id in range(expected_mice):
+                if not bool(tracks["valid"][frame_index, logical_id]):
+                    continue
+                bbox = np.asarray(tracks["bboxes"][frame_index, logical_id], dtype=float)
+                points = np.asarray(tracks["keypoints_px"][frame_index, logical_id], dtype=float)
+                confidence = np.asarray(tracks["confidences"][frame_index, logical_id], dtype=float)
+                if bbox.shape != (4,) or not np.all(np.isfinite(bbox)):
+                    continue
+                x1 = max(0, min(width - 1, int(round(float(bbox[0])))))
+                y1 = max(0, min(height - 1, int(round(float(bbox[1])))))
+                x2 = max(0, min(width - 1, int(round(float(bbox[2])))))
+                y2 = max(0, min(height - 1, int(round(float(bbox[3])))))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                role_info = role_map.get(logical_id)
+                color = role_info[1] if role_info is not None else default_color
+                thickness = 3 if role_info is not None else 1
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+                role_suffix = ""
+                if role_info is not None:
+                    if logical_id in active_actor_ids and logical_id in active_target_ids:
+                        role_suffix = " A/T"
+                    elif logical_id in active_actor_ids:
+                        role_suffix = " A"
+                    else:
+                        role_suffix = " T"
+                label = f"ID{logical_id}{role_suffix}"
+                (text_w, text_h), baseline = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
+                )
+                label_y = max(text_h + baseline + 2, y1)
+                cv2.rectangle(
+                    frame,
+                    (x1, label_y - text_h - baseline - 2),
+                    (x1 + text_w + 4, label_y + 2),
+                    (0, 0, 0),
+                    -1,
+                )
+                cv2.putText(
+                    frame,
+                    label,
+                    (x1 + 2, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
+                for first, second in skeleton_edges:
+                    if (
+                        first < len(points)
+                        and second < len(points)
+                        and first < len(confidence)
+                        and second < len(confidence)
+                        and float(confidence[first]) >= 0.10
+                        and float(confidence[second]) >= 0.10
+                        and np.all(np.isfinite(points[first]))
+                        and np.all(np.isfinite(points[second]))
+                    ):
+                        p1 = tuple(np.rint(points[first]).astype(int).tolist())
+                        p2 = tuple(np.rint(points[second]).astype(int).tolist())
+                        cv2.line(frame, p1, p2, color, 1, cv2.LINE_AA)
+                for point, point_conf in zip(points, confidence):
+                    if float(point_conf) >= 0.10 and np.all(np.isfinite(point)):
+                        cv2.circle(
+                            frame,
+                            tuple(np.rint(point).astype(int).tolist()),
+                            2,
+                            color,
+                            -1,
+                            cv2.LINE_AA,
+                        )
+
+            panel_lines = [
+                f"frame {frame_index}/{frame_limit - 1}  time {frame_index / fps:.2f}s",
+                f"active events: {len(active_events)}  unique displayed: {len(display_events)}",
+            ]
+            for event in display_events[:8]:
+                level = str(event.get("candidate_level", "weak")).upper()
+                behavior = str(event.get("behavior", "")).upper()
+                pair = str(event.get("pair_key", ""))
+                score = float(event.get("peak_score", 0.0))
+                panel_lines.append(f"{level} {behavior} {pair}  score={score:.3f}")
+            panel_height = 12 + 22 * len(panel_lines)
+            cv2.rectangle(frame, (8, 8), (min(width - 8, 720), panel_height), (0, 0, 0), -1)
+            for line_index, line in enumerate(panel_lines):
+                cv2.putText(
+                    frame,
+                    line,
+                    (18, 30 + line_index * 22),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.52,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+            cv2.putText(
+                frame,
+                "green=tracked  orange/blue=chase  red/magenta=attack  A=actor T=target",
+                (12, height - 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            writer.write(frame)
+            frame_index += 1
+            if frame_index == 1 or frame_index % 500 == 0 or frame_index == frame_limit:
+                print(
+                    f"[render] {frame_index}/{frame_limit} frames ({frame_index / max(frame_limit, 1) * 100:.1f}%)",
+                    flush=True,
+                )
+    finally:
+        cap.release()
+        writer.release()
+    if frame_index <= 0 or not output_path.exists() or output_path.stat().st_size <= 0:
+        raise RuntimeError(f"渲染没有产生有效视频: {output_path}")
+    print(
+        f"[render] completed: {output_path} ({output_path.stat().st_size / (1024 ** 3):.2f} GB)",
+        flush=True,
+    )
+    return output_path
+
+
+FOUR_CLASS_NAMES = {
+    0: "00_非追逐非攻击",
+    1: "01_非攻击性追逐",
+    2: "02_非追逐攻击",
+    3: "03_攻击性追逐",
+}
+
+
+def _boolean_runs(values: np.ndarray) -> list[tuple[int, int]]:
+    values = np.asarray(values, dtype=bool)
+    if values.size == 0:
+        return []
+    starts = np.flatnonzero(values & np.r_[True, ~values[:-1]])
+    ends = np.flatnonzero(values & np.r_[~values[1:], True])
+    return [(int(start), int(end)) for start, end in zip(starts, ends)]
+
+
+def _clip_intervals_from_state(
+    state: np.ndarray,
+    label_id: int,
+    fps: float,
+    clip_seconds: float,
+    min_start_interval_seconds: float,
+    max_clips: int,
+) -> list[tuple[int, int]]:
+    total_frames = int(len(state))
+    clip_frames = max(int(round(float(clip_seconds) * fps)), 1)
+    min_interval = max(int(round(float(min_start_interval_seconds) * fps)), 1)
+    if total_frames < clip_frames or max_clips <= 0:
+        return []
+
+    intervals: list[tuple[int, int]] = []
+    if label_id == 0:
+        # Class 0 is sampled only from windows with no strong chase/attack
+        # state anywhere in the clip.  These are raw source frames, not
+        # rendered or annotated negatives.
+        for start in range(0, total_frames - clip_frames + 1, min_interval):
+            end = start + clip_frames - 1
+            if bool(np.all(state[start : end + 1] == 0)):
+                intervals.append((int(start), int(end)))
+                if len(intervals) >= max_clips:
+                    break
+        return intervals
+
+    for run_start, run_end in _boolean_runs(state == label_id):
+        center = (run_start + run_end) // 2
+        start = max(0, min(center - clip_frames // 2, total_frames - clip_frames))
+        end = start + clip_frames - 1
+        if intervals and start - intervals[-1][0] < min_interval:
+            continue
+        intervals.append((int(start), int(end)))
+        if len(intervals) >= max_clips:
+            break
+    return intervals
+
+
+def extract_four_class_clips(
+    video_path: Path,
+    events_path: Path,
+    output_dir: Path,
+    expected_level: str = "strong",
+    clip_seconds: float = 5.0,
+    min_start_interval_seconds: float = 5.0,
+    max_clips_per_class: int = 200,
+) -> Path:
+    """Extract raw source clips into the four mutually exclusive classes.
+
+    Class IDs follow the established extractor contract:
+    ``chase + 2 * attack`` -> 0/1/2/3.  This function never draws boxes,
+    skeletons, IDs, labels, or overlays; it writes only source-video crops.
+    """
+    import cv2
+
+    expected_level = str(expected_level).strip().lower()
+    if expected_level not in {"weak", "strong"}:
+        raise ValueError("expected_level 必须是 weak 或 strong")
+    if not events_path.exists():
+        raise FileNotFoundError(f"行为事件 CSV 不存在: {events_path}")
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"无法打开源视频: {video_path}")
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    if not np.isfinite(fps) or fps <= 0 or total_frames <= 0 or width <= 0 or height <= 0:
+        raise RuntimeError(
+            f"源视频元数据无效: fps={fps}, frames={total_frames}, size={width}x{height}"
+        )
+
+    events_df = pd.read_csv(events_path)
+    required = {"start_frame", "end_frame", "candidate_level", "behavior"}
+    missing = sorted(required.difference(events_df.columns))
+    if missing:
+        raise ValueError(f"行为事件 CSV 缺少字段: {missing}")
+
+    chase = np.zeros(total_frames, dtype=bool)
+    attack = np.zeros(total_frames, dtype=bool)
+    used_event_rows = 0
+    for event in events_df.to_dict("records"):
+        if str(event.get("candidate_level", "")).strip().lower() != expected_level:
+            continue
+        behavior = str(event.get("behavior", "")).strip().lower()
+        if behavior not in {"chase", "attack"}:
+            continue
+        try:
+            start = max(int(event.get("start_frame", 0)), 0)
+            end = min(int(event.get("end_frame", -1)), total_frames - 1)
+        except (TypeError, ValueError):
+            continue
+        if end < start:
+            continue
+        if behavior == "chase":
+            chase[start : end + 1] = True
+        else:
+            attack[start : end + 1] = True
+        used_event_rows += 1
+
+    state = chase.astype(np.int8) + 2 * attack.astype(np.int8)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for class_name in FOUR_CLASS_NAMES.values():
+        (output_dir / class_name).mkdir(parents=True, exist_ok=True)
+
+    intervals: list[dict[str, Any]] = []
+    per_class_counts: dict[int, int] = {}
+    for label_id, class_name in FOUR_CLASS_NAMES.items():
+        selected = _clip_intervals_from_state(
+            state,
+            label_id,
+            fps,
+            clip_seconds,
+            min_start_interval_seconds,
+            max_clips_per_class,
+        )
+        per_class_counts[label_id] = len(selected)
+        for clip_index, (start, end) in enumerate(selected, start=1):
+            path = output_dir / class_name / (
+                f"{class_name}_{clip_index:04d}_{start / fps:.2f}s_{end / fps:.2f}s.mp4"
+            )
+            intervals.append(
+                {
+                    "clip_index": clip_index,
+                    "label_id": label_id,
+                    "label_name": class_name,
+                    "start_frame": start,
+                    "end_frame": end,
+                    "start_time_s": start / fps,
+                    "end_time_s": end / fps,
+                    "duration_s": (end - start + 1) / fps,
+                    "path": str(path),
+                    "source_video": str(video_path),
+                    "source_events": str(events_path),
+                    "event_level": expected_level,
+                }
+            )
+
+    # One sequential source read serves every clip; no annotations are drawn.
+    start_map: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for interval in intervals:
+        start_map[int(interval["start_frame"])].append(interval)
+    active: dict[str, tuple[Any, dict[str, Any]]] = {}
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"无法重新打开源视频: {video_path}")
+    frame_index = 0
+    try:
+        while frame_index < total_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            for interval in start_map.get(frame_index, []):
+                writer = cv2.VideoWriter(
+                    interval["path"],
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    fps,
+                    (width, height),
+                )
+                if not writer.isOpened():
+                    writer.release()
+                    raise RuntimeError(f"无法创建分类片段: {interval['path']}")
+                active[interval["path"]] = (writer, interval)
+            finished: list[str] = []
+            for path, (writer, interval) in active.items():
+                writer.write(frame)
+                if frame_index >= int(interval["end_frame"]):
+                    writer.release()
+                    finished.append(path)
+            for path in finished:
+                active.pop(path, None)
+            frame_index += 1
+            if frame_index == 1 or frame_index % 1000 == 0 or frame_index == total_frames:
+                print(
+                    f"[four-class clips] source {frame_index}/{total_frames} frames",
+                    flush=True,
+                )
+    finally:
+        cap.release()
+        for writer, _interval in active.values():
+            writer.release()
+
+    manifest_path = output_dir / "four_class_clip_manifest.csv"
+    _write_csv(manifest_path, intervals)
+    summary = {
+        "source_video": str(video_path),
+        "events_csv": str(events_path),
+        "event_level": expected_level,
+        "fps": fps,
+        "source_frames": total_frames,
+        "clip_seconds": float(clip_seconds),
+        "min_start_interval_seconds": float(min_start_interval_seconds),
+        "max_clips_per_class": int(max_clips_per_class),
+        "used_event_rows": int(used_event_rows),
+        "state_frame_counts": {
+            FOUR_CLASS_NAMES[label_id]: int((state == label_id).sum())
+            for label_id in FOUR_CLASS_NAMES
+        },
+        "clip_counts": {
+            FOUR_CLASS_NAMES[label_id]: int(per_class_counts.get(label_id, 0))
+            for label_id in FOUR_CLASS_NAMES
+        },
+        "rendered_video": False,
+    }
+    with (output_dir / "four_class_clip_summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, ensure_ascii=False, indent=2)
+    print(
+        "[four-class clips] completed: "
+        + ", ".join(
+            f"{FOUR_CLASS_NAMES[label_id]}={per_class_counts.get(label_id, 0)}"
+            for label_id in FOUR_CLASS_NAMES
+        ),
+        flush=True,
+    )
+    return output_dir
+
+
+def _interaction_radius(config: Mapping[str, Any]) -> float:
+    engine_cfg = dict(config.get("standard_behavior_engine", {}))
+    interaction_cfg = dict(engine_cfg.get("interaction_graph", {}))
+    if "radius_cm" in interaction_cfg:
+        return float(interaction_cfg["radius_cm"])
+    chase_cfg = config.get("chase", {})
+    attack_cfg = config.get("attack", {})
+    weak_chase = dict(chase_cfg.get("weak", {}))
+    weak_attack = dict(attack_cfg.get("weak", {}))
+    return max(
+        float(weak_chase.get("max_distance_cm", 12.0)),
+        float(weak_attack.get("body_center_contact_distance_cm", 6.0)),
+    ) + float(interaction_cfg.get("buffer_cm", 5.0))
+
+
+def analyze(
+    video_path: Path,
+    cache_dir: Path,
+    config_path: Path,
+    output_dir: Path,
+    expected_mice: int = 20,
+    max_frames: int | None = None,
+    sample_stride: int = 1,
+    fps_override: float | None = None,
+) -> Path:
+    started = time.perf_counter()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    if not isinstance(config, dict):
+        raise ValueError(f"配置不是 YAML 对象: {config_path}")
+    configured_fps = config.pop("_fps_override", 29.329)
+    source_fps = float(configured_fps if fps_override is None else fps_override)
+    if not np.isfinite(source_fps) or source_fps <= 0.0:
+        raise ValueError(f"视频 FPS 必须是正数，实际为：{source_fps}")
+    sample_stride = max(int(sample_stride), 1)
+    total_frames = _cache_total_frames(cache_dir)
+    if max_frames is not None:
+        total_frames = min(total_frames, max(int(max_frames), 1))
+    tracks, tracking_stats = _track_cache(cache_dir, total_frames, expected_mice)
+    if sample_stride > 1:
+        tracks = {
+            key: (value[::sample_stride] if isinstance(value, np.ndarray) and value.ndim > 0 else value)
+            for key, value in tracks.items()
+        }
+    analysis_frames = int(tracks["valid"].shape[0])
+    fps = source_fps / sample_stride
+    kin = _kinematics(tracks, fps=fps)
+    metrics, pair_i, pair_j = _pair_metrics(kin, fps)
+    events: list[dict[str, Any]] = []
+    pair_summaries: list[dict[str, Any]] = []
+    top_evidence: list[dict[str, Any]] = []
+    interaction_radius = _interaction_radius(config)
+    candidate_pair_indices = [
+        pair_index
+        for pair_index in range(len(pair_i))
+        if np.any(
+            np.isfinite(metrics["distance"][:, pair_index])
+            & (metrics["distance"][:, pair_index] <= interaction_radius)
+        )
+    ]
+    candidate_pair_set = set(candidate_pair_indices)
+    print(
+        f"[pair filter] {len(candidate_pair_indices)}/{len(pair_i)} pairs within {interaction_radius:.2f} cm",
+        flush=True,
+    )
+    for pair_index, (mouse_a, mouse_b) in enumerate(zip(pair_i, pair_j)):
+        base_summary: dict[str, Any] = {
+            "pair_key": f"{int(mouse_a)}_{int(mouse_b)}",
+            "mouse_a_id": int(mouse_a),
+            "mouse_b_id": int(mouse_b),
+            "valid_frames": int(np.asarray(metrics["valid_pair"][:, pair_index], dtype=bool).sum()),
+            "min_distance_cm": float(np.nanmin(metrics["distance"][:, pair_index]))
+            if np.isfinite(metrics["distance"][:, pair_index]).any()
+            else float("nan"),
+            "max_speed_cm_s": float(
+                max(
+                    float(np.asarray(metrics["speed"][:, int(mouse_a)]).max(initial=0.0)),
+                    float(np.asarray(metrics["speed"][:, int(mouse_b)]).max(initial=0.0)),
+                )
+            ),
+            "engine_evaluated": pair_index in candidate_pair_set,
+        }
+        if pair_index not in candidate_pair_set:
+            for level in ("weak", "strong"):
+                for behavior in ("chase", "attack"):
+                    base_summary[f"{level}_{behavior}_frames"] = 0
+                    base_summary[f"{level}_{behavior}_max_score"] = 0.0
+                    base_summary[f"{level}_{behavior}_role_known_rate"] = None
+            pair_summaries.append(base_summary)
+            continue
+        if pair_index == 0 or pair_index % 20 == 0 or pair_index == len(pair_i) - 1:
+            print(
+                f"[pair analysis] pair {pair_index + 1}/{len(pair_i)} ({len(pair_summaries) + 1}/{len(candidate_pair_indices)} candidates)",
+                flush=True,
+            )
+        pair_df = _pair_dataframe(
+            metrics,
+            pair_index,
+            int(mouse_a),
+            int(mouse_b),
+            pair_i,
+            pair_j,
+            fps,
+            float(kin["cm_per_pixel"]),
+        )
+        enriched = behavior_engine.apply_standard_behavior_engine(pair_df, fps, config)
+        summary = base_summary
+        for level in ("weak", "strong"):
+            for behavior in ("chase", "attack"):
+                mask_col = f"{level}_standard_final_{behavior}"
+                score_col = f"{level}_standard_{behavior}_score"
+                actor_col = f"{level}_standard_{behavior}_actor_id"
+                target_col = f"{level}_standard_{behavior}_target_id"
+                active = enriched[mask_col].fillna(False).astype(bool) if mask_col in enriched else pd.Series(False, index=enriched.index)
+                summary[f"{level}_{behavior}_frames"] = int(active.sum())
+                summary[f"{level}_{behavior}_max_score"] = float(enriched[score_col].max()) if score_col in enriched else 0.0
+                if active.any() and actor_col in enriched and target_col in enriched:
+                    known = (pd.to_numeric(enriched.loc[active, actor_col], errors="coerce") >= 0) & (pd.to_numeric(enriched.loc[active, target_col], errors="coerce") >= 0)
+                    summary[f"{level}_{behavior}_role_known_rate"] = float(known.mean())
+                else:
+                    summary[f"{level}_{behavior}_role_known_rate"] = None
+            for event in behavior_engine.extract_standard_behavior_events(
+                enriched, fps, level, pair_key=f"{int(mouse_a)}_{int(mouse_b)}"
+            ):
+                    event = dict(event)
+                    event["source_video"] = str(video_path)
+                    event["analysis_mode"] = "lightweight_cache_tracking"
+                    event["analysis_start_frame"] = int(event.get("start_frame", 0))
+                    event["analysis_peak_frame"] = int(event.get("peak_frame", 0))
+                    event["analysis_end_frame"] = int(event.get("end_frame", 0))
+                    event["start_frame"] = int(event.get("start_frame", 0)) * sample_stride
+                    event["peak_frame"] = int(event.get("peak_frame", 0)) * sample_stride
+                    event["end_frame"] = int(event.get("end_frame", 0)) * sample_stride
+                    events.append(event)
+        for behavior in ("chase", "attack"):
+            score_column = f"strong_standard_{behavior}_score"
+            if score_column not in enriched:
+                continue
+            candidate = enriched[["frame", "time_s", "pair_key", "center_distance_cm", score_column]].copy()
+            candidate["behavior"] = behavior
+            candidate["level"] = "strong"
+            candidate = candidate.rename(columns={score_column: "score"})
+            evidence_rows = candidate.nlargest(5, "score").to_dict("records")
+            for row in evidence_rows:
+                row["analysis_frame"] = int(row["frame"])
+                row["source_frame"] = int(row["frame"]) * sample_stride
+                row["source_time_s"] = float(row["frame"]) * sample_stride / source_fps
+            top_evidence.extend(evidence_rows)
+        pair_summaries.append(summary)
+
+    for index, event in enumerate(sorted(events, key=lambda item: (int(item.get("start_frame", 0)), str(item.get("pair_key", "")), str(item.get("level", "")))), start=1):
+        event["light_event_id"] = f"LWE{index:05d}"
+        event["start_time_s"] = float(event.get("start_frame", 0)) / source_fps
+        event["end_time_s"] = float(event.get("end_frame", 0)) / source_fps
+        event["duration_s"] = (
+            float(event.get("end_frame", 0) - event.get("start_frame", 0) + 1) / source_fps
+        )
+
+    _write_csv(output_dir / "lightweight_behavior_events.csv", events)
+    _write_csv(output_dir / "lightweight_pair_summary.csv", pair_summaries)
+    _write_csv(output_dir / "lightweight_top_evidence.csv", top_evidence)
+    metadata = {
+        "source_video": str(video_path),
+        "yolo_cache": str(cache_dir),
+        "config": str(config_path),
+        "analysis_mode": "lightweight_cache_tracking",
+        "full_pipeline_not_run": True,
+        "tracker": "position_plus_keypoint_hungarian",
+        "expected_mice": int(expected_mice),
+        "source_frames": int(total_frames),
+        "analysis_frames": int(analysis_frames),
+        "source_fps": float(source_fps),
+        "analysis_fps": float(fps),
+        "sample_stride": int(sample_stride),
+        "duration_s": float(total_frames / source_fps),
+        "cm_per_pixel": float(kin["cm_per_pixel"]),
+        "reference_body_px": float(kin["reference_body_px"]),
+        "tracking": tracking_stats,
+        "event_counts": {
+            f"{level}_{behavior}": int(
+                sum(
+                    1
+                    for event in events
+                    if event.get("candidate_level") == level
+                    and event.get("behavior") == behavior
+                )
+            )
+            for level in ("weak", "strong")
+            for behavior in ("chase", "attack")
+        },
+        "notes": [
+            "仅读取指定视频的完整 YOLO 预推理缓存，没有读取其他行为目录。",
+            "该结果用于当前长视频的快速行为筛查；它不包含完整流水线的遮挡簇 ReID、ROI Pose 恢复和伪掩码身份保护。",
+            "新视频没有人工行为标签，因此不能据此计算 Precision、Recall、F1 或 actor/target accuracy；事件中的角色 ID 和 role confidence 仅是模型诊断。",
+        ],
+        "interaction_radius_cm": float(interaction_radius),
+        "candidate_pair_count": int(len(candidate_pair_indices)),
+        "total_pair_count": int(len(pair_i)),
+        "elapsed_s": float(time.perf_counter() - started),
+    }
+    with (output_dir / "lightweight_analysis_metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    return output_dir
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--video", type=Path, required=True)
+    parser.add_argument("--yolo-cache", type=Path, required=True)
+    parser.add_argument("--config", type=Path, required=False)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--fps", type=float, required=False)
+    parser.add_argument("--expected-mice", type=int, default=20)
+    parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument(
+        "--sample-stride",
+        type=int,
+        default=3,
+        help="Analyze every Nth cached frame; FPS is reduced by the same factor.",
+    )
+    parser.add_argument(
+        "--render-only",
+        action="store_true",
+        help="只读取已有事件 CSV，输出一个带框/骨架/行为标签的 MP4，不生成事件片段。",
+    )
+    parser.add_argument(
+        "--events",
+        type=Path,
+        default=None,
+        help="已有 lightweight_behavior_events.csv；render-only 时默认从 output-dir 读取。",
+    )
+    parser.add_argument(
+        "--render-output",
+        type=Path,
+        default=None,
+        help="render-only 的唯一 MP4 输出路径。",
+    )
+    parser.add_argument(
+        "--extract-four-class-clips",
+        action="store_true",
+        help="只从已有事件 CSV 裁剪四类原始视频，不生成渲染视频。",
+    )
+    parser.add_argument(
+        "--clip-level",
+        choices=("weak", "strong"),
+        default="strong",
+        help="四类裁剪使用 weak 或 strong 事件层，默认 strong。",
+    )
+    parser.add_argument(
+        "--clips-output",
+        type=Path,
+        default=None,
+        help="四类视频输出目录；默认 output-dir/四类视频。",
+    )
+    parser.add_argument(
+        "--clip-seconds",
+        type=float,
+        default=5.0,
+        help="每个原始视频片段的长度，默认 5 秒。",
+    )
+    parser.add_argument(
+        "--max-clips-per-class",
+        type=int,
+        default=200,
+        help="每类最多输出的片段数，默认 200。",
+    )
+    args = parser.parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.render_only:
+        events_path = args.events or (args.output_dir / "lightweight_behavior_events.csv")
+        render_output = args.render_output or (args.output_dir / "part001_追逐攻击渲染.mp4")
+        render_behavior_video(
+            args.video,
+            args.yolo_cache,
+            events_path,
+            render_output,
+            expected_mice=max(int(args.expected_mice), 2),
+            max_frames=args.max_frames,
+        )
+        print(render_output)
+        return 0
+
+    if args.extract_four_class_clips:
+        events_path = args.events or (args.output_dir / "lightweight_behavior_events.csv")
+        clips_output = args.clips_output or (args.output_dir / "四类视频")
+        extract_four_class_clips(
+            args.video,
+            events_path,
+            clips_output,
+            expected_level=args.clip_level,
+            clip_seconds=max(float(args.clip_seconds), 0.1),
+            max_clips_per_class=max(int(args.max_clips_per_class), 1),
+        )
+        print(clips_output)
+        return 0
+
+    if args.config is None or args.fps is None:
+        parser.error("普通分析模式需要同时提供 --config 和 --fps；渲染已有结果请使用 --render-only。")
+    # Keep the function signature self-contained while passing the video FPS.
+    with args.config.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    if not isinstance(config, dict):
+        raise ValueError(f"invalid YAML: {args.config}")
+    config["_fps_override"] = float(args.fps)
+    temp_config = args.output_dir / ".lightweight_runtime_config.yaml"
+    with temp_config.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle, allow_unicode=True, sort_keys=False)
+    try:
+        result_dir = analyze(
+            args.video,
+            args.yolo_cache,
+            temp_config,
+            args.output_dir,
+            expected_mice=max(int(args.expected_mice), 2),
+            max_frames=args.max_frames,
+            sample_stride=max(int(args.sample_stride), 1),
+        )
+        metadata_path = result_dir / "lightweight_analysis_metadata.json"
+        with metadata_path.open("r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        metadata["config"] = str(args.config)
+        with metadata_path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    finally:
+        temp_config.unlink(missing_ok=True)
+    print(args.output_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

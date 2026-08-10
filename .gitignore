@@ -1,0 +1,72 @@
+# Python bytecode and local test state
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments and packaging artifacts
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# Video, model, detector cache, and large binary data
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.webm
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+*.pkl
+*.pickle
+*.npz
+*.npy
+*.db
+*.sqlite
+*.sqlite3
+weights/
+yolo_precompute/
+*_precompute/
+
+# Generated analysis outputs
+outputs/
+output/
+results/
+正式分析结果/
+四类视频/
+four_class_clips/
+lightweight_behavior_events.csv
+lightweight_pair_summary.csv
+lightweight_top_evidence.csv
+lightweight_analysis_metadata.json
+.lightweight_runtime_config.yaml
+*.log
+*.tmp
+
+# Local backup folders created by installation scripts
+backup_before_*/
+
+# Windows and editor files
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+
+# Credentials and private material
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.*
+credentials.*

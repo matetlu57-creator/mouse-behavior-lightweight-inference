@@ -1,0 +1,37 @@
+v1.42.1 FINAL VALIDATION
+Date: 2026-08-10
+
+[1] compileall
+PASS
+
+[2] pytest
+.....                                                                    [100%]
+5 passed in 7.00s
+
+[3] regression_performance_test
+REGRESSION: PASS
+derived_geometry_old_seconds=0.670486
+derived_geometry_new_seconds=0.002339
+derived_geometry_speedup=286.653812
+pair_features_old_seconds=2.384488
+pair_features_new_seconds=0.851042
+pair_features_speedup=2.801844
+pair_store_old_seconds=1.677022
+pair_store_new_seconds=0.033755
+pair_store_speedup=49.682389
+
+[4] identity_cascade_fuzz
+IDENTITY CASCADE FUZZ: PASS 50/50 exact matrices
+candidate_density_min=0.085000
+candidate_density_max=0.440000
+
+[5] yaml parse
+PASS
+
+[6] NVENC/OpenCV writer smoke
+nvenc_runtime_available= False
+writer_class= OpenCVWriter
+PASS bytes= 958
+
+[7] git diff --check equivalent whitespace check
+PASS

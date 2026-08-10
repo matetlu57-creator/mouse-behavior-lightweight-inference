@@ -1,0 +1,316 @@
+# Mouse Behavior Lightweight Inference
+
+`mouse-behavior-lightweight-inference` 是一个面向多鼠行为视频的轻量推理与离线行为分析项目。当前默认路径针对已经完成的 YOLO Pose 预推理缓存，执行轻量的个体匹配、关键点几何特征、追逐/攻击行为判定和四类原始视频裁剪。
+
+这个仓库保存源代码、配置、测试和运行文档，不保存实验视频、模型权重、YOLO 缓存或大体积分析结果。
+
+## 1. 当前版本和工作边界
+
+当前代码以 v1.43 Standard Behavior Engine 的行为判定逻辑为基础，并增加了 `lightweight_behavior_inference.py` 作为新的主入口。
+
+当前默认执行链为：
+
+```text
+已完成的 YOLO Pose 缓存
+        ↓
+轻量位置 + 关键点匹配
+        ↓
+Pair 级运动学与接触特征
+        ↓
+追逐 / 攻击连续证据与时序 FSM
+        ↓
+四类行为标签
+        ↓
+四类原始视频片段（默认不渲染）
+```
+
+轻量路径的设计目标是减少长视频分析中不必要的重型阶段。它不会重新运行完整的遮挡恢复、Mask、ReID、ROI 二次推理和完整视频渲染，也不宣称替代完整追踪管线。输入缓存必须已经存在；如果没有缓存，应先在外部完成 YOLO Pose 预推理。
+
+项目重命名范围如下：
+
+- 项目/仓库标识从旧的版本化目录名统一为 `mouse-behavior-lightweight-inference`。
+- 轻量分析实现的正式文件名为 `lightweight_behavior_inference.py`。
+- `lightweight_cache_behavior_analysis.py` 保留为兼容入口，旧脚本、旧笔记本和旧命令仍可通过它调用新实现。
+- `mouse_chase_attack_high_recall.py`、`mouse_chase_attack_extractor_base.py` 等历史文件名暂时保留，因为测试、旧配置和完整管线仍引用这些名字；这不是重复实现，而是为了避免升级时破坏现有调用关系。
+
+## 2. 行为标签
+
+四类标签由追逐和攻击两个独立的布尔结果组合得到：
+
+| 标签 | 含义 | 组合规则 |
+| --- | --- | --- |
+| `00_non_chase_non_attack` | 非追逐、非攻击 | `chase = false` 且 `attack = false` |
+| `01_non_aggressive_chase` | 非攻击性追逐 | `chase = true` 且 `attack = false` |
+| `02_non_chase_attack` | 非追逐攻击 | `chase = false` 且 `attack = true` |
+| `03_aggressive_chase` | 攻击性追逐 | `chase = true` 且 `attack = true` |
+
+四类裁剪只使用事件 CSV 和原始视频，不在片段上绘制检测框、ID、骨架或行为标签。当前任务要求的“不开启渲染”由配置 `render_video: false` 和运行脚本的无渲染路径共同保证。
+
+## 3. 骨架连接关系
+
+轻量模块使用用户提供参考图对应的 7 点、8 条连线。关键点索引为：
+
+```text
+0 nose
+1 left ear
+2 right ear
+3 neck
+4 left hip
+5 right hip
+6 tail
+```
+
+连线为：
+
+```text
+nose      -> left ear
+nose      -> right ear
+left ear  -> neck
+right ear -> neck
+neck      -> left hip
+neck      -> right hip
+left hip  -> tail
+right hip -> tail
+```
+
+这组边定义位于 `lightweight_behavior_inference.py` 的 `SKELETON_EDGES` 常量中。渲染函数如后续启用，也使用同一组连接关系，不会另行使用旧的骨架拓扑。
+
+## 4. 仓库结构
+
+```text
+.
+├─ lightweight_behavior_inference.py       # 轻量单视频分析主入口
+├─ lightweight_cache_behavior_analysis.py  # 旧模块名兼容层
+├─ standard_behavior_engine.py             # 标准追逐/攻击行为引擎
+├─ mouse_chase_attack_config.yaml           # 行为阈值和运行开关
+├─ mouse_chase_attack_high_recall.py       # 完整管线兼容入口/集成入口
+├─ mouse_chase_attack_extractor_base.py    # 原有提取器基础代码
+├─ mask_trigger_controller.py              # 原有 Mask 触发控制模块
+├─ nvenc_video_writer.py                    # NVENC 写视频辅助模块
+├─ calibrate_standard_behavior.py          # 离线阈值校准工具
+├─ sweep_standard_behavior.py              # 缓存特征上的阈值扫描工具
+├─ run_lightweight_behavior_inference.ps1  # Windows 轻量分析脚本
+├─ run_stage1_stage2.ps1                   # 完整流程兼容脚本
+├─ tests/                                   # 单元、回归和性能测试
+├─ historical_v1.40_v1.41/                 # 历史工程资料
+├─ historical_v1.42.1/                     # v1.42.1 资料
+├─ original/                                # 原始版本备份
+├─ requirements.txt                         # 运行依赖
+└─ requirements-dev.txt                     # 测试依赖
+```
+
+`historical_*` 和 `original/` 用于审计与回归对照，不应作为当前运行入口。视频、权重、缓存和生成结果由 `.gitignore` 排除。
+
+## 5. 环境安装
+
+推荐使用已经安装 PyTorch/YOLO 依赖的 Conda 环境；轻量行为分析本身只需要 Python 科学计算和 OpenCV 依赖。
+
+```powershell
+conda activate pytorch
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
+```
+
+如果环境中已经存在这些包，不需要重复安装。Windows PowerShell 直接运行脚本时，可以使用：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+```
+
+这只影响当前 PowerShell 进程，不会永久修改系统执行策略。
+
+## 6. 快速运行：轻量行为分析
+
+输入需要两个路径：
+
+1. 原始视频路径；
+2. 对应视频的已完成 `yolo_precompute` 缓存目录。
+
+### 6.1 直接调用 Python
+
+```powershell
+python .\lightweight_behavior_inference.py `
+  --video "D:\data\part_001.mp4" `
+  --yolo-cache "D:\cache\part_001\yolo_precompute" `
+  --config .\mouse_chase_attack_config.yaml `
+  --output-dir .\outputs\part_001 `
+  --fps 29.329 `
+  --expected-mice 20 `
+  --sample-stride 3
+```
+
+默认会生成行为事件 CSV、Pair 汇总、证据摘要和元数据 JSON。该命令不会生成渲染视频。
+
+需要逐帧分析、优先提高召回率时，把采样步长改成 1：
+
+```powershell
+python .\lightweight_behavior_inference.py `
+  --video "D:\data\part_001.mp4" `
+  --yolo-cache "D:\cache\part_001\yolo_precompute" `
+  --config .\mouse_chase_attack_config.yaml `
+  --output-dir .\outputs\part_001_stride1 `
+  --fps 29.329 `
+  --expected-mice 20 `
+  --sample-stride 1
+```
+
+`sample_stride=3` 是当前速度与召回率的折中默认值；它不是经过所有行为类别人工标注数据最终校准的科学结论。阈值冻结前仍应使用代表性人工标注视频计算 Precision、Recall、F1 和 actor/target accuracy。
+
+### 6.2 使用 PowerShell 包装脚本
+
+包装脚本已经去除本机专属的输入路径，运行时必须显式传入视频和缓存：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\run_lightweight_behavior_inference.ps1 `
+  -Python "D:\Anaconda3\envs\pytorch\python.exe" `
+  -Video "D:\data\part_001.mp4" `
+  -YoloCache "D:\cache\part_001\yolo_precompute" `
+  -Output ".\outputs\part_001" `
+  -Fps 29.329 `
+  -ExpectedMice 20 `
+  -SampleStride 3
+```
+
+如果只做行为分析而不裁剪四类视频，可以增加 `-NoClips`。当前脚本不会触发渲染。
+
+## 7. 四类原始视频裁剪
+
+如果事件 CSV 已经存在，可以只执行裁剪：
+
+```powershell
+python .\lightweight_behavior_inference.py `
+  --video "D:\data\part_001.mp4" `
+  --yolo-cache "D:\cache\part_001\yolo_precompute" `
+  --output-dir .\outputs\part_001 `
+  --extract-four-class-clips `
+  --clip-level strong `
+  --clip-seconds 5 `
+  --max-clips-per-class 200 `
+  --clips-output .\outputs\part_001\four_class_clips
+```
+
+`--clip-level` 可以选择 `weak` 或 `strong`。当前默认使用 `strong`，每类最多 200 个片段，默认片段长度 5 秒，并通过最小起始间隔减少同一事件的重复切片。裁剪输出目录可自定义，建议使用 ASCII 目录名以避免旧版 Windows PowerShell 的编码问题。
+
+## 8. 输出文件
+
+典型输出目录如下：
+
+```text
+outputs/part_001/
+├─ lightweight_analysis_metadata.json
+├─ lightweight_behavior_events.csv
+├─ lightweight_pair_summary.csv
+├─ lightweight_top_evidence.csv
+└─ four_class_clips/
+   ├─ 00_non_chase_non_attack/
+   ├─ 01_non_aggressive_chase/
+   ├─ 02_non_chase_attack/
+   └─ 03_aggressive_chase/
+```
+
+元数据会记录视频、缓存、FPS、采样步长、鼠只数量、分析帧数、运行耗时、启用的行为路径、是否渲染以及轻量路径的限制。事件 CSV 至少应包含事件级别、方向、起止帧/时间、actor、target、weak/strong 证据和四类组合结果，具体字段以当前代码版本为准。
+
+## 9. 配置开关
+
+`mouse_chase_attack_config.yaml` 中的当前默认配置为：
+
+```yaml
+lightweight_behavior_inference:
+  enabled: true
+  expected_mice: 20
+  sample_stride: 3
+  extract_four_class_clips: true
+  clip_level: strong
+  clip_seconds: 5.0
+  max_clips_per_class: 200
+  render_video: false
+```
+
+重要约束：
+
+- `render_video: false`：当前阶段不渲染视频；
+- `extract_four_class_clips: true`：只输出四类原始片段，不画框、不画骨架、不画标签；
+- `sample_stride: 3`：默认每 3 个缓存帧分析 1 帧；逐帧高召回使用 1；
+- `expected_mice: 20`：用于限制轻量匹配轨迹数量；
+- `--full-behavior`：仅在完整管线所需依赖均已提供且确实需要时使用；
+- `--lightweight-behavior`：显式强制轻量路径。
+
+行为阈值仍位于 `standard_behavior_engine` 相关配置中，不能仅凭当前默认值宣称最终准确率。真正的阈值校准流程必须使用用户的追逐、攻击、普通接触、扭打和遮挡人工标签视频。
+
+## 10. 阈值校准和评估
+
+推荐把评估拆成事件检测与角色判断两部分：
+
+```text
+事件级：Precision / Recall / F1 / onset offset error
+角色级：actor accuracy / target accuracy / ambiguous-role rate
+误报分析：普通接触误判攻击、同向共行误判追逐、遮挡期间重复事件
+```
+
+`calibrate_standard_behavior.py` 用于离线校准和生成结构化结果；`sweep_standard_behavior.py` 用于在已缓存的 Pair 特征上扫描选定阈值。使用时应固定视频划分、模型、FPS、采样步长和追踪配置，避免把同一视频同时用于阈值选择和最终测试。
+
+最终报告至少应记录：
+
+- 每个行为类别的 TP、FP、FN、Precision、Recall 和 F1；
+- 事件起始和结束时间误差；
+- actor/target 正确率与不确定角色比例；
+- 四类组合标签的混淆矩阵；
+- 不同采样步长对召回率、误报率和耗时的影响；
+- 普通接触、扭打和遮挡片段的单独结果。
+
+## 11. 验证状态
+
+在本地整理前的最近一次代码验证记录为：
+
+- `pytest`：15 个测试通过；
+- `compileall` 和关键模块语法检查：通过；
+- YAML/FSM 不变量检查：通过；
+- Identity Cascade fuzz：50/50 通过；
+- 标准行为引擎的持续追逐、攻击因果链、低质量观测保护、四类纯组合和骨架几何性质测试：通过；
+- 真实视频上的 Precision、Recall、F1、actor/target accuracy：尚未作为仓库级科学验收冻结；
+- 完整旧管线的实际运行：当前源码目录缺少 `disk_sequence_guard.py`、`pose_quality_recovery.py`、`mask_cluster_reid.py` 和 `adaptive_arena_boundary.py` 等外部/未随本目录提供的模块，因此优先使用轻量缓存入口。
+
+验证命令：
+
+```powershell
+python -m pytest -q
+python -m py_compile lightweight_behavior_inference.py standard_behavior_engine.py
+```
+
+## 12. CPU、GPU 与渲染说明
+
+轻量离线分析本身主要使用 CPU：缓存读取、轻量轨迹匹配、Pair 特征、FSM 和四类视频裁剪均在 CPU 上完成。GPU 只会出现在生成 YOLO Pose 缓存的上游阶段；如果缓存已经存在，轻量入口不会重新加载 YOLO 模型，也不会重复执行重型检测。
+
+当前阶段不渲染。若未来需要渲染，应单独调用 `--render-only` 并显式指定唯一的 `--render-output` MP4；渲染不应与四类原始片段输出混在一起，也不应把渲染结果提交到 Git。
+
+## 13. 上传边界与隐私
+
+本仓库只上传：
+
+- Python 源码、PowerShell 脚本和 YAML 配置；
+- 单元测试、回归工具和工程说明；
+- 依赖清单、README 和 Git 忽略规则。
+
+本仓库不上传：
+
+- 原始/渲染视频和四类视频片段；
+- YOLO、PyTorch 或其他模型权重；
+- `yolo_precompute`、pickle、numpy、SQLite 等缓存；
+- 本地分析 CSV、JSON、日志和输出目录；
+- 私钥、环境变量文件、个人凭据；
+- 依赖用户本地环境但未包含在本目录的完整管线模块。
+
+上传前应检查：
+
+```powershell
+git status --short
+git diff --stat
+git ls-files
+```
+
+如果需要公开仓库，建议再次检查代码中的实验路径、机构名称、视频文件名和任何本地账号信息；当前仓库按 Private 方式发布。
+
+## 14. 许可证和使用责任
+
+当前仓库暂未声明开源许可证，因此不应默认将代码当作可再分发的开源软件。行为识别结果应经过人工抽检和代表性标注集验证后再用于科研结论或自动化决策。
