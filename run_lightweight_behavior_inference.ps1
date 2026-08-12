@@ -7,7 +7,8 @@ param(
     [double]$Fps = 29.329,
     [int]$ExpectedMice = 20,
     [int]$SampleStride = 3,
-    [switch]$NoClips
+    [switch]$NoClips,
+    [switch]$ExtractFourClassClips
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,7 +65,7 @@ if ($LASTEXITCODE -ne 0) {
     throw ("Lightweight behavior inference failed; exit code: " + $LASTEXITCODE)
 }
 
-if (-not $NoClips) {
+if ($ExtractFourClassClips -and -not $NoClips) {
     Write-Host "=== Extracting four raw video classes ==="
     & $Python @ClipArguments
     if ($LASTEXITCODE -ne 0) {

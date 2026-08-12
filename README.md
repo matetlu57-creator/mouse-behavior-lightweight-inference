@@ -1,6 +1,6 @@
 # Mouse Behavior Lightweight Inference
 
-`mouse-behavior-lightweight-inference` 是一个面向多鼠行为视频的轻量推理与离线行为分析项目。当前默认路径针对已经完成的 YOLO Pose 预推理缓存，执行轻量的个体匹配、关键点几何特征、追逐/攻击行为判定和四类原始视频裁剪。
+`mouse-behavior-lightweight-inference` 是一个面向多鼠行为视频的轻量推理与离线行为分析项目。当前默认路径针对已经完成的 YOLO Pose 预推理缓存，执行轻量的个体匹配、关键点几何特征、鼻头/鼻尾接触识别以及追逐/攻击行为判定。
 
 这个仓库保存源代码、配置、测试和运行文档，不保存实验视频、模型权重、YOLO 缓存或大体积分析结果。
 
@@ -17,11 +17,11 @@
         ↓
 Pair 级运动学与接触特征
         ↓
+鼻头/鼻尾接触事件 CSV
+        ↓
 追逐 / 攻击连续证据与时序 FSM
         ↓
-四类行为标签
-        ↓
-四类原始视频片段（默认不渲染）
+独立的 chase / attack 行为事件 CSV
 ```
 
 轻量路径的设计目标是减少长视频分析中不必要的重型阶段。它不会重新运行完整的遮挡恢复、Mask、ReID、ROI 二次推理和完整视频渲染，也不宣称替代完整追踪管线。输入缓存必须已经存在；如果没有缓存，应先在外部完成 YOLO Pose 预推理。
@@ -33,18 +33,18 @@ Pair 级运动学与接触特征
 - `lightweight_cache_behavior_analysis.py` 保留为兼容入口，旧脚本、旧笔记本和旧命令仍可通过它调用新实现。
 - `mouse_chase_attack_high_recall.py`、`mouse_chase_attack_extractor_base.py` 等历史文件名暂时保留，因为测试、旧配置和完整管线仍引用这些名字；这不是重复实现，而是为了避免升级时破坏现有调用关系。
 
-## 2. 行为标签
+## 2. 行为标签和接触输出
 
-四类标签由追逐和攻击两个独立的布尔结果组合得到：
+轻量路径的主分类器现在只输出两个行为类别：`chase`（追逐）和 `attack`（攻击）。鼻头/鼻尾接触是独立的几何事件流，不是第三类攻击，也不会因为接触本身打开攻击 FSM：
 
-| 标签 | 含义 | 组合规则 |
+| 输出 | 含义 |
 | --- | --- | --- |
-| `00_non_chase_non_attack` | 非追逐、非攻击 | `chase = false` 且 `attack = false` |
-| `01_non_aggressive_chase` | 非攻击性追逐 | `chase = true` 且 `attack = false` |
-| `02_non_chase_attack` | 非追逐攻击 | `chase = false` 且 `attack = true` |
-| `03_aggressive_chase` | 攻击性追逐 | `chase = true` 且 `attack = true` |
+| `chase` | 通过追逐连续证据和追逐 FSM 确认的追逐事件 |
+| `attack` | 通过“发起 → 接触 → 反应”因果链和攻击 FSM 确认的攻击事件 |
+| `nose_head` | 一只鼠的鼻头接近另一只鼠的头部关键点，达到接触距离 |
+| `nose_tail` | 一只鼠的鼻头接近另一只鼠的尾部关键点，达到接触距离 |
 
-四类裁剪只使用事件 CSV 和原始视频，不在片段上绘制检测框、ID、骨架或行为标签。当前任务要求的“不开启渲染”由配置 `render_video: false` 和运行脚本的无渲染路径共同保证。
+主行为事件写入 `lightweight_behavior_events.csv`；接触事件写入独立的 `lightweight_contact_events.csv`。若一帧同时满足鼻头和鼻尾距离门，会写为 `nose_head_and_nose_tail`，并在 `contact_type_components` 中保留两个组成类型。四分类裁剪函数仍作为旧命令的显式兼容入口保留，但当前轻量默认配置不会再调用它。
 
 ## 3. 骨架连接关系
 
@@ -91,6 +91,8 @@ right hip -> tail
 ├─ sweep_standard_behavior.py              # 缓存特征上的阈值扫描工具
 ├─ run_lightweight_behavior_inference.ps1  # Windows 轻量分析脚本
 ├─ run_stage1_stage2.ps1                   # 完整流程兼容脚本
+├─ weights/                                 # 下载 Release 后放置的本地权重目录
+│  └─ README.md
 ├─ tests/                                   # 单元、回归和性能测试
 ├─ historical_v1.40_v1.41/                 # 历史工程资料
 ├─ historical_v1.42.1/                     # v1.42.1 资料
@@ -99,7 +101,18 @@ right hip -> tail
 └─ requirements-dev.txt                     # 测试依赖
 ```
 
-`historical_*` 和 `original/` 用于审计与回归对照，不应作为当前运行入口。视频、权重、缓存和生成结果由 `.gitignore` 排除。
+`historical_*` 和 `original/` 用于审计与回归对照，不应作为当前运行入口。视频、缓存和生成结果由 `.gitignore` 排除；模型权重作为本仓库 Release 附件发布。
+
+## 4.1 模型权重
+
+仓库 Release 随附当前上游检测流程使用的两份权重：
+
+| 文件 | 用途 |
+|---|---|
+| `pose_best.pt` | 下载后放到 `weights/pose/best.pt`，YOLO Pose 关键点模型 |
+| `obb_best.pt` | 下载后放到 `weights/obb/best.pt`，OBB 小鼠检测模型 |
+
+两份权重作为本仓库公开 Release 的二进制附件发布（每份约 53 MB），不会把大二进制塞进源码树。下载 Release 中的 `pose_best.pt` 和 `obb_best.pt` 后，分别重命名并放到 `weights/pose/best.pt`、`weights/obb/best.pt`。轻量入口只分析已有 `yolo_precompute` 缓存，因此不会因为读取缓存而重复加载模型；上游生成缓存或运行完整流程时，再把模型路径指向上述文件。
 
 ## 5. 环境安装
 
@@ -172,9 +185,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -SampleStride 3
 ```
 
-如果只做行为分析而不裁剪四类视频，可以增加 `-NoClips`。当前脚本不会触发渲染。
+当前脚本默认只做行为和接触分析，不触发四类裁剪，也不会触发渲染。若需要兼容旧流程的四类原始片段，显式增加 `-ExtractFourClassClips`。
 
-## 7. 四类原始视频裁剪
+## 7. 兼容性的四类原始视频裁剪
 
 如果事件 CSV 已经存在，可以只执行裁剪：
 
@@ -199,17 +212,13 @@ python .\lightweight_behavior_inference.py `
 ```text
 outputs/part_001/
 ├─ lightweight_analysis_metadata.json
-├─ lightweight_behavior_events.csv
+├─ lightweight_behavior_events.csv       # 只含 chase / attack
+├─ lightweight_contact_events.csv        # nose_head / nose_tail 接触
 ├─ lightweight_pair_summary.csv
-├─ lightweight_top_evidence.csv
-└─ four_class_clips/
-   ├─ 00_non_chase_non_attack/
-   ├─ 01_non_aggressive_chase/
-   ├─ 02_non_chase_attack/
-   └─ 03_aggressive_chase/
+└─ lightweight_top_evidence.csv
 ```
 
-元数据会记录视频、缓存、FPS、采样步长、鼠只数量、分析帧数、运行耗时、启用的行为路径、是否渲染以及轻量路径的限制。事件 CSV 至少应包含事件级别、方向、起止帧/时间、actor、target、weak/strong 证据和四类组合结果，具体字段以当前代码版本为准。
+只有显式使用 `--extract-four-class-clips` 或 `-ExtractFourClassClips` 时，才会额外生成旧四类原始片段目录。元数据会记录视频、缓存、FPS、采样步长、鼠只数量、分析帧数、运行耗时、启用的行为路径、接触事件统计、是否渲染以及轻量路径的限制。
 
 ## 9. 配置开关
 
@@ -220,7 +229,7 @@ lightweight_behavior_inference:
   enabled: true
   expected_mice: 20
   sample_stride: 3
-  extract_four_class_clips: true
+  extract_four_class_clips: false
   clip_level: strong
   clip_seconds: 5.0
   max_clips_per_class: 200
@@ -230,7 +239,7 @@ lightweight_behavior_inference:
 重要约束：
 
 - `render_video: false`：当前阶段不渲染视频；
-- `extract_four_class_clips: true`：只输出四类原始片段，不画框、不画骨架、不画标签；
+- `extract_four_class_clips: false`：默认不再运行四分类裁剪；需要旧兼容输出时显式开启；
 - `sample_stride: 3`：默认每 3 个缓存帧分析 1 帧；逐帧高召回使用 1；
 - `expected_mice: 20`：用于限制轻量匹配轨迹数量；
 - `--full-behavior`：仅在完整管线所需依赖均已提供且确实需要时使用；
@@ -255,7 +264,7 @@ lightweight_behavior_inference:
 - 每个行为类别的 TP、FP、FN、Precision、Recall 和 F1；
 - 事件起始和结束时间误差；
 - actor/target 正确率与不确定角色比例；
-- 四类组合标签的混淆矩阵；
+- chase/attack 二分类混淆矩阵，以及 nose_head/nose_tail 接触类型的混淆矩阵；
 - 不同采样步长对召回率、误报率和耗时的影响；
 - 普通接触、扭打和遮挡片段的单独结果。
 
@@ -267,7 +276,7 @@ lightweight_behavior_inference:
 - `compileall` 和关键模块语法检查：通过；
 - YAML/FSM 不变量检查：通过；
 - Identity Cascade fuzz：50/50 通过；
-- 标准行为引擎的持续追逐、攻击因果链、低质量观测保护、四类纯组合和骨架几何性质测试：通过；
+- 标准行为引擎的持续追逐、攻击因果链、低质量观测保护、接触与行为分离和骨架几何性质测试：通过；
 - 真实视频上的 Precision、Recall、F1、actor/target accuracy：尚未作为仓库级科学验收冻结；
 - 完整旧管线的实际运行：当前源码目录缺少 `disk_sequence_guard.py`、`pose_quality_recovery.py`、`mask_cluster_reid.py` 和 `adaptive_arena_boundary.py` 等外部/未随本目录提供的模块，因此优先使用轻量缓存入口。
 
@@ -280,7 +289,7 @@ python -m py_compile lightweight_behavior_inference.py standard_behavior_engine.
 
 ## 12. CPU、GPU 与渲染说明
 
-轻量离线分析本身主要使用 CPU：缓存读取、轻量轨迹匹配、Pair 特征、FSM 和四类视频裁剪均在 CPU 上完成。GPU 只会出现在生成 YOLO Pose 缓存的上游阶段；如果缓存已经存在，轻量入口不会重新加载 YOLO 模型，也不会重复执行重型检测。
+轻量离线分析本身主要使用 CPU：缓存读取、轻量轨迹匹配、Pair 特征、接触事件分段和 FSM 均在 CPU 上完成。兼容性的四类视频裁剪只有显式开启时才在 CPU 上执行。GPU 只会出现在生成 YOLO Pose 缓存的上游阶段；如果缓存已经存在，轻量入口不会重新加载 YOLO 模型，也不会重复执行重型检测。
 
 当前阶段不渲染。若未来需要渲染，应单独调用 `--render-only` 并显式指定唯一的 `--render-output` MP4；渲染不应与四类原始片段输出混在一起，也不应把渲染结果提交到 Git。
 
@@ -290,12 +299,12 @@ python -m py_compile lightweight_behavior_inference.py standard_behavior_engine.
 
 - Python 源码、PowerShell 脚本和 YAML 配置；
 - 单元测试、回归工具和工程说明；
+- GitHub Release 中明确列出的两份模型权重；
 - 依赖清单、README 和 Git 忽略规则。
 
 本仓库不上传：
 
 - 原始/渲染视频和四类视频片段；
-- YOLO、PyTorch 或其他模型权重；
 - `yolo_precompute`、pickle、numpy、SQLite 等缓存；
 - 本地分析 CSV、JSON、日志和输出目录；
 - 私钥、环境变量文件、个人凭据；

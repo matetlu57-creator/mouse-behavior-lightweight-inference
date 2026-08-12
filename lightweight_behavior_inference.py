@@ -981,11 +981,266 @@ def _pair_metrics(kin: Mapping[str, Any], fps: float) -> tuple[dict[str, Any], n
     return metrics, pair_i, pair_j
 
 
-def _write_csv(path: Path, rows: list[Mapping[str, Any]]) -> None:
+def _write_csv(
+    path: Path,
+    rows: list[Mapping[str, Any]],
+    columns: Sequence[str] | None = None,
+) -> None:
+    """Write a UTF-8 CSV while preserving the schema for empty results."""
     if not rows:
-        pd.DataFrame().to_csv(path, index=False, encoding="utf-8-sig")
+        pd.DataFrame(columns=list(columns or [])).to_csv(
+            path,
+            index=False,
+            encoding="utf-8-sig",
+        )
         return
-    pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
+    frame = pd.DataFrame(rows)
+    if columns:
+        for column in columns:
+            if column not in frame.columns:
+                frame[column] = pd.NA
+        frame = frame.loc[:, list(columns)]
+    frame.to_csv(path, index=False, encoding="utf-8-sig")
+
+
+CONTACT_EVENT_COLUMNS = (
+    "contact_event_id",
+    "contact_detector",
+    "pair_key",
+    "contact_type",
+    "contact_type_components",
+    "contact_direction",
+    "contact_actor_id",
+    "contact_target_id",
+    "role_ambiguous",
+    "analysis_start_frame",
+    "analysis_peak_frame",
+    "analysis_end_frame",
+    "start_frame",
+    "peak_frame",
+    "end_frame",
+    "start_time_s",
+    "end_time_s",
+    "duration_s",
+    "sample_count",
+    "min_contact_distance_cm",
+    "mean_contact_distance_cm",
+    "min_nose_head_distance_cm",
+    "min_nose_tail_distance_cm",
+    "source_video",
+    "analysis_mode",
+)
+
+
+def _contact_distance(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float("inf")
+    return number if np.isfinite(number) else float("inf")
+
+
+def _contact_components(
+    nose_head_distance: float,
+    nose_tail_distance: float,
+    nose_head_threshold: float,
+    nose_tail_threshold: float,
+) -> tuple[str, ...]:
+    components: list[str] = []
+    if nose_head_distance <= nose_head_threshold:
+        components.append("nose_head")
+    if nose_tail_distance <= nose_tail_threshold:
+        components.append("nose_tail")
+    return tuple(components)
+
+
+def _extract_contact_events(
+    pair_df: pd.DataFrame,
+    *,
+    pair_key: str,
+    source_video: Path,
+    source_fps: float,
+    sample_stride: int,
+    contact_config: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Extract nose-head and nose-tail contacts independently of behavior.
+
+    Contact is deliberately not a behavior class.  It is a geometric event
+    stream that can coexist with a chase or an attack, while ordinary contact
+    alone never opens either behavior FSM.  The event state is evaluated at
+    every analyzed sample and consecutive samples with the same contact
+    geometry are grouped into one event.
+    """
+    if pair_df.empty or not bool(contact_config.get("enabled", True)):
+        return []
+
+    source_fps = max(float(source_fps), 1e-9)
+    sample_stride = max(int(sample_stride), 1)
+    nose_head_threshold = max(
+        float(contact_config.get("nose_head_distance_cm", contact_config.get("distance_cm", 3.0))),
+        0.0,
+    )
+    nose_tail_threshold = max(
+        float(contact_config.get("nose_tail_distance_cm", contact_config.get("distance_cm", 3.0))),
+        0.0,
+    )
+
+    frame_values = pd.to_numeric(
+        pair_df.get("frame", pd.Series(range(len(pair_df)))),
+        errors="coerce",
+    ).fillna(-1).astype(int).to_numpy()
+    states: list[dict[str, Any] | None] = []
+    direction_specs = (
+        ("a_to_b", "mouse_a_id", "mouse_b_id"),
+        ("b_to_a", "mouse_b_id", "mouse_a_id"),
+    )
+
+    for row in pair_df.to_dict("records"):
+        valid_pair = row.get("valid_pair", True)
+        try:
+            valid_pair = bool(valid_pair) and not bool(pd.isna(valid_pair))
+        except (TypeError, ValueError):
+            valid_pair = False
+        if not valid_pair:
+            states.append(None)
+            continue
+
+        direction_hits: list[dict[str, Any]] = []
+        for direction, actor_column, target_column in direction_specs:
+            head_distance = _contact_distance(row.get(f"{direction}_nose_head_distance_cm"))
+            tail_distance = _contact_distance(row.get(f"{direction}_nose_tail_distance_cm"))
+            components = _contact_components(
+                head_distance,
+                tail_distance,
+                nose_head_threshold,
+                nose_tail_threshold,
+            )
+            if not components:
+                continue
+            try:
+                actor_id = int(row.get(actor_column, -1))
+                target_id = int(row.get(target_column, -1))
+            except (TypeError, ValueError):
+                actor_id, target_id = -1, -1
+            direction_hits.append(
+                {
+                    "direction": direction,
+                    "actor_id": actor_id,
+                    "target_id": target_id,
+                    "components": components,
+                    "head_distance": head_distance,
+                    "tail_distance": tail_distance,
+                }
+            )
+
+        if not direction_hits:
+            states.append(None)
+            continue
+
+        components = tuple(
+            name
+            for name in ("nose_head", "nose_tail")
+            if any(name in hit["components"] for hit in direction_hits)
+        )
+        contact_type = (
+            "nose_head_and_nose_tail"
+            if len(components) == 2
+            else components[0]
+        )
+        directions = tuple(hit["direction"] for hit in direction_hits)
+        if len(directions) == 1:
+            contact_direction = directions[0]
+            contact_actor_id = int(direction_hits[0]["actor_id"])
+            contact_target_id = int(direction_hits[0]["target_id"])
+        else:
+            contact_direction = "both"
+            contact_actor_id = -1
+            contact_target_id = -1
+
+        head_distances = [hit["head_distance"] for hit in direction_hits]
+        tail_distances = [hit["tail_distance"] for hit in direction_hits]
+        contact_distances = [min(head_distances), min(tail_distances)]
+        states.append(
+            {
+                "contact_type": contact_type,
+                "contact_type_components": ";".join(components),
+                "contact_direction": contact_direction,
+                "contact_actor_id": contact_actor_id,
+                "contact_target_id": contact_target_id,
+                "role_ambiguous": bool(contact_actor_id < 0 or contact_target_id < 0),
+                "contact_distance_cm": min(contact_distances),
+                "nose_head_distance_cm": min(head_distances),
+                "nose_tail_distance_cm": min(tail_distances),
+            }
+        )
+
+    def state_key(state: Mapping[str, Any] | None) -> tuple[Any, ...] | None:
+        if state is None:
+            return None
+        return (
+            state["contact_type"],
+            state["contact_type_components"],
+            state["contact_direction"],
+            state["contact_actor_id"],
+            state["contact_target_id"],
+        )
+
+    events: list[dict[str, Any]] = []
+    index = 0
+    while index < len(states):
+        if states[index] is None:
+            index += 1
+            continue
+        start = index
+        key = state_key(states[index])
+        while index + 1 < len(states) and state_key(states[index + 1]) == key:
+            index += 1
+        end = index
+        segment = [state for state in states[start : end + 1] if state is not None]
+        assert segment
+        distances = np.asarray([state["contact_distance_cm"] for state in segment], dtype=float)
+        peak_offset = int(np.argmin(distances)) if len(distances) else 0
+        analysis_start = int(frame_values[start])
+        analysis_peak = int(frame_values[start + peak_offset])
+        analysis_end = int(frame_values[end])
+        source_start = analysis_start * sample_stride
+        source_peak = analysis_peak * sample_stride
+        source_end = analysis_end * sample_stride
+        events.append(
+            {
+                "contact_detector": "nose_head_nose_tail_geometry",
+                "pair_key": str(pair_key),
+                "contact_type": segment[0]["contact_type"],
+                "contact_type_components": segment[0]["contact_type_components"],
+                "contact_direction": segment[0]["contact_direction"],
+                "contact_actor_id": int(segment[0]["contact_actor_id"]),
+                "contact_target_id": int(segment[0]["contact_target_id"]),
+                "role_ambiguous": bool(segment[0]["role_ambiguous"]),
+                "analysis_start_frame": analysis_start,
+                "analysis_peak_frame": analysis_peak,
+                "analysis_end_frame": analysis_end,
+                "start_frame": source_start,
+                "peak_frame": source_peak,
+                "end_frame": source_end,
+                "start_time_s": source_start / source_fps,
+                "end_time_s": source_end / source_fps,
+                "duration_s": (source_end - source_start + 1) / source_fps,
+                "sample_count": len(segment),
+                "min_contact_distance_cm": float(np.min(distances)),
+                "mean_contact_distance_cm": float(np.mean(distances)),
+                "min_nose_head_distance_cm": float(
+                    min(state["nose_head_distance_cm"] for state in segment)
+                ),
+                "min_nose_tail_distance_cm": float(
+                    min(state["nose_tail_distance_cm"] for state in segment)
+                ),
+                "source_video": str(source_video),
+                "analysis_mode": "lightweight_cache_tracking",
+            }
+        )
+        index += 1
+
+    return events
 
 
 def render_behavior_video(
@@ -1581,6 +1836,7 @@ def analyze(
     kin = _kinematics(tracks, fps=fps)
     metrics, pair_i, pair_j = _pair_metrics(kin, fps)
     events: list[dict[str, Any]] = []
+    contact_events: list[dict[str, Any]] = []
     pair_summaries: list[dict[str, Any]] = []
     top_evidence: list[dict[str, Any]] = []
     interaction_radius = _interaction_radius(config)
@@ -1613,6 +1869,10 @@ def analyze(
                 )
             ),
             "engine_evaluated": pair_index in candidate_pair_set,
+            "nose_head_contact_event_count": 0,
+            "nose_tail_contact_event_count": 0,
+            "combined_nose_head_nose_tail_event_count": 0,
+            "contact_sample_count": 0,
         }
         if pair_index not in candidate_pair_set:
             for level in ("weak", "strong"):
@@ -1637,8 +1897,35 @@ def analyze(
             fps,
             float(kin["cm_per_pixel"]),
         )
+        pair_contact_events = _extract_contact_events(
+            pair_df,
+            pair_key=f"{int(mouse_a)}_{int(mouse_b)}",
+            source_video=video_path,
+            source_fps=source_fps,
+            sample_stride=sample_stride,
+            contact_config=dict(config.get("contact_detection", {})),
+        )
+        contact_events.extend(pair_contact_events)
         enriched = behavior_engine.apply_standard_behavior_engine(pair_df, fps, config)
         summary = base_summary
+        summary["nose_head_contact_event_count"] = int(
+            sum(
+                "nose_head" in str(event.get("contact_type_components", "")).split(";")
+                for event in pair_contact_events
+            )
+        )
+        summary["nose_tail_contact_event_count"] = int(
+            sum(
+                "nose_tail" in str(event.get("contact_type_components", "")).split(";")
+                for event in pair_contact_events
+            )
+        )
+        summary["combined_nose_head_nose_tail_event_count"] = int(
+            sum(event.get("contact_type") == "nose_head_and_nose_tail" for event in pair_contact_events)
+        )
+        summary["contact_sample_count"] = int(
+            sum(int(event.get("sample_count", 0)) for event in pair_contact_events)
+        )
         for level in ("weak", "strong"):
             for behavior in ("chase", "attack"):
                 mask_col = f"{level}_standard_final_{behavior}"
@@ -1690,7 +1977,25 @@ def analyze(
             float(event.get("end_frame", 0) - event.get("start_frame", 0) + 1) / source_fps
         )
 
+    for index, event in enumerate(
+        sorted(
+            contact_events,
+            key=lambda item: (
+                int(item.get("start_frame", 0)),
+                str(item.get("pair_key", "")),
+                str(item.get("contact_type", "")),
+            ),
+        ),
+        start=1,
+    ):
+        event["contact_event_id"] = f"LCE{index:05d}"
+
     _write_csv(output_dir / "lightweight_behavior_events.csv", events)
+    _write_csv(
+        output_dir / "lightweight_contact_events.csv",
+        contact_events,
+        columns=CONTACT_EVENT_COLUMNS,
+    )
     _write_csv(output_dir / "lightweight_pair_summary.csv", pair_summaries)
     _write_csv(output_dir / "lightweight_top_evidence.csv", top_evidence)
     metadata = {
@@ -1727,9 +2032,21 @@ def analyze(
             for level in ("weak", "strong")
             for behavior in ("chase", "attack")
         },
+        "contact_event_counts": {
+            contact_type: int(
+                sum(event.get("contact_type") == contact_type for event in contact_events)
+            )
+            for contact_type in (
+                "nose_head",
+                "nose_tail",
+                "nose_head_and_nose_tail",
+            )
+        },
+        "contact_event_csv": str(output_dir / "lightweight_contact_events.csv"),
         "notes": [
             "仅读取指定视频的完整 YOLO 预推理缓存，没有读取其他行为目录。",
             "该结果用于当前长视频的快速行为筛查；它不包含完整流水线的遮挡簇 ReID、ROI Pose 恢复和伪掩码身份保护。",
+            "主行为事件 CSV 只输出 chase/attack；鼻头/鼻尾接触写入独立 lightweight_contact_events.csv，不会单独升级为 attack。",
             "新视频没有人工行为标签，因此不能据此计算 Precision、Recall、F1 或 actor/target accuracy；事件中的角色 ID 和 role confidence 仅是模型诊断。",
         ],
         "interaction_radius_cm": float(interaction_radius),

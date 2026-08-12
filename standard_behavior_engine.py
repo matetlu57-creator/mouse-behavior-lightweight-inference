@@ -1135,8 +1135,14 @@ def apply_standard_behavior_engine(
             head_min = min(head_values)
             tail_min = min(tail_values)
             body_min = min(body_values)
-            if min(head_min, tail_min) <= contact_threshold:
-                contact_types.append("nose_head" if head_min <= tail_min else "nose_tail")
+            head_contact = head_min <= contact_threshold
+            tail_contact = tail_min <= contact_threshold
+            if head_contact and tail_contact:
+                contact_types.append("nose_head_and_nose_tail")
+            elif head_contact:
+                contact_types.append("nose_head")
+            elif tail_contact:
+                contact_types.append("nose_tail")
             elif body_min <= contact_threshold:
                 contact_types.append("nose_body")
             else:

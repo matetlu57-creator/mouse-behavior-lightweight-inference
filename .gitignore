@@ -70,3 +70,5 @@ Desktop.ini
 *.pfx
 secrets.*
 credentials.*
+
+# The public inference models are downloaded from the repository Release when needed.

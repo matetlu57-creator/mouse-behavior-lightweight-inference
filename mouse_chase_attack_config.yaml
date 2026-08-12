@@ -912,6 +912,13 @@ features:
   # PPT追逐定义需要至少覆盖足够长的共同轨迹；2.5 s窗口仍低于60 cm事件的上限。
   history_seconds: 2.5
   response_lookback_seconds: 0.3
+contact_detection:
+  # 接触是独立的几何事件流，不是攻击/追逐分类；普通接触不会单独打开攻击FSM。
+  enabled: true
+  # A鼻头到B头部关键点的距离，以及A鼻头到B尾部关键点的距离。
+  # 采用和攻击接触门一致的3 cm初始值，后续可用人工接触片段单独校准。
+  nose_head_distance_cm: 3.0
+  nose_tail_distance_cm: 3.0
 wall_jump:
   # 单鼠靠墙跳跃/攀爬只作为排除门，不改变追踪结果。
   enabled: true
@@ -1445,8 +1452,8 @@ lightweight_behavior_inference:
   # 留空表示使用当前视频输出目录下的yolo_precompute；也支持{video_stem}/{video_name}。
   # 自定义路径只复用已完成缓存，缓存不存在时仍在默认输出目录生成。
   yolo_cache_dir: ""
-  # 延续当前任务要求：输出四类原始视频片段，但不绘制框、骨架、ID或行为标签。
-  extract_four_class_clips: true
+  # 主分类只输出独立的chase/attack事件；四类原始片段仅保留为显式兼容入口。
+  extract_four_class_clips: false
   clips_output_dir: 四类视频
   clip_level: strong
   clip_seconds: 5.0
