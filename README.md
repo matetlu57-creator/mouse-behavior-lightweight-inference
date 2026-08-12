@@ -105,14 +105,15 @@ right hip -> tail
 
 ## 4.1 模型权重
 
-仓库 Release 随附当前上游检测流程使用的两份权重：
+仓库 Release 只随附当前轻量路径使用的这一份 YOLO Pose 权重：
 
 | 文件 | 用途 |
 |---|---|
-| `pose_best.pt` | 下载后放到 `weights/pose/best.pt`，YOLO Pose 关键点模型 |
-| `obb_best.pt` | 下载后放到 `weights/obb/best.pt`，OBB 小鼠检测模型 |
+| `pose_best.pt` | 下载后放到 `weights/pose/best.pt`，YOLO Pose 小鼠关键点模型 |
 
-两份权重作为本仓库公开 Release 的二进制附件发布（每份约 53 MB），不会把大二进制塞进源码树。下载 Release 中的 `pose_best.pt` 和 `obb_best.pt` 后，分别重命名并放到 `weights/pose/best.pt`、`weights/obb/best.pt`。轻量入口只分析已有 `yolo_precompute` 缓存，因此不会因为读取缓存而重复加载模型；上游生成缓存或运行完整流程时，再把模型路径指向上述文件。
+`pose_best.pt` 来自 `F:\mouse-pose-v8-delivery\best.pt`，大小为 56,602,034 字节。它作为本仓库公开 Release 的唯一模型附件发布，不把大二进制塞进源码树。下载后放到 `weights/pose/best.pt`。轻量入口只分析已有 `yolo_precompute` 缓存，因此不会因为读取缓存而重复加载模型；如果需要在上游生成缓存时调用模型，也只使用这份 Pose 权重。OBB 权重不属于当前轻量路径，本仓库不上传也不依赖 OBB 模型。
+
+SHA-256：`AB2F2FBE7A52980DF993FAD1914B630D9004254A9547FA48F245244662A1BED8`。
 
 ## 5. 环境安装
 
@@ -299,7 +300,7 @@ python -m py_compile lightweight_behavior_inference.py standard_behavior_engine.
 
 - Python 源码、PowerShell 脚本和 YAML 配置；
 - 单元测试、回归工具和工程说明；
-- GitHub Release 中明确列出的两份模型权重；
+- GitHub Release 中明确列出的这一份 Pose 模型权重；
 - 依赖清单、README 和 Git 忽略规则。
 
 本仓库不上传：
