@@ -24,9 +24,11 @@ import math
 import pickle
 import time
 from collections import defaultdict
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
+import cv2
 import numpy as np
 import pandas as pd
 import yaml
@@ -37,6 +39,7 @@ except Exception:  # pragma: no cover - a deterministic greedy fallback is below
     linear_sum_assignment = None
 
 import standard_behavior_engine as behavior_engine
+import adaptive_arena_boundary as arena_boundary
 
 
 PROJECT_NAME = "mouse-behavior-lightweight-inference"
@@ -209,6 +212,109 @@ def _cache_total_frames(cache_dir: Path) -> int:
     return total
 
 
+def _resolve_boundary_reuse_path(value: Any, output_dir: Path, config_path: Path) -> Path:
+    raw = str(value or "").strip()
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    output_candidate = output_dir / path
+    if output_candidate.exists():
+        return output_candidate
+    return config_path.parent / path
+
+
+def _prepare_video_arena_boundary(
+    video_path: Path,
+    cache_dir: Path,
+    output_dir: Path,
+    config_path: Path,
+    config: Mapping[str, Any],
+    width: int,
+    height: int,
+    max_frames: int | None = None,
+) -> tuple[arena_boundary.ArenaBoundaryResult | None, np.ndarray | None]:
+    """Learn/reuse this video's boundary and persist auditable artifacts.
+
+    The default is always per-video learning.  A JSON can only be reused when
+    the caller explicitly sets ``reuse_boundary_json``; the boundary module
+    then checks the saved source path, resolution, and file fingerprint.
+    """
+
+    arena_cfg = dict(config.get("adaptive_arena", {}))
+    if not bool(arena_cfg.get("enabled", True)):
+        return None, None
+    configured_polygon = (
+        dict(config.get("detector_first", {}))
+        .get("arena_mask", {})
+        .get("polygon", [])
+    )
+    reuse_value = str(arena_cfg.get("reuse_boundary_json", "") or "").strip()
+    if reuse_value:
+        reuse_path = _resolve_boundary_reuse_path(reuse_value, output_dir, config_path)
+        result = arena_boundary.load_boundary_json(
+            reuse_path,
+            width=width,
+            height=height,
+            source_video=video_path,
+            require_video_match=bool(arena_cfg.get("reuse_require_video_match", True)),
+        )
+        heatmap = np.zeros(
+            (
+                max(int(math.ceil(height / max(result.heatmap_cell_px, 1))), 1),
+                max(int(math.ceil(width / max(result.heatmap_cell_px, 1))), 1),
+            ),
+            dtype=np.float32,
+        )
+    else:
+        records: Iterable[Mapping[str, Any]] = _iter_cache_records(cache_dir)
+        if max_frames is not None:
+            frame_limit = max(int(max_frames), 1)
+            source_records = records
+
+            def limited_records() -> Iterator[Mapping[str, Any]]:
+                for record in source_records:
+                    frame = int(record.get("frame", -1))
+                    if frame >= frame_limit:
+                        break
+                    yield record
+
+            records = limited_records()
+        result, heatmap = arena_boundary.learn_from_yolo_records(
+            records,
+            width=width,
+            height=height,
+            config=arena_cfg,
+            configured_polygon=configured_polygon,
+            source_video=video_path,
+        )
+
+    json_path = output_dir / "阶段一_自适应笼界.json"
+    png_path = output_dir / "阶段一_运动热力图与笼界.png"
+    comparison_path = output_dir / "阶段一_原视频帧叠加笼界.png"
+    arena_boundary.save_boundary_artifacts(
+        result,
+        heatmap,
+        json_path,
+        png_path,
+        comparison_path,
+    )
+    return result, heatmap
+
+
+def _inside_arena(center: Any, polygon: np.ndarray | None, tolerance_px: float = 2.0) -> bool:
+    if polygon is None:
+        return True
+    point = np.asarray(center, dtype=float).reshape(-1)
+    if point.size < 2 or not np.all(np.isfinite(point[:2])):
+        return False
+    contour = np.asarray(polygon, dtype=np.float32).reshape(-1, 1, 2)
+    if len(contour) < 3:
+        return True
+    return float(cv2.pointPolygonTest(contour, (float(point[0]), float(point[1])), True)) >= -float(
+        max(tolerance_px, 0.0)
+    )
+
+
 def _assign_tracks(
     detections: list[dict[str, Any]],
     last_center: np.ndarray,
@@ -301,7 +407,13 @@ def _assign_tracks(
     return assignments, initialized
 
 
-def _track_cache(cache_dir: Path, total_frames: int, expected_mice: int) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+def _track_cache(
+    cache_dir: Path,
+    total_frames: int,
+    expected_mice: int,
+    arena_polygon: np.ndarray | None = None,
+    arena_tolerance_px: float = 2.0,
+) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     centers = np.full((total_frames, expected_mice, 2), np.nan, dtype=np.float32)
     keypoints = np.full((total_frames, expected_mice, KEYPOINTS, 2), np.nan, dtype=np.float32)
     confidences = np.zeros((total_frames, expected_mice, KEYPOINTS), dtype=np.float32)
@@ -327,6 +439,7 @@ def _track_cache(cache_dir: Path, total_frames: int, expected_mice: int) -> tupl
             if isinstance(payload, Mapping)
             for detection in [_payload_detection(payload)]
             if detection is not None
+            and _inside_arena(detection["center"], arena_polygon, arena_tolerance_px)
         ]
         raw_counts.append(len(detections))
         assignments, initialized = _assign_tracks(
@@ -414,6 +527,65 @@ def _ema_smooth_keypoints(values: np.ndarray, valid: np.ndarray, alpha: float = 
                     previous[track, point] = current
                 out[frame, track, point] = previous[track, point]
     return out
+
+
+def _pose_deformation_energy(
+    keypoints_cm: np.ndarray,
+    centers_cm: np.ndarray,
+    heading: np.ndarray,
+    body_cm: np.ndarray,
+    valid: np.ndarray,
+) -> np.ndarray:
+    """Measure frame-to-frame shape change in each mouse's body frame.
+
+    Translation, global rotation and apparent scale are removed before the
+    comparison.  Ordinary nose contact should therefore remain close to zero
+    when the two mice merely hold a stable posture, while a bite/lunge or
+    wrestling motion can contribute a real internal pose change.  The
+    lightweight path previously exported zeros here, which disabled the
+    standard engine's anti-contact grapple evidence entirely.
+    """
+    keypoints_cm = np.asarray(keypoints_cm, dtype=float)
+    centers_cm = np.asarray(centers_cm, dtype=float)
+    heading = np.asarray(heading, dtype=float)
+    body_cm = np.asarray(body_cm, dtype=float)
+    valid = np.asarray(valid, dtype=bool)
+    frames, mice = valid.shape
+    body_pose = np.full((frames, mice, KEYPOINTS, 2), np.nan, dtype=float)
+    pose_valid = np.zeros((frames, mice, KEYPOINTS), dtype=bool)
+
+    for frame in range(frames):
+        for mouse in range(mice):
+            if not valid[frame, mouse]:
+                continue
+            center = centers_cm[frame, mouse]
+            forward = heading[frame, mouse]
+            scale = body_cm[frame, mouse]
+            points = keypoints_cm[frame, mouse]
+            if (
+                not np.all(np.isfinite(center))
+                or not np.all(np.isfinite(forward))
+                or not np.isfinite(scale)
+                or scale < 1e-3
+            ):
+                continue
+            lateral = np.asarray([-forward[1], forward[0]], dtype=float)
+            relative = (points - center) / scale
+            good = np.all(np.isfinite(relative), axis=1)
+            if not np.any(good):
+                continue
+            body_pose[frame, mouse, good, 0] = relative[good] @ forward
+            body_pose[frame, mouse, good, 1] = relative[good] @ lateral
+            pose_valid[frame, mouse, good] = True
+
+    deformation = np.zeros((frames, mice), dtype=float)
+    for frame in range(1, frames):
+        common = pose_valid[frame] & pose_valid[frame - 1]
+        for mouse in np.flatnonzero(np.sum(common, axis=1) >= 3):
+            delta = body_pose[frame, mouse, common[mouse]] - body_pose[frame - 1, mouse, common[mouse]]
+            deformation[frame, mouse] = float(np.sqrt(np.mean(np.sum(delta * delta, axis=1))))
+    deformation[~valid] = 0.0
+    return deformation
 
 
 def _rolling_sum(values: np.ndarray, window: int) -> np.ndarray:
@@ -529,6 +701,13 @@ def _kinematics(tracks: Mapping[str, np.ndarray], fps: float, body_length_cm: fl
             last_valid[mouse] = frame
     speed = np.linalg.norm(velocity, axis=2)
     nose_speed = np.linalg.norm(nose_velocity, axis=2)
+    pose_deformation = _pose_deformation_energy(
+        keypoints_cm,
+        centers_cm,
+        heading,
+        body_cm,
+        valid,
+    )
     velocity[~valid] = 0.0
     speed[~valid] = 0.0
     acceleration[~valid] = 0.0
@@ -547,6 +726,7 @@ def _kinematics(tracks: Mapping[str, np.ndarray], fps: float, body_length_cm: fl
         "nose_speed": nose_speed,
         "acceleration": acceleration,
         "angular_speed": angular_speed,
+        "pose_deformation": pose_deformation,
         "cm_per_pixel": cm_per_pixel,
         "reference_body_px": reference_body_px,
     }
@@ -568,6 +748,7 @@ def _pair_dataframe(
     nose_speed = np.asarray(metrics["nose_speed"], dtype=float)
     acceleration = np.asarray(metrics["acceleration"], dtype=float)
     angular = np.asarray(metrics["angular_speed"], dtype=float)
+    pose_deformation = np.asarray(metrics["pose_deformation"], dtype=float)
     i, j = int(mouse_a), int(mouse_b)
     p = len(valid)
     direction = np.asarray(metrics["direction"][:, pair_index], dtype=float)
@@ -681,8 +862,8 @@ def _pair_dataframe(
             f"{prefix}_nose_body_distance_cm": nose_body,
             f"{prefix}_nose_tail_distance_cm": nose_tail,
             f"{prefix}_nose_head_distance_cm": nose_head,
-            f"{prefix}_actor_pose_deformation_energy": np.zeros(p, dtype=float),
-            f"{prefix}_target_pose_deformation_energy": np.zeros(p, dtype=float),
+            f"{prefix}_actor_pose_deformation_energy": pose_deformation[:, actor],
+            f"{prefix}_target_pose_deformation_energy": pose_deformation[:, target],
         })
     return pd.DataFrame(data)
 
@@ -795,6 +976,7 @@ def _pair_metrics(kin: Mapping[str, Any], fps: float) -> tuple[dict[str, Any], n
         "nose_speed": np.asarray(kin["nose_speed"], dtype=float),
         "acceleration": np.asarray(kin["acceleration"], dtype=float),
         "angular_speed": np.asarray(kin["angular_speed"], dtype=float),
+        "pose_deformation": np.asarray(kin["pose_deformation"], dtype=float),
     }
     return metrics, pair_i, pair_j
 
@@ -820,12 +1002,37 @@ def render_behavior_video(
     CSV produced by this module.  It does not create event clips or any other
     video outputs.
     """
-    import cv2
-
     total_cache_frames = _cache_total_frames(cache_dir)
     if max_frames is not None:
         total_cache_frames = min(total_cache_frames, max(int(max_frames), 1))
-    tracks, tracking_stats = _track_cache(cache_dir, total_cache_frames, expected_mice)
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"无法打开源视频: {video_path}")
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    video_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if width <= 0 or height <= 0:
+        cap.release()
+        raise RuntimeError(f"无法读取源视频尺寸: {video_path}")
+    boundary_json = events_path.parent / "阶段一_自适应笼界.json"
+    arena_polygon: np.ndarray | None = None
+    if boundary_json.exists():
+        boundary = arena_boundary.load_boundary_json(
+            boundary_json,
+            width=width,
+            height=height,
+            source_video=video_path,
+            require_video_match=True,
+        )
+        arena_polygon = np.asarray(boundary.polygon, dtype=np.float64)
+    tracks, tracking_stats = _track_cache(
+        cache_dir,
+        total_cache_frames,
+        expected_mice,
+        arena_polygon=arena_polygon,
+    )
 
     event_frame_map: list[list[dict[str, Any]]] = [
         [] for _ in range(total_cache_frames)
@@ -848,16 +1055,6 @@ def render_behavior_video(
         for frame_index in range(start, end + 1):
             event_frame_map[frame_index].append(event)
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"无法打开源视频: {video_path}")
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = float(cap.get(cv2.CAP_PROP_FPS))
-    video_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if width <= 0 or height <= 0:
-        cap.release()
-        raise RuntimeError(f"无法读取源视频尺寸: {video_path}")
     if not np.isfinite(fps) or fps <= 0:
         fps = 29.329
     frame_limit = total_cache_frames
@@ -1341,7 +1538,39 @@ def analyze(
     total_frames = _cache_total_frames(cache_dir)
     if max_frames is not None:
         total_frames = min(total_frames, max(int(max_frames), 1))
-    tracks, tracking_stats = _track_cache(cache_dir, total_frames, expected_mice)
+    video_cap = cv2.VideoCapture(str(video_path))
+    if not video_cap.isOpened():
+        raise RuntimeError(f"无法打开源视频: {video_path}")
+    width = int(video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    video_cap.release()
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"无法读取源视频尺寸: {video_path}")
+    arena_result, _arena_heatmap = _prepare_video_arena_boundary(
+        video_path,
+        cache_dir,
+        output_dir,
+        config_path,
+        config,
+        width,
+        height,
+        max_frames=total_frames,
+    )
+    arena_polygon = (
+        np.asarray(arena_result.polygon, dtype=np.float64)
+        if arena_result is not None
+        else None
+    )
+    arena_tolerance = float(
+        dict(config.get("adaptive_arena", {})).get("hard_gate_tolerance_px", 2.0)
+    )
+    tracks, tracking_stats = _track_cache(
+        cache_dir,
+        total_frames,
+        expected_mice,
+        arena_polygon=arena_polygon,
+        arena_tolerance_px=arena_tolerance,
+    )
     if sample_stride > 1:
         tracks = {
             key: (value[::sample_stride] if isinstance(value, np.ndarray) and value.ndim > 0 else value)
@@ -1481,6 +1710,11 @@ def analyze(
         "cm_per_pixel": float(kin["cm_per_pixel"]),
         "reference_body_px": float(kin["reference_body_px"]),
         "tracking": tracking_stats,
+        "arena_boundary": (
+            asdict(arena_result)
+            if arena_result is not None
+            else None
+        ),
         "event_counts": {
             f"{level}_{behavior}": int(
                 sum(

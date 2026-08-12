@@ -156,6 +156,15 @@ class DirectionEvidence:
     pose_deformation: float
     closing: float
     behind: float
+    potential_contact: bool
+    actor_initiation_gate: bool
+    target_reaction_gate: bool
+    dynamic_attack_context_gate: bool
+    dynamic_attack_direction_gate: bool
+    dynamic_attack_gate: bool
+    impulse_attack_gate: bool
+    stationary_fight_gate: bool
+    attack_evidence_count: int
 
 
 @dataclass
@@ -308,6 +317,51 @@ def _chase_evidence(
     dynamic_attack = 0.34 * initiation + 0.32 * contact + 0.34 * reaction
 
     repeated = _num(row, "repeated_contact_count", 0.0)
+    # The continuous scores above are useful for ranking, but they are not
+    # sufficient to distinguish an attack from ordinary nose-head/nose-tail
+    # contact.  Build the explicit causal evidence used by the calibrated
+    # legacy gate: physical contact + actor initiation + target reaction.
+    contact_distance = float(attack_cfg.get("contact_distance_cm", 3.0))
+    potential_contact = bool(np.isfinite(nose_body) and nose_body < contact_distance)
+    distance_drop = _num(row, "selected_distance_drop_cm", 0.0)
+    rapid_closing = distance_drop >= float(attack_cfg.get("rapid_closing_distance_cm", 2.0))
+    lunge_gate = actor_speed >= float(attack_cfg.get("actor_lunge_speed_cm_s", 8.0))
+    target_escape_gate = bool(
+        target_speed >= float(attack_cfg.get("target_escape_speed_cm_s", 7.0))
+        and escape >= float(attack_cfg.get("target_escape_alignment_min", 0.30))
+    )
+    target_turn_gate = target_turn >= float(attack_cfg.get("target_turn_angle_deg", 40.0))
+    repeated_gate = repeated >= int(attack_cfg.get("repeated_contact_count", 2))
+    head_motion_gate = bool(
+        actor_nose_speed >= float(attack_cfg.get("head_motion_speed_cm_s", 12.0))
+        and actor_nose_speed
+        >= float(attack_cfg.get("head_to_center_speed_ratio", 1.35))
+        * max(actor_speed, 1.0)
+    )
+    actor_toward_gate = pursuit >= float(attack_cfg.get("attack_pursuit_alignment_min", 0.50))
+    actor_initiation_gate = bool(
+        actor_toward_gate
+        and (lunge_gate or rapid_closing or (head_motion_gate and rapid_closing))
+    )
+    target_reaction_gate = target_escape_gate
+    attack_evidence_count = int(
+        sum(
+            [
+                lunge_gate,
+                rapid_closing,
+                target_escape_gate,
+                target_turn_gate,
+                repeated_gate,
+                head_motion_gate,
+            ]
+        )
+    )
+    dynamic_attack_context_gate = bool(
+        potential_contact
+        and attack_evidence_count >= int(attack_cfg.get("min_dynamic_evidence", 2))
+        and actor_initiation_gate
+        and target_reaction_gate
+    )
     repeated_m = _ramp_high(
         repeated,
         max(float(attack_cfg.get("repeated_contact_count", 2)) - 1.0, 0.0),
@@ -328,12 +382,69 @@ def _chase_evidence(
         float(engine_cfg.get("pose_deformation_zero", 0.015)),
         float(engine_cfg.get("pose_deformation_full", 0.10)),
     )
+    direction_similarity_max = float(
+        attack_cfg.get("attack_direction_similarity_max", 0.90)
+    )
+    direction_pose_min = float(
+        attack_cfg.get("attack_direction_min_pose_deformation", 0.05)
+    )
+    direction_escape_max = float(
+        attack_cfg.get("attack_direction_max_target_escape_alignment", 0.98)
+    )
+    direction_turn_min = float(
+        attack_cfg.get("attack_direction_min_target_turn_deg", 30.0)
+    )
+    direction_drop_min = float(
+        attack_cfg.get("attack_direction_min_distance_drop_cm", 6.0)
+    )
+    # The actor and target do not have to deform symmetrically during a real
+    # attack.  Use the stronger single-mouse deformation, while rejecting the
+    # nearly perfectly same-direction motion common in ordinary contact.
+    deformation_anchor = max(actor_deformation, target_deformation)
+    pose_evidence_available = (
+        f"{prefix}_actor_pose_deformation_energy" in row
+        or f"{prefix}_target_pose_deformation_energy" in row
+    )
+    dynamic_attack_direction_gate = bool(
+        not pose_evidence_available
+        or (
+            direction <= direction_similarity_max
+            and deformation_anchor >= direction_pose_min
+            and escape <= direction_escape_max
+            and (target_turn >= direction_turn_min or distance_drop >= direction_drop_min)
+        )
+    )
+    dynamic_attack_gate = bool(
+        dynamic_attack_context_gate and dynamic_attack_direction_gate
+    )
+    impulse_attack_gate = bool(
+        dynamic_attack_gate
+        and actor_speed + target_speed
+        >= float(attack_cfg.get("impulse_min_combined_speed_cm_s", 70.0))
+        and distance_drop
+        >= float(
+            attack_cfg.get(
+                "impulse_min_distance_drop_cm",
+                max(float(attack_cfg.get("attack_direction_min_distance_drop_cm", 6.0)), 8.0),
+            )
+        )
+    )
     grapple = contact * (
         0.24 * repeated_m
         + 0.22 * angular_m
         + 0.24 * deformation_m
         + 0.20 * local_motion_m
         + 0.10 * slow_center_m
+    )
+    stationary_fight_gate = bool(
+        potential_contact
+        and np.isfinite(center_distance)
+        and center_distance < float(attack_cfg.get("stationary_fight_distance_cm", 5.0))
+        and max(actor_speed, target_speed)
+        < float(attack_cfg.get("stationary_fight_max_center_speed_cm_s", 5.0))
+        and min(abs(actor_angular), abs(target_angular))
+        >= float(attack_cfg.get("stationary_fight_min_angular_speed_deg_s", 110.0))
+        and repeated_gate
     )
 
     return DirectionEvidence(
@@ -347,6 +458,15 @@ def _chase_evidence(
         pose_deformation=_clip01(deformation_m),
         closing=_clip01(closing_m),
         behind=_clip01(behind_m),
+        potential_contact=potential_contact,
+        actor_initiation_gate=actor_initiation_gate,
+        target_reaction_gate=target_reaction_gate,
+        dynamic_attack_context_gate=dynamic_attack_context_gate,
+        dynamic_attack_direction_gate=dynamic_attack_direction_gate,
+        dynamic_attack_gate=dynamic_attack_gate,
+        impulse_attack_gate=impulse_attack_gate,
+        stationary_fight_gate=stationary_fight_gate,
+        attack_evidence_count=attack_evidence_count,
     )
 
 
@@ -477,6 +597,10 @@ def _run_attack_fsm(
     quality: np.ndarray,
     role_confidence: np.ndarray,
     hard_veto: np.ndarray,
+    dynamic_gate: np.ndarray,
+    stationary_gate: np.ndarray,
+    dynamic_context_gate: np.ndarray,
+    impulse_gate: np.ndarray,
     fps: float,
     cfg: Mapping[str, Any],
 ) -> AttackFSMResult:
@@ -499,6 +623,27 @@ def _run_attack_fsm(
     reaction_frames = max(int(round(float(cfg.get("reaction_window_seconds", 0.65)) * fps)), 1)
     grapple_frames = max(int(math.ceil(float(cfg.get("grapple_confirm_seconds", 0.35)) * fps)), 1)
     exit_hold_frames = max(int(round(float(cfg.get("exit_hold_seconds", 0.25)) * fps)), 0)
+    specificity_hold_frames = max(
+        int(round(float(cfg.get("specificity_hold_seconds", 0.35)) * fps)),
+        1,
+    )
+    require_causal_gate = bool(cfg.get("require_causal_attack_gate", True))
+    min_dynamic_gate_frames = max(int(cfg.get("min_dynamic_gate_frames", 2)), 1)
+    min_stationary_gate_frames = max(int(cfg.get("min_stationary_gate_frames", 2)), 1)
+    dynamic_gate_count_frames = max(
+        int(
+            round(
+                float(
+                    cfg.get(
+                        "dynamic_gate_count_window_seconds",
+                        cfg.get("pre_contact_seconds", 0.50),
+                    )
+                )
+                * fps
+            )
+        ),
+        pre_frames,
+    )
 
     state = "NONE"
     candidate_start: Optional[int] = None
@@ -520,7 +665,31 @@ def _run_attack_fsm(
         open_ok = quality[i] >= min_quality_open or occlusion[i] >= occlusion_confirm
         if state == "ATTACK":
             evidence_now = max(dynamic[i], grapple[i], occlusion[i], contact[i], reaction[i])
-            if evidence_now >= exit_score and (quality[i] >= min_quality_hold or occlusion[i] >= occlusion_confirm):
+            recent_dynamic_gate = bool(
+                _slice_max(
+                    dynamic_gate,
+                    max(0, i - specificity_hold_frames + 1),
+                    i + 1,
+                )
+            )
+            recent_stationary_gate = bool(
+                _slice_max(
+                    stationary_gate,
+                    max(0, i - specificity_hold_frames + 1),
+                    i + 1,
+                )
+            )
+            specificity_ok = (
+                not require_causal_gate
+                or active_subtype == "occlusion_fight"
+                or recent_dynamic_gate
+                or recent_stationary_gate
+            )
+            if (
+                evidence_now >= exit_score
+                and specificity_ok
+                and (quality[i] >= min_quality_hold or occlusion[i] >= occlusion_confirm)
+            ):
                 exit_streak = 0
                 mask[i] = True
                 states[i] = "ATTACK"
@@ -539,6 +708,29 @@ def _run_attack_fsm(
                     states[i] = "NONE"
             continue
 
+        recent_start = max(0, i - dynamic_gate_count_frames)
+        dynamic_gate_count = int(
+            np.count_nonzero(dynamic_context_gate[recent_start : i + 1])
+        )
+        stationary_gate_count = int(np.count_nonzero(stationary_gate[recent_start : i + 1]))
+        dynamic_open_ok = bool(
+            not require_causal_gate
+            or (
+                bool(dynamic_gate[i])
+                and (
+                    dynamic_gate_count >= min_dynamic_gate_frames
+                    or bool(impulse_gate[i])
+                )
+            )
+        )
+        stationary_open_ok = bool(
+            not require_causal_gate
+            or (
+                bool(stationary_gate[i])
+                and stationary_gate_count >= min_stationary_gate_frames
+            )
+        )
+
         # High-confidence occlusion is only accepted with recent physical or
         # initiation context; a cluster hint alone cannot create an attack.
         recent_start = max(0, i - pre_frames)
@@ -556,7 +748,11 @@ def _run_attack_fsm(
             exit_streak = 0
             continue
 
-        if contact[i] >= contact_enter and grapple[i] >= grapple_confirm:
+        if (
+            contact[i] >= contact_enter
+            and grapple[i] >= grapple_confirm
+            and stationary_open_ok
+        ):
             grapple_streak += 1
         else:
             grapple_streak = max(grapple_streak - 1, 0)
@@ -598,6 +794,7 @@ def _run_attack_fsm(
                     role_confidence[i] >= min_role_confidence
                     and reaction[i] >= reaction_enter
                     and dynamic[i] >= dynamic_confirm
+                    and dynamic_open_ok
                 ):
                     state = "ATTACK"
                     active_subtype = "lunge_attack"
@@ -623,6 +820,7 @@ def _run_attack_fsm(
                 and role_confidence[i] >= min_role_confidence
                 and reaction[i] >= reaction_enter
                 and dynamic[i] >= dynamic_confirm
+                and dynamic_open_ok
             ):
                 state = "ATTACK"
                 active_subtype = "lunge_attack"
@@ -728,6 +926,22 @@ def apply_standard_behavior_engine(
         ba_dynamic = np.asarray([v.dynamic_attack for v in ba_list], dtype=float)
         ab_grapple = np.asarray([v.grapple for v in ab_list], dtype=float)
         ba_grapple = np.asarray([v.grapple for v in ba_list], dtype=float)
+        ab_dynamic_gate = np.asarray([v.dynamic_attack_gate for v in ab_list], dtype=bool)
+        ba_dynamic_gate = np.asarray([v.dynamic_attack_gate for v in ba_list], dtype=bool)
+        ab_impulse_gate = np.asarray([v.impulse_attack_gate for v in ab_list], dtype=bool)
+        ba_impulse_gate = np.asarray([v.impulse_attack_gate for v in ba_list], dtype=bool)
+        ab_dynamic_context_gate = np.asarray(
+            [v.dynamic_attack_context_gate for v in ab_list], dtype=bool
+        )
+        ba_dynamic_context_gate = np.asarray(
+            [v.dynamic_attack_context_gate for v in ba_list], dtype=bool
+        )
+        ab_stationary_gate = np.asarray([v.stationary_fight_gate for v in ab_list], dtype=bool)
+        ba_stationary_gate = np.asarray([v.stationary_fight_gate for v in ba_list], dtype=bool)
+        ab_potential_contact = np.asarray([v.potential_contact for v in ab_list], dtype=bool)
+        ba_potential_contact = np.asarray([v.potential_contact for v in ba_list], dtype=bool)
+        ab_evidence_count = np.asarray([v.attack_evidence_count for v in ab_list], dtype=int)
+        ba_evidence_count = np.asarray([v.attack_evidence_count for v in ba_list], dtype=int)
         pair_deformation = np.maximum(
             np.asarray([v.pose_deformation for v in ab_list], dtype=float),
             np.asarray([v.pose_deformation for v in ba_list], dtype=float),
@@ -820,6 +1034,30 @@ def apply_standard_behavior_engine(
         contact_score = np.maximum(ab_contact, ba_contact)
         initiation_score = np.where(attack_ab_is_actor, ab_initiation, ba_initiation)
         reaction_score = np.where(attack_ab_is_actor, ab_reaction, ba_reaction)
+        dynamic_gate = np.where(attack_ab_is_actor, ab_dynamic_gate, ba_dynamic_gate)
+        impulse_gate = np.where(attack_ab_is_actor, ab_impulse_gate, ba_impulse_gate)
+        dynamic_context_gate = np.where(
+            attack_ab_is_actor,
+            ab_dynamic_context_gate,
+            ba_dynamic_context_gate,
+        )
+        stationary_gate = np.where(attack_ab_is_actor, ab_stationary_gate, ba_stationary_gate)
+        potential_contact = np.where(attack_ab_is_actor, ab_potential_contact, ba_potential_contact)
+        attack_evidence_count = np.where(attack_ab_is_actor, ab_evidence_count, ba_evidence_count)
+        causal_distance = pd.to_numeric(
+            output["center_distance_cm"], errors="coerce"
+        ).to_numpy(dtype=float)
+        causal_distance_max = float(
+            attack_fsm_cfg.get("causal_max_center_distance_cm", float("inf"))
+        )
+        if np.isfinite(causal_distance_max):
+            causal_near = np.isfinite(causal_distance) & (
+                causal_distance <= causal_distance_max
+            )
+            dynamic_gate &= causal_near
+            dynamic_context_gate &= causal_near
+            impulse_gate &= causal_near
+            stationary_gate &= causal_near
         dynamic_score = np.maximum(np.where(attack_ab_is_actor, ab_dynamic, ba_dynamic), dynamic_provider)
         grapple_score = np.maximum(np.maximum(ab_grapple, ba_grapple), grapple_provider)
         attack_score = np.maximum.reduce([dynamic_score, grapple_score, occ])
@@ -854,6 +1092,10 @@ def apply_standard_behavior_engine(
             behavior_quality,
             attack_role_conf,
             physics_veto,
+            dynamic_gate,
+            stationary_gate,
+            dynamic_context_gate,
+            impulse_gate,
             fps,
             attack_fsm_cfg,
         )
@@ -908,6 +1150,12 @@ def apply_standard_behavior_engine(
         output[f"{level}_standard_initiation_score"] = initiation_score
         output[f"{level}_standard_reaction_score"] = reaction_score
         output[f"{level}_standard_dynamic_attack_score"] = dynamic_score
+        output[f"{level}_standard_attack_dynamic_gate"] = dynamic_gate
+        output[f"{level}_standard_attack_context_gate"] = dynamic_context_gate
+        output[f"{level}_standard_attack_impulse_gate"] = impulse_gate
+        output[f"{level}_standard_attack_stationary_gate"] = stationary_gate
+        output[f"{level}_standard_attack_potential_contact"] = potential_contact
+        output[f"{level}_standard_attack_evidence_count"] = attack_evidence_count
         output[f"{level}_standard_grapple_score"] = grapple_score
         output[f"{level}_standard_pose_deformation_score"] = pair_deformation
         output[f"{level}_standard_contact_type"] = contact_types

@@ -111,6 +111,11 @@ def attack_predictions(videos: list[dict[str, Any]], level: str, fsm_cfg: dict[s
     for video in videos:
         present = False
         for table in video["pairs"]:
+            def gate_column(name: str, default: bool = True) -> np.ndarray:
+                if name not in table:
+                    return np.full(len(table), default, dtype=bool)
+                return table[name].fillna(default).astype(bool).to_numpy()
+
             result = engine._run_attack_fsm(
                 table[f"{level}_standard_initiation_score"].to_numpy(float),
                 table[f"{level}_standard_contact_score"].to_numpy(float),
@@ -121,6 +126,10 @@ def attack_predictions(videos: list[dict[str, Any]], level: str, fsm_cfg: dict[s
                 table["standard_behavior_quality"].to_numpy(float),
                 table[f"{level}_standard_attack_role_confidence"].to_numpy(float),
                 hard_veto(table),
+                gate_column(f"{level}_standard_attack_dynamic_gate"),
+                gate_column(f"{level}_standard_attack_stationary_gate"),
+                gate_column(f"{level}_standard_attack_context_gate"),
+                gate_column(f"{level}_standard_attack_impulse_gate"),
                 fps,
                 fsm_cfg,
             )

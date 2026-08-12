@@ -173,17 +173,22 @@ detector_first:
     pose_free_blob_track_ttl_frames: 10
 
 # v1.40：在正式ID分配前，从全视频运动轨迹热力图学习笼子地面边界。
-# 最大连通运动区域取凸包后围绕质心外扩5%，边界外候选不能创建或接管正式ID。
+# 笼子按矩形处理：最大连通运动区域取轴对齐外接矩形，再向内收缩3%。
+# 比例值0.97表示-3%；边界外候选不能创建或接管正式ID。
 adaptive_arena:
   enabled: true
-  boundary_expansion_ratio: 1.05
+  boundary_expansion_ratio: 0.97
+  # Each video learns its own polygon by default.  Reuse is only for rerunning
+  # the same video, and the saved source path/file fingerprint must match.
   reuse_boundary_json: ""
+  reuse_require_video_match: true
   min_box_confidence: 0.12
   min_pose_quality: 0.08
   min_motion_px_per_frame: 1.5
   max_motion_px_per_frame: 120.0
   min_motion_samples: 300
   long_track_min_frames: 30
+  max_track_gap_frames: 2
   heatmap_cell_px: 20
   heatmap_blur_sigma_cells: 1.25
   heatmap_positive_quantile: 0.20
@@ -1064,17 +1069,27 @@ attack:
   weak:
     contact_distance_cm: 3.0
     stationary_fight_distance_cm: 5.0
-    actor_lunge_speed_cm_s: 8.0
-    rapid_closing_distance_cm: 2.0
-    target_escape_speed_cm_s: 7.0
-    target_escape_alignment_min: 0.30
-    attack_pursuit_alignment_min: 0.50
-    target_turn_angle_deg: 40.0
-    head_motion_speed_cm_s: 12.0
-    head_to_center_speed_ratio: 1.35
+    actor_lunge_speed_cm_s: 12.0
+    rapid_closing_distance_cm: 3.0
+    target_escape_speed_cm_s: 10.0
+    target_escape_alignment_min: 0.45
+    attack_pursuit_alignment_min: 0.65
+    target_turn_angle_deg: 50.0
+    head_motion_speed_cm_s: 16.0
+    head_to_center_speed_ratio: 1.50
     repeated_contact_window_seconds: 2.0
     repeated_contact_count: 2
-    min_dynamic_evidence: 2
+    # For attack specificity weak/strong share the same calibrated causal
+    # floor; weak remains more permissive for chase, not for contact attacks.
+    min_dynamic_evidence: 3
+    # Anti-contact specificity calibrated from the three attack clips plus
+    # the ordinary nose-head/nose-tail contact negatives.
+    attack_direction_similarity_max: 0.85
+    attack_direction_min_pose_deformation: 0.06
+    attack_direction_min_target_turn_deg: 40.0
+    attack_direction_min_distance_drop_cm: 8.0
+    attack_direction_max_target_escape_alignment: 0.95
+    impulse_min_distance_drop_cm: 8.0
     stationary_fight_max_center_speed_cm_s: 5.0
     stationary_fight_min_angular_speed_deg_s: 110.0
     min_duration_seconds: 0.12
@@ -1155,6 +1170,12 @@ attack:
     repeated_contact_window_seconds: 2.0
     repeated_contact_count: 2
     min_dynamic_evidence: 3
+    attack_direction_similarity_max: 0.85
+    attack_direction_min_pose_deformation: 0.06
+    attack_direction_min_target_turn_deg: 40.0
+    attack_direction_min_distance_drop_cm: 8.0
+    attack_direction_max_target_escape_alignment: 0.95
+    impulse_min_distance_drop_cm: 8.0
     stationary_fight_max_center_speed_cm_s: 4.0
     stationary_fight_min_angular_speed_deg_s: 140.0
     min_duration_seconds: 0.15
@@ -1285,6 +1306,14 @@ standard_behavior_engine:
       confirm_seconds: 0.80
       exit_hold_seconds: 0.20
     attack_fsm:
+      # Attack opening requires the calibrated physical-causality gate.  A
+      # close nose-head/nose-tail contact by itself remains CONTACT, not ATTACK.
+      require_causal_attack_gate: true
+      specificity_hold_seconds: 0.35
+      min_dynamic_gate_frames: 2
+      min_stationary_gate_frames: 2
+      dynamic_gate_count_window_seconds: 2.0
+      causal_max_center_distance_cm: 7.6
       prepare_enter_score: 0.55
       contact_enter_score: 0.62
       reaction_enter_score: 0.52
@@ -1316,6 +1345,12 @@ standard_behavior_engine:
       confirm_seconds: 0.40
       exit_hold_seconds: 0.15
     attack_fsm:
+      require_causal_attack_gate: true
+      specificity_hold_seconds: 0.35
+      min_dynamic_gate_frames: 2
+      min_stationary_gate_frames: 2
+      dynamic_gate_count_window_seconds: 2.0
+      causal_max_center_distance_cm: 7.6
       prepare_enter_score: 0.64
       contact_enter_score: 0.70
       reaction_enter_score: 0.62
