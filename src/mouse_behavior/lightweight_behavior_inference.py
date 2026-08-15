@@ -958,7 +958,19 @@ def _pair_dataframe(
     return pd.DataFrame(data)
 
 
-def _pair_metrics(kin: Mapping[str, Any], fps: float) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
+def _pair_metrics(
+    kin: Mapping[str, Any],
+    fps: float,
+    pair_indices: np.ndarray | Sequence[int] | None = None,
+) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
+    """Build pair-wise features for the requested logical pair columns.
+
+    ``pair_indices`` refers to the stable ordering returned by
+    ``np.triu_indices(mice, k=1)``.  Keeping this optional preserves the old
+    all-pair API for callers that need it, while the lightweight analyzer can
+    now run the expensive nose/trajectory features only for spatially useful
+    pairs selected by its prefilter.
+    """
     centers = np.asarray(kin["centers_cm"], dtype=float)
     heads = np.asarray(kin["head_cm"], dtype=float)
     kp = np.asarray(kin["keypoints_cm"], dtype=float)
@@ -970,7 +982,15 @@ def _pair_metrics(kin: Mapping[str, Any], fps: float) -> tuple[dict[str, Any], n
     acceleration = np.asarray(kin["acceleration"], dtype=float)
     angular_speed = np.asarray(kin["angular_speed"], dtype=float)
     frames, mice = valid.shape
-    pair_i, pair_j = np.triu_indices(mice, k=1)
+    all_pair_i, all_pair_j = np.triu_indices(mice, k=1)
+    if pair_indices is None:
+        selected_pair_indices = np.arange(len(all_pair_i), dtype=int)
+    else:
+        selected_pair_indices = np.asarray(pair_indices, dtype=int).reshape(-1)
+        if np.any(selected_pair_indices < 0) or np.any(selected_pair_indices >= len(all_pair_i)):
+            raise IndexError("pair_indices contains an invalid all-pair column index")
+    pair_i = all_pair_i[selected_pair_indices]
+    pair_j = all_pair_j[selected_pair_indices]
     pairs = len(pair_i)
     valid_pair = valid[:, pair_i] & valid[:, pair_j]
     delta = centers[:, pair_j] - centers[:, pair_i]
@@ -2689,6 +2709,89 @@ def _interaction_radius(config: Mapping[str, Any]) -> float:
     ) + float(interaction_cfg.get("buffer_cm", 5.0))
 
 
+def _pair_prefilter(
+    kin: Mapping[str, Any],
+    config: Mapping[str, Any],
+    interaction_radius: float,
+) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
+    """Find spatially and directionally meaningful pair columns cheaply.
+
+    The full pair feature builder contains the expensive nose-to-body
+    geometry and rolling trajectory calculations.  This pass intentionally
+    uses only center distance and body heading, so it can decide which stable
+    logical pair columns deserve those features.
+
+    A close-distance fallback is important: heading estimates can be noisy
+    during contact or occlusion, while a very close pair is still relevant to
+    nose/head/tail contact and attack detection.  For wider interactions at
+    least one mouse must face the other within the configured cosine gate.
+    The returned ``valuable_frame`` is frame-level diagnostic information; the
+    analyzer promotes a pair if it is valuable at any analyzed frame and then
+    keeps that pair's full time series for temporal FSM context.
+    """
+    lightweight_cfg = dict(config.get("lightweight_behavior_inference", {}))
+    configured = dict(lightweight_cfg.get("pair_prefilter", {}))
+    enabled = bool(configured.get("enabled", True))
+    radius = max(float(interaction_radius), 0.0)
+    close_distance = min(
+        max(float(configured.get("close_distance_cm", 10.0)), 0.0),
+        radius,
+    )
+    min_heading_cosine = float(
+        np.clip(float(configured.get("min_heading_cosine", 0.0)), -1.0, 1.0)
+    )
+
+    centers = np.asarray(kin["centers_cm"], dtype=float)
+    heading = np.asarray(kin["heading"], dtype=float)
+    valid = np.asarray(kin["valid"], dtype=bool)
+    frames, mice = valid.shape
+    pair_i, pair_j = np.triu_indices(mice, k=1)
+    valid_pair = valid[:, pair_i] & valid[:, pair_j]
+    delta = centers[:, pair_j] - centers[:, pair_i]
+    distance = np.linalg.norm(delta, axis=2)
+    within_radius = valid_pair & np.isfinite(distance) & (distance <= radius)
+
+    heading_to_partner_a = _cosine(heading[:, pair_i], delta)
+    heading_to_partner_b = _cosine(heading[:, pair_j], -delta)
+    heading_values_a = heading[:, pair_i]
+    heading_values_b = heading[:, pair_j]
+    heading_valid_a = (
+        np.all(np.isfinite(heading_values_a), axis=2)
+        & (np.linalg.norm(heading_values_a, axis=2) > 1e-9)
+    )
+    heading_valid_b = (
+        np.all(np.isfinite(heading_values_b), axis=2)
+        & (np.linalg.norm(heading_values_b, axis=2) > 1e-9)
+    )
+    heading_relevant = (
+        (heading_valid_a & (heading_to_partner_a >= min_heading_cosine))
+        | (heading_valid_b & (heading_to_partner_b >= min_heading_cosine))
+    )
+    close_fallback = distance <= close_distance
+    valuable_frame = within_radius & (close_fallback | heading_relevant)
+
+    if enabled:
+        candidate_pair_mask = np.any(valuable_frame, axis=0)
+    else:
+        # Compatibility switch: preserve the previous distance-only candidate
+        # rule when the caller explicitly disables the orientation prefilter.
+        valuable_frame = within_radius
+        candidate_pair_mask = np.any(within_radius, axis=0)
+
+    return {
+        "valid_pair": valid_pair,
+        "distance": distance,
+        "heading_to_partner_a": heading_to_partner_a,
+        "heading_to_partner_b": heading_to_partner_b,
+        "valuable_frame": valuable_frame,
+        "candidate_pair_mask": candidate_pair_mask,
+        "enabled": enabled,
+        "close_distance_cm": close_distance,
+        "min_heading_cosine": min_heading_cosine,
+        "frames": int(frames),
+    }, pair_i, pair_j
+
+
 def analyze(
     video_path: Path,
     cache_dir: Path,
@@ -2759,36 +2862,48 @@ def analyze(
     analysis_frames = int(tracks["valid"].shape[0])
     fps = source_fps / sample_stride
     kin = _kinematics(tracks, fps=fps)
-    metrics, pair_i, pair_j = _pair_metrics(kin, fps)
     events: list[dict[str, Any]] = []
     contact_events: list[dict[str, Any]] = []
     extended_events: list[dict[str, Any]] = []
     pair_summaries: list[dict[str, Any]] = []
     top_evidence: list[dict[str, Any]] = []
     interaction_radius = _interaction_radius(config)
-    candidate_pair_indices = [
-        pair_index
-        for pair_index in range(len(pair_i))
-        if np.any(
-            np.isfinite(metrics["distance"][:, pair_index])
-            & (metrics["distance"][:, pair_index] <= interaction_radius)
-        )
-    ]
-    candidate_pair_set = set(candidate_pair_indices)
-    LOGGER.info(
-        "[pair filter] %d/%d pairs within %.2f cm",
-        len(candidate_pair_indices),
-        len(pair_i),
+    prefilter, all_pair_i, all_pair_j = _pair_prefilter(
+        kin,
+        config,
         interaction_radius,
     )
-    for pair_index, (mouse_a, mouse_b) in enumerate(zip(pair_i, pair_j)):
+    candidate_pair_indices = np.flatnonzero(
+        np.asarray(prefilter["candidate_pair_mask"], dtype=bool)
+    ).astype(int).tolist()
+    candidate_pair_indices_array = np.asarray(candidate_pair_indices, dtype=int)
+    metrics, pair_i, pair_j = _pair_metrics(
+        kin,
+        fps,
+        pair_indices=candidate_pair_indices_array,
+    )
+    candidate_metric_index = {
+        int(original_index): int(metric_index)
+        for metric_index, original_index in enumerate(candidate_pair_indices)
+    }
+    LOGGER.info(
+        "[pair filter] %d/%d pairs retained (distance <= %.2f cm, close fallback <= %.2f cm, heading cosine >= %.2f)",
+        len(candidate_pair_indices),
+        len(all_pair_i),
+        interaction_radius,
+        float(prefilter["close_distance_cm"]),
+        float(prefilter["min_heading_cosine"]),
+    )
+    candidate_ordinal = 0
+    for pair_index, (mouse_a, mouse_b) in enumerate(zip(all_pair_i, all_pair_j)):
+        metric_index = candidate_metric_index.get(pair_index)
         base_summary: dict[str, Any] = {
             "pair_key": f"{int(mouse_a)}_{int(mouse_b)}",
             "mouse_a_id": int(mouse_a),
             "mouse_b_id": int(mouse_b),
-            "valid_frames": int(np.asarray(metrics["valid_pair"][:, pair_index], dtype=bool).sum()),
-            "min_distance_cm": float(np.nanmin(metrics["distance"][:, pair_index]))
-            if np.isfinite(metrics["distance"][:, pair_index]).any()
+            "valid_frames": int(np.asarray(prefilter["valid_pair"][:, pair_index], dtype=bool).sum()),
+            "min_distance_cm": float(np.nanmin(prefilter["distance"][:, pair_index]))
+            if np.isfinite(prefilter["distance"][:, pair_index]).any()
             else float("nan"),
             "max_speed_cm_s": float(
                 max(
@@ -2796,13 +2911,13 @@ def analyze(
                     float(np.asarray(metrics["speed"][:, int(mouse_b)]).max(initial=0.0)),
                 )
             ),
-            "engine_evaluated": pair_index in candidate_pair_set,
+            "engine_evaluated": metric_index is not None,
             "nose_head_contact_event_count": 0,
             "nose_tail_contact_event_count": 0,
             "combined_nose_head_nose_tail_event_count": 0,
             "contact_sample_count": 0,
         }
-        if pair_index not in candidate_pair_set:
+        if metric_index is None:
             for level in ("weak", "strong"):
                 for behavior in ("chase", "attack"):
                     base_summary[f"{level}_{behavior}_frames"] = 0
@@ -2810,17 +2925,18 @@ def analyze(
                     base_summary[f"{level}_{behavior}_role_known_rate"] = None
             pair_summaries.append(base_summary)
             continue
-        if pair_index == 0 or pair_index % 20 == 0 or pair_index == len(pair_i) - 1:
+        candidate_ordinal += 1
+        if pair_index == 0 or pair_index % 20 == 0 or pair_index == len(all_pair_i) - 1:
             LOGGER.info(
                 "[pair analysis] pair %d/%d (%d/%d candidates)",
                 pair_index + 1,
-                len(pair_i),
-                len(pair_summaries) + 1,
+                len(all_pair_i),
+                candidate_ordinal,
                 len(candidate_pair_indices),
             )
         pair_df = _pair_dataframe(
             metrics,
-            pair_index,
+            metric_index,
             int(mouse_a),
             int(mouse_b),
             pair_i,
@@ -2842,7 +2958,7 @@ def analyze(
             _extended_pair_events(
                 pair_df,
                 metrics=metrics,
-                pair_index=pair_index,
+                pair_index=metric_index,
                 enriched=enriched,
                 source_video=video_path,
                 source_fps=source_fps,
@@ -3062,7 +3178,18 @@ def analyze(
         ],
         "interaction_radius_cm": float(interaction_radius),
         "candidate_pair_count": int(len(candidate_pair_indices)),
-        "total_pair_count": int(len(pair_i)),
+        "total_pair_count": int(len(all_pair_i)),
+        "pair_prefilter": {
+            "enabled": bool(prefilter["enabled"]),
+            "close_distance_cm": float(prefilter["close_distance_cm"]),
+            "min_heading_cosine": float(prefilter["min_heading_cosine"]),
+            "valuable_frame_count": int(np.asarray(prefilter["valuable_frame"], dtype=bool).sum()),
+            "valuable_frame_fraction": float(
+                np.asarray(prefilter["valuable_frame"], dtype=bool).mean()
+            )
+            if np.asarray(prefilter["valuable_frame"]).size
+            else 0.0,
+        },
         "elapsed_s": float(time.perf_counter() - started),
     }
     with (output_dir / "lightweight_analysis_metadata.json").open("w", encoding="utf-8") as handle:

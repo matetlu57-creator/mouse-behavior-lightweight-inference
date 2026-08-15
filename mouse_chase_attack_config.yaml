@@ -1449,6 +1449,12 @@ lightweight_behavior_inference:
   expected_mice: 20
   # 轻量默认每3帧取1帧；需要逐帧高召回时可显式改成1。
   sample_stride: 3
+  # 先用中心距离和身体朝向筛选有意义的鼠对，再计算昂贵的关键点几何与行为特征。
+  # close_distance_cm 是接触/攻击的近距离兜底；更远的鼠对至少一方需要朝向另一方。
+  pair_prefilter:
+    enabled: true
+    close_distance_cm: 10.0
+    min_heading_cosine: 0.0
   # 留空表示使用当前视频输出目录下的yolo_precompute；也支持{video_stem}/{video_name}。
   # 自定义路径只复用已完成缓存，缓存不存在时仍在默认输出目录生成。
   yolo_cache_dir: ""
