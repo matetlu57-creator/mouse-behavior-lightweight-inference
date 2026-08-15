@@ -98,3 +98,93 @@ def test_pair_metrics_subset_preserves_selected_full_pair_columns():
             value[:, selected_indices],
             equal_nan=True,
         )
+
+
+def test_pair_window_mask_fills_short_gaps_and_adds_context_padding():
+    valuable = np.zeros((12, 2), dtype=bool)
+    valuable[[4, 6], 0] = True
+    valuable[9, 1] = True
+    windows, stats = lightweight._pair_window_mask(
+        valuable,
+        fps=10.0,
+        config={
+            "lightweight_behavior_inference": {
+                "pair_prefilter": {
+                    "window": {
+                        "enabled": True,
+                        "padding_seconds": 0.2,
+                        "fill_gap_seconds": 0.15,
+                    }
+                }
+            }
+        },
+    )
+
+    # Frames 4 and 6 are joined through the one-frame gap, then expanded by
+    # two frames on each side: [2, 8].
+    assert np.flatnonzero(windows[:, 0]).tolist() == list(range(2, 9))
+    assert np.flatnonzero(windows[:, 1]).tolist() == list(range(7, 12))
+    assert stats["padding_frames"] == 2
+    assert stats["fill_gap_frames"] == 2
+
+
+def test_pair_window_mask_disabled_keeps_the_full_candidate_timeline():
+    valuable = np.zeros((4, 1), dtype=bool)
+    valuable[1, 0] = True
+    windows, stats = lightweight._pair_window_mask(
+        valuable,
+        fps=10.0,
+        config={
+            "lightweight_behavior_inference": {
+                "pair_prefilter": {
+                    "window": {"enabled": False}
+                }
+            }
+        },
+    )
+
+    assert windows.all()
+    assert stats["active_frame_fraction"] == 1.0
+
+
+def test_pair_metrics_frame_mask_only_exposes_features_inside_windows():
+    rng = np.random.default_rng(11)
+    frames, mice = 8, 3
+    kin = {
+        "centers_cm": rng.normal(size=(frames, mice, 2)).cumsum(axis=0),
+        "head_cm": rng.normal(size=(frames, mice, 2)),
+        "keypoints_cm": rng.normal(size=(frames, mice, lightweight.KEYPOINTS, 2)),
+        "heading": rng.normal(size=(frames, mice, 2)),
+        "velocity": rng.normal(size=(frames, mice, 2)),
+        "valid": np.ones((frames, mice), dtype=bool),
+        "speed": np.abs(rng.normal(size=(frames, mice))),
+        "nose_speed": np.abs(rng.normal(size=(frames, mice))),
+        "acceleration": rng.normal(size=(frames, mice)),
+        "angular_speed": rng.normal(size=(frames, mice)),
+        "pose_quality": np.ones((frames, mice), dtype=float),
+        "behavior_speed": np.abs(rng.normal(size=(frames, mice))),
+        "pose_deformation": np.abs(rng.normal(size=(frames, mice))),
+    }
+    frame_mask = np.zeros((frames, 1), dtype=bool)
+    frame_mask[2:6, 0] = True
+    metrics, pair_i, pair_j = lightweight._pair_metrics(
+        kin,
+        10.0,
+        pair_indices=np.array([0], dtype=int),
+        frame_mask=frame_mask,
+    )
+
+    assert np.array_equal(pair_i, np.array([0]))
+    assert np.array_equal(pair_j, np.array([1]))
+    assert metrics["valid_pair"][:, 0].tolist() == [False, False, True, True, True, True, False, False]
+    assert np.isnan(metrics["nose_body_ab"][[0, 1, 6, 7], 0]).all()
+    assert (metrics["trajectory_corr"][[0, 1, 6, 7], 0] == 0.0).all()
+
+
+def test_rolling_sum_resets_pair_history_outside_active_windows():
+    values = np.asarray([[1.0], [2.0], [3.0], [4.0]])
+    active = np.asarray([[True], [True], [False], [True]])
+
+    result = lightweight._rolling_sum(values, window=3, active_mask=active)
+
+    assert result[:, 0].tolist() == [1.0, 3.0, 0.0, 4.0]

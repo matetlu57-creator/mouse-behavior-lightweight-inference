@@ -1455,6 +1455,10 @@ lightweight_behavior_inference:
     enabled: true
     close_distance_cm: 10.0
     min_heading_cosine: 0.0
+    window:
+      enabled: true
+      padding_seconds: 2.5
+      fill_gap_seconds: 0.15
   # 留空表示使用当前视频输出目录下的yolo_precompute；也支持{video_stem}/{video_name}。
   # 自定义路径只复用已完成缓存，缓存不存在时仍在默认输出目录生成。
   yolo_cache_dir: ""

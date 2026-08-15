@@ -621,7 +621,11 @@ def _pose_deformation_energy(
     return deformation
 
 
-def _rolling_sum(values: np.ndarray, window: int) -> np.ndarray:
+def _rolling_sum(
+    values: np.ndarray,
+    window: int,
+    active_mask: np.ndarray | None = None,
+) -> np.ndarray:
     values = np.nan_to_num(np.asarray(values, dtype=float), nan=0.0)
     window = max(int(window), 1)
     was_1d = values.ndim == 1
@@ -629,17 +633,64 @@ def _rolling_sum(values: np.ndarray, window: int) -> np.ndarray:
         values = values[:, None]
     if values.ndim != 2:
         raise ValueError(f"_rolling_sum expects a 1D or 2D array, got shape={values.shape}")
-    cumulative = np.concatenate([np.zeros((1, values.shape[1])), np.cumsum(values, axis=0)], axis=0)
-    index = np.arange(values.shape[0])
-    starts = np.maximum(index - window + 1, 0)
-    result = cumulative[index + 1] - cumulative[starts]
+    if active_mask is None:
+        active_mask = np.ones_like(values, dtype=bool)
+    else:
+        active_mask = np.asarray(active_mask, dtype=bool)
+        if active_mask.ndim == 1 and was_1d:
+            active_mask = active_mask[:, None]
+        if active_mask.shape != values.shape:
+            raise ValueError(
+                "active_mask must have shape "
+                f"{values.shape}, got {active_mask.shape}"
+            )
+    if bool(np.all(active_mask)):
+        cumulative = np.concatenate([np.zeros((1, values.shape[1])), np.cumsum(values, axis=0)], axis=0)
+        index = np.arange(values.shape[0])
+        starts = np.maximum(index - window + 1, 0)
+        result = cumulative[index + 1] - cumulative[starts]
+        return result[:, 0] if was_1d else result
+
+    result = np.zeros_like(values, dtype=float)
+    buffer = np.zeros((window, values.shape[1]), dtype=float)
+    counts = np.zeros(values.shape[1], dtype=float)
+    for frame in range(values.shape[0]):
+        active_indices = np.flatnonzero(active_mask[frame])
+        inactive_indices = np.flatnonzero(~active_mask[frame])
+        if len(inactive_indices):
+            buffer[:, inactive_indices] = 0.0
+            counts[inactive_indices] = 0.0
+        if not len(active_indices):
+            continue
+        slot = frame % window
+        if frame >= window:
+            counts[active_indices] -= buffer[slot, active_indices]
+        current = values[frame, active_indices]
+        buffer[slot, active_indices] = current
+        counts[active_indices] += current
+        result[frame, active_indices] = counts[active_indices]
     return result[:, 0] if was_1d else result
 
 
-def _rolling_corr(velocity_a: np.ndarray, velocity_b: np.ndarray, valid: np.ndarray, window: int) -> np.ndarray:
+def _rolling_corr(
+    velocity_a: np.ndarray,
+    velocity_b: np.ndarray,
+    valid: np.ndarray,
+    window: int,
+    active_mask: np.ndarray | None = None,
+) -> np.ndarray:
     """Rolling Pearson correlation over flattened 2-D displacement vectors."""
     frames, pairs, _ = velocity_a.shape
     window = max(int(window), 4)
+    if active_mask is None:
+        active_mask = np.ones((frames, pairs), dtype=bool)
+    else:
+        active_mask = np.asarray(active_mask, dtype=bool)
+        if active_mask.shape != (frames, pairs):
+            raise ValueError(
+                "active_mask must have shape "
+                f"({frames}, {pairs}), got {active_mask.shape}"
+            )
     result = np.zeros((frames, pairs), dtype=np.float32)
     buffer_a = np.zeros((window, pairs, 2), dtype=float)
     buffer_b = np.zeros((window, pairs, 2), dtype=float)
@@ -651,36 +702,54 @@ def _rolling_corr(velocity_a: np.ndarray, velocity_b: np.ndarray, valid: np.ndar
     sum_ab = np.zeros(pairs, dtype=float)
     count = np.zeros(pairs, dtype=int)
     for frame in range(frames):
+        active_indices = np.flatnonzero(active_mask[frame])
+        inactive_indices = np.flatnonzero(~active_mask[frame])
+        if len(inactive_indices):
+            buffer_a[:, inactive_indices] = 0.0
+            buffer_b[:, inactive_indices] = 0.0
+            buffer_valid[:, inactive_indices] = False
+            sum_a[inactive_indices] = 0.0
+            sum_b[inactive_indices] = 0.0
+            sum_a2[inactive_indices] = 0.0
+            sum_b2[inactive_indices] = 0.0
+            sum_ab[inactive_indices] = 0.0
+            count[inactive_indices] = 0
+        if not len(active_indices):
+            continue
         slot = frame % window
         if frame >= window:
-            old_valid = buffer_valid[slot]
-            old_a = buffer_a[slot]
-            old_b = buffer_b[slot]
-            sum_a -= np.where(old_valid, old_a.sum(axis=1), 0.0)
-            sum_b -= np.where(old_valid, old_b.sum(axis=1), 0.0)
-            sum_a2 -= np.where(old_valid, (old_a * old_a).sum(axis=1), 0.0)
-            sum_b2 -= np.where(old_valid, (old_b * old_b).sum(axis=1), 0.0)
-            sum_ab -= np.where(old_valid, (old_a * old_b).sum(axis=1), 0.0)
-            count -= old_valid.astype(int)
-        current_valid = np.asarray(valid[frame], dtype=bool)
-        current_a = np.nan_to_num(velocity_a[frame], nan=0.0)
-        current_b = np.nan_to_num(velocity_b[frame], nan=0.0)
-        buffer_a[slot] = current_a
-        buffer_b[slot] = current_b
-        buffer_valid[slot] = current_valid
-        sum_a += np.where(current_valid, current_a.sum(axis=1), 0.0)
-        sum_b += np.where(current_valid, current_b.sum(axis=1), 0.0)
-        sum_a2 += np.where(current_valid, (current_a * current_a).sum(axis=1), 0.0)
-        sum_b2 += np.where(current_valid, (current_b * current_b).sum(axis=1), 0.0)
-        sum_ab += np.where(current_valid, (current_a * current_b).sum(axis=1), 0.0)
-        count += current_valid.astype(int)
-        n = 2.0 * count.astype(float)
-        numerator = n * sum_ab - sum_a * sum_b
-        variance_a = np.maximum(n * sum_a2 - sum_a * sum_a, 0.0)
-        variance_b = np.maximum(n * sum_b2 - sum_b * sum_b, 0.0)
+            old_valid = buffer_valid[slot, active_indices]
+            old_a = buffer_a[slot, active_indices]
+            old_b = buffer_b[slot, active_indices]
+            sum_a[active_indices] -= np.where(old_valid, old_a.sum(axis=1), 0.0)
+            sum_b[active_indices] -= np.where(old_valid, old_b.sum(axis=1), 0.0)
+            sum_a2[active_indices] -= np.where(old_valid, (old_a * old_a).sum(axis=1), 0.0)
+            sum_b2[active_indices] -= np.where(old_valid, (old_b * old_b).sum(axis=1), 0.0)
+            sum_ab[active_indices] -= np.where(old_valid, (old_a * old_b).sum(axis=1), 0.0)
+            count[active_indices] -= old_valid.astype(int)
+        current_valid = np.asarray(valid[frame, active_indices], dtype=bool)
+        current_a = np.nan_to_num(velocity_a[frame, active_indices], nan=0.0)
+        current_b = np.nan_to_num(velocity_b[frame, active_indices], nan=0.0)
+        buffer_a[slot, active_indices] = current_a
+        buffer_b[slot, active_indices] = current_b
+        buffer_valid[slot, active_indices] = current_valid
+        sum_a[active_indices] += np.where(current_valid, current_a.sum(axis=1), 0.0)
+        sum_b[active_indices] += np.where(current_valid, current_b.sum(axis=1), 0.0)
+        sum_a2[active_indices] += np.where(current_valid, (current_a * current_a).sum(axis=1), 0.0)
+        sum_b2[active_indices] += np.where(current_valid, (current_b * current_b).sum(axis=1), 0.0)
+        sum_ab[active_indices] += np.where(current_valid, (current_a * current_b).sum(axis=1), 0.0)
+        count[active_indices] += current_valid.astype(int)
+        n = 2.0 * count[active_indices].astype(float)
+        numerator = n * sum_ab[active_indices] - sum_a[active_indices] * sum_b[active_indices]
+        variance_a = np.maximum(n * sum_a2[active_indices] - sum_a[active_indices] * sum_a[active_indices], 0.0)
+        variance_b = np.maximum(n * sum_b2[active_indices] - sum_b[active_indices] * sum_b[active_indices], 0.0)
         denominator = np.sqrt(variance_a * variance_b)
-        good = (count >= 4) & (denominator > 1e-9)
-        result[frame, good] = np.clip(numerator[good] / denominator[good], -1.0, 1.0)
+        active_good = (count[active_indices] >= 4) & (denominator > 1e-9)
+        result[frame, active_indices[active_good]] = np.clip(
+            numerator[active_good] / denominator[active_good],
+            -1.0,
+            1.0,
+        )
     return result
 
 
@@ -962,6 +1031,7 @@ def _pair_metrics(
     kin: Mapping[str, Any],
     fps: float,
     pair_indices: np.ndarray | Sequence[int] | None = None,
+    frame_mask: np.ndarray | None = None,
 ) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
     """Build pair-wise features for the requested logical pair columns.
 
@@ -969,7 +1039,9 @@ def _pair_metrics(
     ``np.triu_indices(mice, k=1)``.  Keeping this optional preserves the old
     all-pair API for callers that need it, while the lightweight analyzer can
     now run the expensive nose/trajectory features only for spatially useful
-    pairs selected by its prefilter.
+    pairs selected by its prefilter.  ``frame_mask`` optionally limits those
+    expensive pair features to padded interaction windows while retaining the
+    selected pair's full output timeline for the temporal behavior engine.
     """
     centers = np.asarray(kin["centers_cm"], dtype=float)
     heads = np.asarray(kin["head_cm"], dtype=float)
@@ -992,7 +1064,17 @@ def _pair_metrics(
     pair_i = all_pair_i[selected_pair_indices]
     pair_j = all_pair_j[selected_pair_indices]
     pairs = len(pair_i)
-    valid_pair = valid[:, pair_i] & valid[:, pair_j]
+    raw_valid_pair = valid[:, pair_i] & valid[:, pair_j]
+    if frame_mask is None:
+        frame_mask = np.ones((frames, pairs), dtype=bool)
+    else:
+        frame_mask = np.asarray(frame_mask, dtype=bool)
+        if frame_mask.shape != (frames, pairs):
+            raise ValueError(
+                "frame_mask must have shape "
+                f"({frames}, {pairs}), got {frame_mask.shape}"
+            )
+    valid_pair = raw_valid_pair & frame_mask
     delta = centers[:, pair_j] - centers[:, pair_i]
     distance = np.linalg.norm(delta, axis=2)
     head_distance = np.linalg.norm(heads[:, pair_j] - heads[:, pair_i], axis=2)
@@ -1003,6 +1085,8 @@ def _pair_metrics(
     escape_ba = _cosine(velocity[:, pair_i], -delta)
     behind_ab = np.sum((centers[:, pair_i] - centers[:, pair_j]) * heading[:, pair_j], axis=2) < 0.0
     behind_ba = np.sum((centers[:, pair_j] - centers[:, pair_i]) * heading[:, pair_i], axis=2) < 0.0
+    distance_for_lookback = distance.copy()
+    distance_for_lookback[~raw_valid_pair] = np.nan
     for array in (distance, head_distance, direction, pursuit_ab, pursuit_ba, escape_ab, escape_ba):
         array[~valid_pair] = np.nan
     behind_ab[~valid_pair] = False
@@ -1016,18 +1100,35 @@ def _pair_metrics(
     nose_head_ba = np.full((frames, pairs), np.nan, dtype=np.float32)
     for start in range(0, frames, 500):
         end = min(start + 500, frames)
-        body_b = kp[start:end, pair_j]
-        body_a = kp[start:end, pair_i]
-        nose_a = kp[start:end, pair_i, KP_NOSE]
-        nose_b = kp[start:end, pair_j, KP_NOSE]
-        distances_ab = np.linalg.norm(body_b - nose_a[:, :, None, :], axis=3)
-        distances_ba = np.linalg.norm(body_a - nose_b[:, :, None, :], axis=3)
-        nose_body_ab[start:end] = np.nanmin(distances_ab, axis=2)
-        nose_body_ba[start:end] = np.nanmin(distances_ba, axis=2)
-        nose_tail_ab[start:end] = np.linalg.norm(nose_a - kp[start:end, pair_j, KP_TAIL], axis=2)
-        nose_tail_ba[start:end] = np.linalg.norm(nose_b - kp[start:end, pair_i, KP_TAIL], axis=2)
-        nose_head_ab[start:end] = np.linalg.norm(nose_a - heads[start:end, pair_j], axis=2)
-        nose_head_ba[start:end] = np.linalg.norm(nose_b - heads[start:end, pair_i], axis=2)
+        active_rows, active_pair_columns = np.nonzero(valid_pair[start:end])
+        if not len(active_rows):
+            continue
+        frame_indices = start + active_rows
+        pair_columns = active_pair_columns.astype(int, copy=False)
+        body_b = kp[frame_indices, pair_j[pair_columns]]
+        body_a = kp[frame_indices, pair_i[pair_columns]]
+        nose_a = kp[frame_indices, pair_i[pair_columns], KP_NOSE]
+        nose_b = kp[frame_indices, pair_j[pair_columns], KP_NOSE]
+        distances_ab = np.linalg.norm(body_b - nose_a[:, None, :], axis=2)
+        distances_ba = np.linalg.norm(body_a - nose_b[:, None, :], axis=2)
+        nose_body_ab[frame_indices, pair_columns] = np.nanmin(distances_ab, axis=1)
+        nose_body_ba[frame_indices, pair_columns] = np.nanmin(distances_ba, axis=1)
+        nose_tail_ab[frame_indices, pair_columns] = np.linalg.norm(
+            nose_a - kp[frame_indices, pair_j[pair_columns], KP_TAIL],
+            axis=1,
+        )
+        nose_tail_ba[frame_indices, pair_columns] = np.linalg.norm(
+            nose_b - kp[frame_indices, pair_i[pair_columns], KP_TAIL],
+            axis=1,
+        )
+        nose_head_ab[frame_indices, pair_columns] = np.linalg.norm(
+            nose_a - heads[frame_indices, pair_j[pair_columns]],
+            axis=1,
+        )
+        nose_head_ba[frame_indices, pair_columns] = np.linalg.norm(
+            nose_b - heads[frame_indices, pair_i[pair_columns]],
+            axis=1,
+        )
     nose_body_ab[~valid_pair] = np.nan
     nose_body_ba[~valid_pair] = np.nan
     nose_tail_ab[~valid_pair] = np.nan
@@ -1038,7 +1139,10 @@ def _pair_metrics(
     lookback = max(int(round(fps * 0.30)), 1)
     distance_drop = np.zeros((frames, pairs), dtype=np.float32)
     if lookback < frames:
-        distance_drop[lookback:] = distance[:-lookback] - distance[lookback:]
+        distance_drop[lookback:] = (
+            distance_for_lookback[:-lookback]
+            - distance_for_lookback[lookback:]
+        )
     distance_drop[~valid_pair] = 0.0
     distance_drop_seconds = float(lookback / max(fps, 1e-9))
     turn = np.zeros((frames, mice), dtype=np.float32)
@@ -1048,12 +1152,30 @@ def _pair_metrics(
     velocity_a = velocity[:, pair_i]
     velocity_b = velocity[:, pair_j]
     trajectory_valid = valid_pair & np.all(np.isfinite(velocity_a), axis=2) & np.all(np.isfinite(velocity_b), axis=2)
-    trajectory_corr = _rolling_corr(velocity_a, velocity_b, trajectory_valid, max(int(round(fps * 2.5)), 4))
-    path_a = _rolling_sum(speed[:, pair_i], max(int(round(fps * 2.5)), 4)) / fps
-    path_b = _rolling_sum(speed[:, pair_j], max(int(round(fps * 2.5)), 4)) / fps
+    trajectory_corr = _rolling_corr(
+        velocity_a,
+        velocity_b,
+        trajectory_valid,
+        max(int(round(fps * 2.5)), 4),
+        active_mask=frame_mask,
+    )
+    path_a = _rolling_sum(
+        speed[:, pair_i],
+        max(int(round(fps * 2.5)), 4),
+        active_mask=frame_mask,
+    ) / fps
+    path_b = _rolling_sum(
+        speed[:, pair_j],
+        max(int(round(fps * 2.5)), 4),
+        active_mask=frame_mask,
+    ) / fps
     contact = np.minimum(nose_body_ab, nose_body_ba) <= 4.0
     contact &= valid_pair
-    repeated_contact = _rolling_sum(contact.astype(float), max(int(round(fps * 2.0)), 1)).astype(np.int16)
+    repeated_contact = _rolling_sum(
+        contact.astype(float),
+        max(int(round(fps * 2.0)), 1),
+        active_mask=frame_mask,
+    ).astype(np.int16)
     pose_pair_quality = np.sqrt(
         np.asarray(kin["pose_quality"][:, pair_i], dtype=float)
         * np.asarray(kin["pose_quality"][:, pair_j], dtype=float)
@@ -2792,6 +2914,65 @@ def _pair_prefilter(
     }, pair_i, pair_j
 
 
+def _pair_window_mask(
+    valuable_frame: np.ndarray,
+    fps: float,
+    config: Mapping[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Expand valuable pair frames into padded windows for expensive metrics.
+
+    The window is expanded on both sides so causal rolling features and FSM
+    context are still available when a pair first becomes relevant.  Short
+    gaps inside a valuable run are filled before expansion, which prevents a
+    noisy heading estimate from fragmenting one interaction into many small
+    windows.
+    """
+    valuable_frame = np.asarray(valuable_frame, dtype=bool)
+    if valuable_frame.ndim != 2:
+        raise ValueError(
+            f"valuable_frame must be a 2D array, got shape={valuable_frame.shape}"
+        )
+    lightweight_cfg = dict(config.get("lightweight_behavior_inference", {}))
+    prefilter_cfg = dict(lightweight_cfg.get("pair_prefilter", {}))
+    window_cfg = dict(prefilter_cfg.get("window", {}))
+    enabled = bool(window_cfg.get("enabled", True))
+    padding_seconds = max(float(window_cfg.get("padding_seconds", 2.5)), 0.0)
+    fill_gap_seconds = max(float(window_cfg.get("fill_gap_seconds", 0.15)), 0.0)
+    padding_frames = max(int(math.ceil(padding_seconds * max(float(fps), 0.0))), 0)
+    fill_gap_frames = max(int(round(fill_gap_seconds * max(float(fps), 0.0))), 0)
+
+    if not enabled:
+        return np.ones_like(valuable_frame, dtype=bool), {
+            "enabled": False,
+            "padding_seconds": padding_seconds,
+            "fill_gap_seconds": fill_gap_seconds,
+            "padding_frames": padding_frames,
+            "fill_gap_frames": fill_gap_frames,
+            "active_frame_count": int(valuable_frame.size),
+            "active_frame_fraction": 1.0 if valuable_frame.size else 0.0,
+        }
+
+    frames, pairs = valuable_frame.shape
+    window_mask = np.zeros_like(valuable_frame, dtype=bool)
+    for pair_index in range(pairs):
+        runs = _boolean_runs_with_gap(valuable_frame[:, pair_index], fill_gap_frames)
+        for start, end in runs:
+            window_start = max(start - padding_frames, 0)
+            window_end = min(end + padding_frames, frames - 1)
+            if window_start <= window_end:
+                window_mask[window_start : window_end + 1, pair_index] = True
+
+    return window_mask, {
+        "enabled": True,
+        "padding_seconds": padding_seconds,
+        "fill_gap_seconds": fill_gap_seconds,
+        "padding_frames": padding_frames,
+        "fill_gap_frames": fill_gap_frames,
+        "active_frame_count": int(window_mask.sum()),
+        "active_frame_fraction": float(window_mask.mean()) if window_mask.size else 0.0,
+    }
+
+
 def analyze(
     video_path: Path,
     cache_dir: Path,
@@ -2877,10 +3058,17 @@ def analyze(
         np.asarray(prefilter["candidate_pair_mask"], dtype=bool)
     ).astype(int).tolist()
     candidate_pair_indices_array = np.asarray(candidate_pair_indices, dtype=int)
+    pair_window_mask, pair_window_stats = _pair_window_mask(
+        np.asarray(prefilter["valuable_frame"], dtype=bool),
+        fps,
+        config,
+    )
+    candidate_frame_mask = pair_window_mask[:, candidate_pair_indices_array]
     metrics, pair_i, pair_j = _pair_metrics(
         kin,
         fps,
         pair_indices=candidate_pair_indices_array,
+        frame_mask=candidate_frame_mask,
     )
     candidate_metric_index = {
         int(original_index): int(metric_index)
@@ -2893,6 +3081,12 @@ def analyze(
         interaction_radius,
         float(prefilter["close_distance_cm"]),
         float(prefilter["min_heading_cosine"]),
+    )
+    LOGGER.info(
+        "[pair windows] active %.1f%% of pair-frame slots (padding %.2fs, fill gap %.2fs)",
+        100.0 * float(pair_window_stats["active_frame_fraction"]),
+        float(pair_window_stats["padding_seconds"]),
+        float(pair_window_stats["fill_gap_seconds"]),
     )
     candidate_ordinal = 0
     for pair_index, (mouse_a, mouse_b) in enumerate(zip(all_pair_i, all_pair_j)):
@@ -3174,6 +3368,7 @@ def analyze(
             "仅读取指定视频的完整 YOLO 预推理缓存，没有读取其他行为目录。",
             "该结果用于当前长视频的快速行为筛查；它不包含完整流水线的遮挡簇 ReID、ROI Pose 恢复和伪掩码身份保护。",
             "行为事件 CSV 同时包含 legacy chase/attack 与扩展 ethogram 标签；鼻头/鼻尾接触写入独立 lightweight_contact_events.csv，接触本身不会单独升级为 attack。",
+            "候选鼠对的昂贵鼻体几何与滚动轨迹特征只在距离/朝向窗口及其上下文 padding 内计算；窗口外帧保留在输出时间轴中但不参与 pair 行为 FSM。",
             "新视频没有人工行为标签，因此不能据此计算 Precision、Recall、F1 或 actor/target accuracy；事件中的角色 ID 和 role confidence 仅是模型诊断。",
         ],
         "interaction_radius_cm": float(interaction_radius),
@@ -3188,6 +3383,13 @@ def analyze(
                 np.asarray(prefilter["valuable_frame"], dtype=bool).mean()
             )
             if np.asarray(prefilter["valuable_frame"]).size
+            else 0.0,
+        },
+        "pair_window": {
+            **pair_window_stats,
+            "candidate_active_frame_count": int(candidate_frame_mask.sum()),
+            "candidate_active_frame_fraction": float(candidate_frame_mask.mean())
+            if candidate_frame_mask.size
             else 0.0,
         },
         "elapsed_s": float(time.perf_counter() - started),
