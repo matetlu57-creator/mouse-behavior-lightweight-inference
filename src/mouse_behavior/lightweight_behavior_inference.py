@@ -2939,7 +2939,7 @@ def _pair_window_mask(
     padding_seconds = max(float(window_cfg.get("padding_seconds", 2.5)), 0.0)
     fill_gap_seconds = max(float(window_cfg.get("fill_gap_seconds", 0.15)), 0.0)
     padding_frames = max(int(math.ceil(padding_seconds * max(float(fps), 0.0))), 0)
-    fill_gap_frames = max(int(round(fill_gap_seconds * max(float(fps), 0.0))), 0)
+    fill_gap_frames = max(int(math.ceil(fill_gap_seconds * max(float(fps), 0.0))), 0)
 
     if not enabled:
         return np.ones_like(valuable_frame, dtype=bool), {
