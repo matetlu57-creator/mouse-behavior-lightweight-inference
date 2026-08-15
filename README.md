@@ -44,7 +44,15 @@ Pair 级运动学与接触特征
 | `nose_head` | 一只鼠的鼻头接近另一只鼠的头部关键点，达到接触距离 |
 | `nose_tail` | 一只鼠的鼻头接近另一只鼠的尾部关键点，达到接触距离 |
 
-主行为事件写入 `lightweight_behavior_events.csv`；接触事件写入独立的 `lightweight_contact_events.csv`。若一帧同时满足鼻头和鼻尾距离门，会写为 `nose_head_and_nose_tail`，并在 `contact_type_components` 中保留两个组成类型。四分类裁剪函数仍作为旧命令的显式兼容入口保留，但当前轻量默认配置不会再调用它。
+主行为事件写入 `lightweight_behavior_events.csv`。除原有 `chase` / `attack` 外，当前轻量入口还按行为粒度输出北医数据集对应的扩展标签：
+
+| 粒度 | 标签 | 依据 |
+|---|---|---|
+| 社交/鼠对 | `together`、`approach`、`avoidance` | 每视频独立尺度下的鼠对距离、距离变化、稳健速度、追随/逃逸方向 |
+| 个体/鼠 ID | `running`、`walking`、`stationary` | 每只鼠的稳健位移速度和连续时间窗 |
+| 群体/整帧 | `huddle`、`isolation` | 当前帧有效鼠的最近邻距离分布 |
+
+鼻头接触和鼻尾接触仍写入独立的 `lightweight_contact_events.csv`。若一帧同时满足鼻头和鼻尾距离门，会写为 `nose_head_and_nose_tail`，并在 `contact_type_components` 中保留两个组成类型；接近不是由“接触”直接替代，而是要求距离持续下降且速度模式符合低速接近。攻击回退只接受方向一致的冲击型或接触后分离型时序证据，普通鼻头/鼻尾接触不会仅凭距离门升级为攻击。四分类裁剪函数仍作为旧命令的显式兼容入口保留，但当前轻量默认配置不会再调用它。
 
 ## 3. 骨架连接关系
 
@@ -79,27 +87,47 @@ right hip -> tail
 
 ```text
 .
-├─ lightweight_behavior_inference.py       # 轻量单视频分析主入口
+├─ src/mouse_behavior/                      # 可复用 Python 模块
+│  ├─ lightweight_behavior_inference.py     # 轻量单视频分析实现
+│  ├─ standard_behavior_engine.py           # 标准追逐/攻击行为引擎
+│  ├─ adaptive_arena_boundary.py            # 自适应笼界学习
+│  ├─ annotation_website_export.py          # 标注网站输出适配器
+│  ├─ pose_cache.py                          # Pose cache 写入模块
+│  ├─ mask_trigger_controller.py            # Mask 触发决策
+│  ├─ nvenc_video_writer.py                 # NVENC/OpenCV writer
+│  └─ logging_config.py                     # 统一日志配置
+├─ scripts/                                 # CLI、批处理和评估入口
+│  ├─ build_lightweight_pose_cache.py       # 只用 Pose 权重生成逐视频缓存
+│  ├─ run_lightweight_behavior_inference.py  # 轻量分析 CLI
+│  ├─ validate_beiyi_extended_ethogram.py   # 北医示例集验证
+│  ├─ calibrate_standard_behavior.py        # 离线阈值校准
+│  ├─ sweep_standard_behavior.py            # 阈值扫描
+│  ├─ rerun_beiyi_lightweight_rules.py      # 复用缓存重跑规则
+│  ├─ run_lightweight_behavior_inference.ps1
+│  └─ run_stage1_stage2.ps1
+├─ lightweight_behavior_inference.py       # 根目录兼容 CLI
 ├─ lightweight_cache_behavior_analysis.py  # 旧模块名兼容层
-├─ standard_behavior_engine.py             # 标准追逐/攻击行为引擎
+├─ standard_behavior_engine.py              # 根目录兼容导入层
+├─ adaptive_arena_boundary.py               # 根目录兼容导入层
+├─ annotation_website_export.py             # 根目录兼容导入层
+├─ mask_trigger_controller.py               # 根目录兼容导入层
+├─ nvenc_video_writer.py                    # 根目录兼容导入层
 ├─ mouse_chase_attack_config.yaml           # 行为阈值和运行开关
 ├─ mouse_chase_attack_high_recall.py       # 完整管线兼容入口/集成入口
 ├─ mouse_chase_attack_extractor_base.py    # 原有提取器基础代码
-├─ mask_trigger_controller.py              # 原有 Mask 触发控制模块
-├─ nvenc_video_writer.py                    # NVENC 写视频辅助模块
-├─ calibrate_standard_behavior.py          # 离线阈值校准工具
-├─ sweep_standard_behavior.py              # 缓存特征上的阈值扫描工具
-├─ run_lightweight_behavior_inference.ps1  # Windows 轻量分析脚本
-├─ run_stage1_stage2.ps1                   # 完整流程兼容脚本
+├─ tests/                                   # 单元、回归和性能测试
+├─ pyproject.toml                           # 包元数据和 pytest 配置
+├─ CONTRIBUTING.md                          # Git/模块/日志/测试约定
 ├─ weights/                                 # 下载 Release 后放置的本地权重目录
 │  └─ README.md
-├─ tests/                                   # 单元、回归和性能测试
 ├─ historical_v1.40_v1.41/                 # 历史工程资料
 ├─ historical_v1.42.1/                     # v1.42.1 资料
 ├─ original/                                # 原始版本备份
 ├─ requirements.txt                         # 运行依赖
 └─ requirements-dev.txt                     # 测试依赖
 ```
+
+根目录的同名 Python 文件只为旧命令、旧 notebook 和完整管线保留兼容路径；新代码应从 `mouse_behavior` 包导入，新的命令行入口应放到 `scripts/`。这个分层参考了 [SOAR-PKU/mTrack](https://github.com/SOAR-PKU/mTrack) 中 `mtrack/` 与 `scripts/` 的职责分离方式。
 
 `historical_*` 和 `original/` 用于审计与回归对照，不应作为当前运行入口。视频、缓存和生成结果由 `.gitignore` 排除；模型权重作为本仓库 Release 附件发布。
 
@@ -143,7 +171,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 ### 6.1 直接调用 Python
 
 ```powershell
-python .\lightweight_behavior_inference.py `
+python .\scripts\run_lightweight_behavior_inference.py `
   --video "D:\data\part_001.mp4" `
   --yolo-cache "D:\cache\part_001\yolo_precompute" `
   --config .\mouse_chase_attack_config.yaml `
@@ -158,7 +186,7 @@ python .\lightweight_behavior_inference.py `
 需要逐帧分析、优先提高召回率时，把采样步长改成 1：
 
 ```powershell
-python .\lightweight_behavior_inference.py `
+python .\scripts\run_lightweight_behavior_inference.py `
   --video "D:\data\part_001.mp4" `
   --yolo-cache "D:\cache\part_001\yolo_precompute" `
   --config .\mouse_chase_attack_config.yaml `
@@ -168,6 +196,20 @@ python .\lightweight_behavior_inference.py `
   --sample-stride 1
 ```
 
+### 6.3 直接从视频生成轻量 Pose 缓存
+
+北医示例或其他视频需要先生成缓存时，只加载七关键点 Pose 权重，不加载 OBB：
+
+```powershell
+python .\scripts\build_lightweight_pose_cache.py `
+  --video "F:\北医标注-行为例子\北医标注-行为例子\社交行为\2.接近-被接近\社交-接近1.mov" `
+  --output "D:\beyi_cache\社交-接近1\yolo_precompute" `
+  --model ".\weights\pose\best.pt" `
+  --device 0
+```
+
+然后将这个 `yolo_precompute` 目录交给轻量行为入口。边界学习、尺度换算和扩展行为分类均在本视频内部完成，不复用其他视频的笼子边界。
+
 `sample_stride=3` 是当前速度与召回率的折中默认值；它不是经过所有行为类别人工标注数据最终校准的科学结论。阈值冻结前仍应使用代表性人工标注视频计算 Precision、Recall、F1 和 actor/target accuracy。
 
 ### 6.2 使用 PowerShell 包装脚本
@@ -176,7 +218,7 @@ python .\lightweight_behavior_inference.py `
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\run_lightweight_behavior_inference.ps1 `
+  -File .\scripts\run_lightweight_behavior_inference.ps1 `
   -Python "D:\Anaconda3\envs\pytorch\python.exe" `
   -Video "D:\data\part_001.mp4" `
   -YoloCache "D:\cache\part_001\yolo_precompute" `
@@ -193,7 +235,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 如果事件 CSV 已经存在，可以只执行裁剪：
 
 ```powershell
-python .\lightweight_behavior_inference.py `
+python .\scripts\run_lightweight_behavior_inference.py `
   --video "D:\data\part_001.mp4" `
   --yolo-cache "D:\cache\part_001\yolo_precompute" `
   --output-dir .\outputs\part_001 `
@@ -213,13 +255,22 @@ python .\lightweight_behavior_inference.py `
 ```text
 outputs/part_001/
 ├─ lightweight_analysis_metadata.json
-├─ lightweight_behavior_events.csv       # 只含 chase / attack
+├─ lightweight_behavior_events.csv       # chase/attack + extended ethogram
 ├─ lightweight_contact_events.csv        # nose_head / nose_tail 接触
 ├─ lightweight_pair_summary.csv
-└─ lightweight_top_evidence.csv
+├─ lightweight_top_evidence.csv
+├─ annotation_website_export_report.json  # 网站兼容导出统计与跳过原因
+└─ annotation_website_import/
+   └─ <视频名>/
+      ├─ video.mp4 或 video.mov           # 原始完整视频，优先硬链接
+      ├─ annotations.json                 # schema_version 1.0 行为标注
+      ├─ tracks.jsonl                     # 0-based 连续逐帧轨迹，含空检测帧
+      └─ metadata.json                    # FPS、尺寸、帧数、关键点和骨架
 ```
 
 只有显式使用 `--extract-four-class-clips` 或 `-ExtractFourClassClips` 时，才会额外生成旧四类原始片段目录。元数据会记录视频、缓存、FPS、采样步长、鼠只数量、分析帧数、运行耗时、启用的行为路径、接触事件统计、是否渲染以及轻量路径的限制。
+
+`annotation_website_import` 是独立的输出适配层，遵循《已标记行为数据导入格式说明》的完整视频导入结构。它不修改轻量追踪、阈值、行为状态机、现有 CSV、渲染或四类裁剪：算法内部事件仍保留 `actor_id/target_id`；网站文件只写升序且去重的 `mouse_ids`，因为网站合同不使用 ID 顺序表达主动方和被动方。类别名仅在网站文件中映射为网站默认名称，其中 `attack/huddle/isolation` 分别写为 `攻击行为/扎堆行为/孤立行为`。需要上传时，把 `annotation_website_import` 内一个或多个视频目录整体打成 ZIP；当前网站文档注明该上传入口仍待实现，因此现阶段生成的是契约兼容数据包。
 
 ## 9. 配置开关
 
@@ -271,15 +322,15 @@ lightweight_behavior_inference:
 
 ## 11. 验证状态
 
-在本地整理前的最近一次代码验证记录为：
+本次结构整理后的本地验证记录为：
 
-- `pytest`：15 个测试通过；
+- `pytest`：25 个测试通过；
 - `compileall` 和关键模块语法检查：通过；
 - YAML/FSM 不变量检查：通过；
 - Identity Cascade fuzz：50/50 通过；
 - 标准行为引擎的持续追逐、攻击因果链、低质量观测保护、接触与行为分离和骨架几何性质测试：通过；
 - 真实视频上的 Precision、Recall、F1、actor/target accuracy：尚未作为仓库级科学验收冻结；
-- 完整旧管线的实际运行：当前源码目录缺少 `disk_sequence_guard.py`、`pose_quality_recovery.py`、`mask_cluster_reid.py` 和 `adaptive_arena_boundary.py` 等外部/未随本目录提供的模块，因此优先使用轻量缓存入口。
+- 完整旧管线的实际运行：当前源码目录仍缺少 `disk_sequence_guard.py`、`pose_quality_recovery.py`、`mask_cluster_reid.py` 等外部/未随本目录提供的模块，因此优先使用轻量缓存入口。
 
 验证命令：
 

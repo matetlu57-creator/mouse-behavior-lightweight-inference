@@ -1,4 +1,4 @@
-"""Backward-compatible import path for mask-trigger decisions."""
+"""Backward-compatible import path for the annotation export adapter."""
 
 from __future__ import annotations
 
@@ -13,4 +13,4 @@ if str(_SRC_ROOT) not in sys.path:
 from mouse_behavior._compat import reexport
 
 
-_IMPLEMENTATION = reexport("mouse_behavior.mask_trigger_controller", globals())
+_IMPLEMENTATION = reexport("mouse_behavior.annotation_website_export", globals())
