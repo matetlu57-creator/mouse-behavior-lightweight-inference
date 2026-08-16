@@ -2884,9 +2884,8 @@ def extract_behavior_clips(
     if not selected_behaviors:
         raise ValueError("行为事件 CSV 中没有可切片的指定行为")
 
-    states = {
-        behavior: np.zeros(total_frames, dtype=bool)
-        for behavior in selected_behaviors
+    event_rows_by_behavior: dict[str, list[dict[str, Any]]] = {
+        behavior: [] for behavior in selected_behaviors
     }
     source_event_rows = {behavior: 0 for behavior in selected_behaviors}
     level_counts: dict[str, dict[str, int]] = {
@@ -2894,7 +2893,7 @@ def extract_behavior_clips(
     }
     for event in events_df.to_dict("records"):
         behavior = str(event.get("behavior", "")).strip().lower()
-        if behavior not in states:
+        if behavior not in event_rows_by_behavior:
             continue
         level = str(event.get("candidate_level", "")).strip().lower()
         if event_level != "all" and level != event_level:
@@ -2906,7 +2905,17 @@ def extract_behavior_clips(
             continue
         if end < start:
             continue
-        states[behavior][start : end + 1] = True
+        try:
+            peak = int(event.get("peak_frame", (start + end) // 2))
+        except (TypeError, ValueError):
+            peak = (start + end) // 2
+        event_rows_by_behavior[behavior].append(
+            {
+                "start_frame": start,
+                "end_frame": end,
+                "peak_frame": min(max(peak, start), end),
+            }
+        )
         source_event_rows[behavior] += 1
         level_counts[behavior][level or "extended"] += 1
 
@@ -2917,14 +2926,20 @@ def extract_behavior_clips(
     for behavior in selected_behaviors:
         behavior_dir = output_dir / behavior
         behavior_dir.mkdir(parents=True, exist_ok=True)
-        selected = _clip_intervals_from_state(
-            states[behavior].astype(np.int8),
-            1,
-            fps,
-            clip_seconds,
-            min_start_interval_seconds,
-            max_clips_per_behavior,
-        )
+        selected: list[tuple[int, int]] = []
+        min_interval = max(int(round(float(min_start_interval_seconds) * fps)), 1)
+        for event in sorted(
+            event_rows_by_behavior[behavior],
+            key=lambda row: (int(row["peak_frame"]), int(row["start_frame"])),
+        ):
+            center = int(event["peak_frame"])
+            start = max(0, min(center - clip_frames // 2, total_frames - clip_frames))
+            end = start + clip_frames - 1
+            if selected and start - selected[-1][0] < min_interval:
+                continue
+            selected.append((int(start), int(end)))
+            if len(selected) >= max_clips_per_behavior:
+                break
         clip_counts[behavior] = len(selected)
         for clip_index, (start, end) in enumerate(selected, start=1):
             path = behavior_dir / (
