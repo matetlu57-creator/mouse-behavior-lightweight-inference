@@ -7,9 +7,9 @@ param(
     [string]$Output = ".\outputs\lightweight_behavior",
     [double]$Fps = 29.329,
     [int]$ExpectedMice = 20,
-    [int]$SampleStride = 3,
-    [switch]$NoClips,
-    [switch]$ExtractFourClassClips
+    [int]$SampleStride = 1,
+    [switch]$RenderVideo,
+    [switch]$ExtractBehaviorClips
 )
 
 $ErrorActionPreference = "Stop"

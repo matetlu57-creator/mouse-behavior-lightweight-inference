@@ -7,9 +7,9 @@ param(
     [string]$Output = ".\outputs\lightweight_behavior",
     [double]$Fps = 29.329,
     [int]$ExpectedMice = 20,
-    [int]$SampleStride = 3,
-    [switch]$NoClips,
-    [switch]$ExtractFourClassClips
+    [int]$SampleStride = 1,
+    [switch]$RenderVideo,
+    [switch]$ExtractBehaviorClips
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,7 +36,8 @@ foreach ($Path in @($Script, $Config, $Video, $YoloCache)) {
 }
 
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
-$ClipsOutput = Join-Path $Output "four_class_clips"
+$RenderOutput = Join-Path $Output "轻量行为推理_渲染.mp4"
+$BehaviorClipsOutput = Join-Path $Output "behavior_clips"
 $AnalysisArguments = @(
     $Script,
     "--video", $Video,
@@ -48,33 +49,43 @@ $AnalysisArguments = @(
     "--sample-stride", $SampleStride
 )
 
-$ClipArguments = @(
+$BehaviorClipArguments = @(
     $Script,
     "--video", $Video,
     "--yolo-cache", $YoloCache,
     "--output-dir", $Output,
-    "--extract-four-class-clips",
-    "--clip-level", "strong",
-    "--clip-seconds", "5",
-    "--max-clips-per-class", "200",
-    "--clips-output", $ClipsOutput
+    "--extract-behavior-clips",
+    "--behavior-level", "all",
+    "--behavior-clip-seconds", "5",
+    "--max-clips-per-behavior", "200",
+    "--behavior-clips-output", $BehaviorClipsOutput
 )
 
 Write-Host "=== Lightweight behavior inference ==="
 Write-Host ("Video: " + $Video)
 Write-Host ("YOLO cache: " + $YoloCache)
 Write-Host ("Output: " + $Output)
-Write-Host "Render: disabled"
+Write-Host ("Sample stride: " + $SampleStride)
+Write-Host ("Render: " + $(if ($RenderVideo) { "enabled" } else { "disabled" }))
+Write-Host ("Behavior clips: " + $(if ($ExtractBehaviorClips) { "enabled" } else { "disabled" }))
 & $Python @AnalysisArguments
 if ($LASTEXITCODE -ne 0) {
     throw ("Lightweight behavior inference failed; exit code: " + $LASTEXITCODE)
 }
 
-if ($ExtractFourClassClips -and -not $NoClips) {
-    Write-Host "=== Extracting four raw video classes ==="
-    & $Python @ClipArguments
+if ($RenderVideo) {
+    Write-Host "=== Rendering annotated behavior video ==="
+    & $Python $Script --video $Video --yolo-cache $YoloCache --output-dir $Output --render-only --events (Join-Path $Output "lightweight_behavior_events.csv") --render-output $RenderOutput
     if ($LASTEXITCODE -ne 0) {
-        throw ("Four-class clip extraction failed; exit code: " + $LASTEXITCODE)
+        throw ("Behavior video rendering failed; exit code: " + $LASTEXITCODE)
+    }
+}
+
+if ($ExtractBehaviorClips) {
+    Write-Host "=== Extracting behavior-specific raw clips ==="
+    & $Python @BehaviorClipArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw ("Behavior clip extraction failed; exit code: " + $LASTEXITCODE)
     }
 }
 
