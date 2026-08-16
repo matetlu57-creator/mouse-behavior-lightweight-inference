@@ -3106,6 +3106,9 @@ def analyze(
                 )
             ),
             "engine_evaluated": metric_index is not None,
+            "fsm_evaluated_frames": 0,
+            "fsm_skipped_frames": 0,
+            "fsm_evaluated_fraction": 0.0,
             "nose_head_contact_event_count": 0,
             "nose_tail_contact_event_count": 0,
             "combined_nose_head_nose_tail_event_count": 0,
@@ -3171,6 +3174,13 @@ def analyze(
             )
         )
         summary = base_summary
+        fsm_compute = enriched.get(
+            "standard_behavior_compute_row",
+            pair_df.get("valid_pair", pd.Series(True, index=pair_df.index)),
+        ).fillna(False).astype(bool)
+        summary["fsm_evaluated_frames"] = int(fsm_compute.sum())
+        summary["fsm_skipped_frames"] = int(len(fsm_compute) - fsm_compute.sum())
+        summary["fsm_evaluated_fraction"] = float(fsm_compute.mean()) if len(fsm_compute) else 0.0
         summary["nose_head_contact_event_count"] = int(
             sum(
                 "nose_head" in str(event.get("contact_type_components", "")).split(";")
@@ -3310,6 +3320,14 @@ def analyze(
     )
     _write_csv(output_dir / "lightweight_pair_summary.csv", pair_summaries)
     _write_csv(output_dir / "lightweight_top_evidence.csv", top_evidence)
+    fsm_evaluated_pair_frames = int(
+        sum(int(summary.get("fsm_evaluated_frames", 0)) for summary in pair_summaries)
+    )
+    fsm_candidate_timeline_frames = int(analysis_frames * len(candidate_pair_indices))
+    fsm_skipped_pair_frames = max(
+        fsm_candidate_timeline_frames - fsm_evaluated_pair_frames,
+        0,
+    )
     metadata = {
         "source_video": str(video_path),
         "yolo_cache": str(cache_dir),
@@ -3368,12 +3386,27 @@ def analyze(
             "仅读取指定视频的完整 YOLO 预推理缓存，没有读取其他行为目录。",
             "该结果用于当前长视频的快速行为筛查；它不包含完整流水线的遮挡簇 ReID、ROI Pose 恢复和伪掩码身份保护。",
             "行为事件 CSV 同时包含 legacy chase/attack 与扩展 ethogram 标签；鼻头/鼻尾接触写入独立 lightweight_contact_events.csv，接触本身不会单独升级为 attack。",
-            "候选鼠对的昂贵鼻体几何与滚动轨迹特征只在距离/朝向窗口及其上下文 padding 内计算；窗口外帧保留在输出时间轴中但不参与 pair 行为 FSM。",
+            "候选鼠对的昂贵鼻体几何、滚动轨迹特征和标准行为连续证据只在距离/朝向窗口及其上下文 padding 内计算；窗口外帧保留在输出时间轴中并作为FSM硬否决/状态重置行。",
             "新视频没有人工行为标签，因此不能据此计算 Precision、Recall、F1 或 actor/target accuracy；事件中的角色 ID 和 role confidence 仅是模型诊断。",
         ],
         "interaction_radius_cm": float(interaction_radius),
         "candidate_pair_count": int(len(candidate_pair_indices)),
         "total_pair_count": int(len(all_pair_i)),
+        "standard_behavior_engine": {
+            "skip_inactive_rows": bool(
+                dict(config.get("standard_behavior_engine", {})).get(
+                    "skip_inactive_rows", True
+                )
+            ),
+            "evaluated_pair_frame_count": fsm_evaluated_pair_frames,
+            "skipped_pair_frame_count": fsm_skipped_pair_frames,
+            "candidate_timeline_pair_frame_count": fsm_candidate_timeline_frames,
+            "evaluated_pair_frame_fraction": float(
+                fsm_evaluated_pair_frames / fsm_candidate_timeline_frames
+            )
+            if fsm_candidate_timeline_frames
+            else 0.0,
+        },
         "pair_prefilter": {
             "enabled": bool(prefilter["enabled"]),
             "close_distance_cm": float(prefilter["close_distance_cm"]),

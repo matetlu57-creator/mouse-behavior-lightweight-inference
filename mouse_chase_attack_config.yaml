@@ -1253,6 +1253,9 @@ attack:
 standard_behavior_engine:
   enabled: true
   decision_mode: standard   # standard / shadow / legacy
+  # 轻量路径保留完整时间轴，但窗口外 valid_pair=false 的行不再计算
+  # 双向连续证据；FSM仍接收硬否决行以重置状态。设为false可做结果A/B。
+  skip_inactive_rows: true
 
   # Observation Quality。低质量帧可以维持已存在事件，但不能单独开启新事件。
   quality:

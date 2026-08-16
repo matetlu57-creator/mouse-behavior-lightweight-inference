@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 import importlib.util
 import sys
@@ -221,6 +222,67 @@ def test_contact_without_initiation_or_reaction_is_not_attack():
     out = engine.apply_standard_behavior_engine(pd.DataFrame(rows), 30.0, cfg)
     assert not bool(out["weak_standard_final_attack"].any())
     assert not bool(out["strong_standard_final_attack"].any())
+
+
+def test_inactive_rows_are_skipped_without_changing_fsm_events():
+    engine = load_engine()
+    cfg_skip = config()
+    cfg_full = copy.deepcopy(cfg_skip)
+    cfg_skip["standard_behavior_engine"]["skip_inactive_rows"] = True
+    cfg_full["standard_behavior_engine"]["skip_inactive_rows"] = False
+
+    rows = [base_row(i) for i in range(120)]
+    for i in range(30, 90):
+        rows[i]["valid_pair"] = False
+    frame_df = pd.DataFrame(rows)
+
+    skipped = engine.apply_standard_behavior_engine(frame_df, 30.0, cfg_skip)
+    full = engine.apply_standard_behavior_engine(frame_df, 30.0, cfg_full)
+
+    assert int(skipped["standard_behavior_compute_row"].sum()) == 60
+    assert bool(full["standard_behavior_compute_row"].all())
+    for level in ("weak", "strong"):
+        for behavior in ("chase", "attack"):
+            column = f"{level}_standard_final_{behavior}"
+            np.testing.assert_array_equal(skipped[column], full[column])
+        np.testing.assert_array_equal(
+            skipped[f"{level}_standard_chase_state"],
+            full[f"{level}_standard_chase_state"],
+        )
+        np.testing.assert_array_equal(
+            skipped[f"{level}_standard_attack_state"],
+            full[f"{level}_standard_attack_state"],
+        )
+        for column in (
+            f"{level}_standard_chase_score",
+            f"{level}_standard_attack_score",
+            f"{level}_standard_role_confidence",
+        ):
+            np.testing.assert_allclose(
+                skipped.loc[skipped["valid_pair"], column],
+                full.loc[full["valid_pair"], column],
+            )
+
+    for level in ("weak", "strong"):
+        assert engine.extract_standard_behavior_events(
+            skipped, 30.0, level, pair_key="1_2"
+        ) == engine.extract_standard_behavior_events(
+            full, 30.0, level, pair_key="1_2"
+        )
+
+
+def test_provider_hint_is_not_skipped_when_pair_is_temporarily_invalid():
+    engine = load_engine()
+    cfg = config()
+    cfg["standard_behavior_engine"]["skip_inactive_rows"] = True
+    row = base_row(0)
+    row["valid_pair"] = False
+    row["weak_strict_attack"] = True
+
+    out = engine.apply_standard_behavior_engine(pd.DataFrame([row]), 30.0, cfg)
+
+    assert bool(out.loc[0, "standard_behavior_compute_candidate"])
+    assert bool(out.loc[0, "standard_behavior_compute_row"])
 
 
 def test_ethogram_aggregates_chase_and_attack_independently():

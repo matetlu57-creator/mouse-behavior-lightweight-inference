@@ -871,11 +871,10 @@ def apply_standard_behavior_engine(
         config.get("scale", {}).get("assumed_mouse_body_length_cm", 8.0)
     )
 
-    pose_quality = np.zeros(len(output), dtype=float)
-    identity_quality = np.zeros(len(output), dtype=float)
-    behavior_quality = np.zeros(len(output), dtype=float)
-    interaction_candidate = np.zeros(len(output), dtype=bool)
-    rows = output.to_dict("records")
+    row_count = len(output)
+    pose_quality = np.zeros(row_count, dtype=float)
+    identity_quality = np.zeros(row_count, dtype=float)
+    behavior_quality = np.zeros(row_count, dtype=float)
     interaction_cfg = engine_cfg.get("interaction_graph", {})
     interaction_radius = float(
         interaction_cfg.get(
@@ -887,15 +886,62 @@ def apply_standard_behavior_engine(
             + float(interaction_cfg.get("buffer_cm", 5.0)),
         )
     )
-    for i, row in enumerate(rows):
+
+    # The lightweight analyzer keeps the pair's complete timeline for audit,
+    # but marks frames outside its padded distance/heading windows invalid.
+    # Turning every one of those rows into a Python dictionary and evaluating
+    # four directional evidence objects was the dominant long-video cost.  A
+    # hard-vetoed row cannot open or hold an FSM state, so it is safe to skip
+    # its expensive evidence calculation.  Explicit provider/occlusion hints
+    # remain computable for full-pipeline callers even when valid_pair is false.
+    valid_pair_input = output.get(
+        "valid_pair", pd.Series(True, index=output.index)
+    ).fillna(False).astype(bool).to_numpy()
+    provider_hint = np.zeros(row_count, dtype=bool)
+    provider_suffixes = (
+        "strict_chase",
+        "window_chase",
+        "near_recovery_chase",
+        "close_follow_chase",
+        "strict_attack",
+        "impulse_attack",
+        "grapple_attack",
+        "occlusion_overlap_attack",
+    )
+    for level in ("weak", "strong"):
+        for suffix in provider_suffixes:
+            column = f"{level}_{suffix}"
+            if column in output:
+                provider_hint |= output[column].fillna(False).astype(bool).to_numpy()
+    if "cluster_attack_hint" in output:
+        provider_hint |= output["cluster_attack_hint"].fillna(False).astype(bool).to_numpy()
+
+    compute_candidate = valid_pair_input | provider_hint
+    skip_inactive_rows = bool(engine_cfg.get("skip_inactive_rows", True))
+    compute_row_mask = (
+        compute_candidate.copy()
+        if skip_inactive_rows
+        else np.ones(row_count, dtype=bool)
+    )
+    compute_indices = np.flatnonzero(compute_row_mask)
+    compute_rows = output.iloc[compute_indices].to_dict("records")
+
+    distance_all = pd.to_numeric(
+        output.get("center_distance_cm", pd.Series(np.nan, index=output.index)),
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    interaction_candidate = np.isfinite(distance_all) & (
+        distance_all <= interaction_radius
+    )
+    for i, row in zip(compute_indices, compute_rows):
         pq, iq, bq = _pair_quality(row, engine_cfg)
         pose_quality[i], identity_quality[i], behavior_quality[i] = pq, iq, bq
-        d = _num(row, "center_distance_cm", float("inf"))
-        interaction_candidate[i] = bool(np.isfinite(d) and d <= interaction_radius)
     output["standard_pose_quality"] = pose_quality
     output["standard_identity_quality"] = identity_quality
     output["standard_behavior_quality"] = behavior_quality
     output["standard_interaction_candidate"] = interaction_candidate
+    output["standard_behavior_compute_candidate"] = compute_candidate
+    output["standard_behavior_compute_row"] = compute_row_mask
 
     for level in ("weak", "strong"):
         chase_cfg = config["chase"][level]
@@ -907,87 +953,92 @@ def apply_standard_behavior_engine(
 
         ab_list = []
         ba_list = []
-        occ = np.zeros(len(rows), dtype=float)
-        for i, row in enumerate(rows):
+        occ = np.zeros(row_count, dtype=float)
+        for i, row in zip(compute_indices, compute_rows):
             ab = _chase_evidence(row, "a_to_b", chase_cfg, attack_cfg, common_engine)
             ba = _chase_evidence(row, "b_to_a", chase_cfg, attack_cfg, common_engine)
             ab_list.append(ab)
             ba_list.append(ba)
             occ[i] = _occlusion_score(row, attack_cfg)
 
-        ab_chase = np.asarray([v.chase for v in ab_list], dtype=float)
-        ba_chase = np.asarray([v.chase for v in ba_list], dtype=float)
-        ab_approach = np.asarray([v.approach for v in ab_list], dtype=float)
-        ba_approach = np.asarray([v.approach for v in ba_list], dtype=float)
-        ab_contact = np.asarray([v.contact for v in ab_list], dtype=float)
-        ba_contact = np.asarray([v.contact for v in ba_list], dtype=float)
-        ab_initiation = np.asarray([v.initiation for v in ab_list], dtype=float)
-        ba_initiation = np.asarray([v.initiation for v in ba_list], dtype=float)
-        ab_reaction = np.asarray([v.reaction for v in ab_list], dtype=float)
-        ba_reaction = np.asarray([v.reaction for v in ba_list], dtype=float)
-        ab_dynamic = np.asarray([v.dynamic_attack for v in ab_list], dtype=float)
-        ba_dynamic = np.asarray([v.dynamic_attack for v in ba_list], dtype=float)
-        ab_grapple = np.asarray([v.grapple for v in ab_list], dtype=float)
-        ba_grapple = np.asarray([v.grapple for v in ba_list], dtype=float)
-        ab_dynamic_gate = np.asarray([v.dynamic_attack_gate for v in ab_list], dtype=bool)
-        ba_dynamic_gate = np.asarray([v.dynamic_attack_gate for v in ba_list], dtype=bool)
-        ab_impulse_gate = np.asarray([v.impulse_attack_gate for v in ab_list], dtype=bool)
-        ba_impulse_gate = np.asarray([v.impulse_attack_gate for v in ba_list], dtype=bool)
-        ab_dynamic_context_gate = np.asarray(
-            [v.dynamic_attack_context_gate for v in ab_list], dtype=bool
+        def scatter_evidence(
+            values: Sequence[DirectionEvidence],
+            attribute: str,
+            dtype: Any = float,
+        ) -> np.ndarray:
+            scattered = np.zeros(row_count, dtype=dtype)
+            if len(compute_indices):
+                scattered[compute_indices] = np.asarray(
+                    [getattr(value, attribute) for value in values], dtype=dtype
+                )
+            return scattered
+
+        ab_chase = scatter_evidence(ab_list, "chase")
+        ba_chase = scatter_evidence(ba_list, "chase")
+        ab_approach = scatter_evidence(ab_list, "approach")
+        ba_approach = scatter_evidence(ba_list, "approach")
+        ab_contact = scatter_evidence(ab_list, "contact")
+        ba_contact = scatter_evidence(ba_list, "contact")
+        ab_initiation = scatter_evidence(ab_list, "initiation")
+        ba_initiation = scatter_evidence(ba_list, "initiation")
+        ab_reaction = scatter_evidence(ab_list, "reaction")
+        ba_reaction = scatter_evidence(ba_list, "reaction")
+        ab_dynamic = scatter_evidence(ab_list, "dynamic_attack")
+        ba_dynamic = scatter_evidence(ba_list, "dynamic_attack")
+        ab_grapple = scatter_evidence(ab_list, "grapple")
+        ba_grapple = scatter_evidence(ba_list, "grapple")
+        ab_dynamic_gate = scatter_evidence(ab_list, "dynamic_attack_gate", bool)
+        ba_dynamic_gate = scatter_evidence(ba_list, "dynamic_attack_gate", bool)
+        ab_impulse_gate = scatter_evidence(ab_list, "impulse_attack_gate", bool)
+        ba_impulse_gate = scatter_evidence(ba_list, "impulse_attack_gate", bool)
+        ab_dynamic_context_gate = scatter_evidence(
+            ab_list, "dynamic_attack_context_gate", bool
         )
-        ba_dynamic_context_gate = np.asarray(
-            [v.dynamic_attack_context_gate for v in ba_list], dtype=bool
+        ba_dynamic_context_gate = scatter_evidence(
+            ba_list, "dynamic_attack_context_gate", bool
         )
-        ab_stationary_gate = np.asarray([v.stationary_fight_gate for v in ab_list], dtype=bool)
-        ba_stationary_gate = np.asarray([v.stationary_fight_gate for v in ba_list], dtype=bool)
-        ab_potential_contact = np.asarray([v.potential_contact for v in ab_list], dtype=bool)
-        ba_potential_contact = np.asarray([v.potential_contact for v in ba_list], dtype=bool)
-        ab_evidence_count = np.asarray([v.attack_evidence_count for v in ab_list], dtype=int)
-        ba_evidence_count = np.asarray([v.attack_evidence_count for v in ba_list], dtype=int)
+        ab_stationary_gate = scatter_evidence(ab_list, "stationary_fight_gate", bool)
+        ba_stationary_gate = scatter_evidence(ba_list, "stationary_fight_gate", bool)
+        ab_potential_contact = scatter_evidence(ab_list, "potential_contact", bool)
+        ba_potential_contact = scatter_evidence(ba_list, "potential_contact", bool)
+        ab_evidence_count = scatter_evidence(ab_list, "attack_evidence_count", int)
+        ba_evidence_count = scatter_evidence(ba_list, "attack_evidence_count", int)
         pair_deformation = np.maximum(
-            np.asarray([v.pose_deformation for v in ab_list], dtype=float),
-            np.asarray([v.pose_deformation for v in ba_list], dtype=float),
+            scatter_evidence(ab_list, "pose_deformation"),
+            scatter_evidence(ba_list, "pose_deformation"),
         )
 
         # Existing specialized gates become lower bounds on evidence only.
-        chase_provider = np.asarray([
-            _provider_floor(
-                row,
-                [
-                    f"{level}_strict_chase",
-                    f"{level}_window_chase",
-                    f"{level}_near_recovery_chase",
-                    f"{level}_close_follow_chase",
-                ],
-                float(provider_cfg.get("chase", 0.70 if level == "weak" else 0.78)),
-            )
-            for row in rows
-        ])
-        dynamic_provider = np.asarray([
-            _provider_floor(
-                row,
-                [f"{level}_strict_attack", f"{level}_impulse_attack"],
-                float(provider_cfg.get("dynamic_attack", 0.70 if level == "weak" else 0.80)),
-            )
-            for row in rows
-        ])
-        grapple_provider = np.asarray([
-            _provider_floor(
-                row,
-                [f"{level}_grapple_attack"],
-                float(provider_cfg.get("grapple", 0.72 if level == "weak" else 0.82)),
-            )
-            for row in rows
-        ])
-        occlusion_provider = np.asarray([
-            _provider_floor(
-                row,
-                [f"{level}_occlusion_overlap_attack"],
-                float(provider_cfg.get("occlusion", 0.78 if level == "weak" else 0.86)),
-            )
-            for row in rows
-        ])
+        def scatter_provider(columns: Sequence[str], floor: float) -> np.ndarray:
+            scattered = np.zeros(row_count, dtype=float)
+            if len(compute_indices):
+                scattered[compute_indices] = np.asarray(
+                    [_provider_floor(row, columns, floor) for row in compute_rows],
+                    dtype=float,
+                )
+            return scattered
+
+        chase_provider = scatter_provider(
+            [
+                f"{level}_strict_chase",
+                f"{level}_window_chase",
+                f"{level}_near_recovery_chase",
+                f"{level}_close_follow_chase",
+            ],
+            float(provider_cfg.get("chase", 0.70 if level == "weak" else 0.78)),
+        )
+        dynamic_provider = scatter_provider(
+            [f"{level}_strict_attack", f"{level}_impulse_attack"],
+            float(provider_cfg.get("dynamic_attack", 0.70 if level == "weak" else 0.80)),
+        )
+        grapple_provider = scatter_provider(
+            [f"{level}_grapple_attack"],
+            float(provider_cfg.get("grapple", 0.72 if level == "weak" else 0.82)),
+        )
+        occlusion_provider = scatter_provider(
+            [f"{level}_occlusion_overlap_attack"],
+            float(provider_cfg.get("occlusion", 0.78 if level == "weak" else 0.86)),
+        )
         occ = np.maximum(occ, occlusion_provider)
 
         # Role inference is behavior-specific.  Chase and attack can disagree
@@ -1005,7 +1056,7 @@ def apply_standard_behavior_engine(
             errors="coerce",
         ).fillna(-1).astype(int).to_numpy()
         selected_role_cfg = dict(engine_cfg.get("selected_role_fallback", {}))
-        selected_role_fallback = np.zeros(len(rows), dtype=bool)
+        selected_role_fallback = np.zeros(row_count, dtype=bool)
         if bool(selected_role_cfg.get("enabled", False)):
             selected_valid = (
                 ((selected_actor == a_ids) | (selected_actor == b_ids))
@@ -1120,9 +1171,9 @@ def apply_standard_behavior_engine(
         target_ids = np.where(attack_dominates, attack_target_ids, chase_target_ids)
         role_conf = np.where(attack_dominates, attack_role_conf, chase_role_conf)
 
-        contact_types = []
+        contact_types = np.full(row_count, "", dtype=object)
         contact_threshold = float(attack_cfg.get("contact_distance_cm", 3.0))
-        for row in rows:
+        for i, row in zip(compute_indices, compute_rows):
             head_values = [
                 _num(row, "a_to_b_nose_head_distance_cm", float("inf")),
                 _num(row, "b_to_a_nose_head_distance_cm", float("inf")),
@@ -1141,15 +1192,13 @@ def apply_standard_behavior_engine(
             head_contact = head_min <= contact_threshold
             tail_contact = tail_min <= contact_threshold
             if head_contact and tail_contact:
-                contact_types.append("nose_head_and_nose_tail")
+                contact_types[i] = "nose_head_and_nose_tail"
             elif head_contact:
-                contact_types.append("nose_head")
+                contact_types[i] = "nose_head"
             elif tail_contact:
-                contact_types.append("nose_tail")
+                contact_types[i] = "nose_tail"
             elif body_min <= contact_threshold:
-                contact_types.append("nose_body")
-            else:
-                contact_types.append("")
+                contact_types[i] = "nose_body"
 
         output[f"{level}_standard_a_to_b_chase_score"] = ab_chase
         output[f"{level}_standard_b_to_a_chase_score"] = ba_chase
