@@ -2816,6 +2816,214 @@ def extract_four_class_clips(
     return output_dir
 
 
+def extract_behavior_clips(
+    video_path: Path,
+    events_path: Path,
+    output_dir: Path,
+    behavior_names: Sequence[str] | None = None,
+    event_level: str = "all",
+    clip_seconds: float = 5.0,
+    min_start_interval_seconds: float = 5.0,
+    max_clips_per_behavior: int = 200,
+) -> Path:
+    """Extract fixed-length raw clips separately for each behavior label.
+
+    This is the default clip contract for the lightweight ethogram.  It reads
+    the already generated behavior-event CSV, builds one frame state per
+    behavior, and writes raw source-video clips under one directory per label.
+    It does not create four mutually exclusive classes and does not draw
+    overlays.  ``event_level='all'`` keeps both the extended ethogram rows and
+    the weak/strong legacy chase/attack rows.
+    """
+    import cv2
+
+    event_level = str(event_level).strip().lower()
+    if event_level not in {"all", "weak", "strong"}:
+        raise ValueError("event_level 必须是 all、weak 或 strong")
+    if not events_path.exists():
+        raise FileNotFoundError(f"行为事件 CSV 不存在: {events_path}")
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"无法打开源视频: {video_path}")
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    if not np.isfinite(fps) or fps <= 0 or total_frames <= 0 or width <= 0 or height <= 0:
+        raise RuntimeError(
+            f"源视频元数据无效: fps={fps}, frames={total_frames}, size={width}x{height}"
+        )
+
+    events_df = pd.read_csv(events_path)
+    required = {"start_frame", "end_frame", "candidate_level", "behavior"}
+    missing = sorted(required.difference(events_df.columns))
+    if missing:
+        raise ValueError(f"行为事件 CSV 缺少字段: {missing}")
+
+    available = {
+        str(value).strip().lower()
+        for value in events_df["behavior"].dropna().tolist()
+        if str(value).strip()
+    }
+    if behavior_names is None:
+        selected_behaviors = [
+            behavior
+            for behavior in EXTENDED_BEHAVIORS
+            if behavior in available
+        ]
+        selected_behaviors.extend(sorted(available.difference(selected_behaviors)))
+    else:
+        selected_behaviors = []
+        for value in behavior_names:
+            behavior = str(value).strip().lower()
+            if behavior and behavior not in selected_behaviors:
+                selected_behaviors.append(behavior)
+    selected_behaviors = [behavior for behavior in selected_behaviors if behavior in available]
+    if not selected_behaviors:
+        raise ValueError("行为事件 CSV 中没有可切片的指定行为")
+
+    states = {
+        behavior: np.zeros(total_frames, dtype=bool)
+        for behavior in selected_behaviors
+    }
+    source_event_rows = {behavior: 0 for behavior in selected_behaviors}
+    level_counts: dict[str, dict[str, int]] = {
+        behavior: defaultdict(int) for behavior in selected_behaviors
+    }
+    for event in events_df.to_dict("records"):
+        behavior = str(event.get("behavior", "")).strip().lower()
+        if behavior not in states:
+            continue
+        level = str(event.get("candidate_level", "")).strip().lower()
+        if event_level != "all" and level != event_level:
+            continue
+        try:
+            start = max(int(event.get("start_frame", 0)), 0)
+            end = min(int(event.get("end_frame", -1)), total_frames - 1)
+        except (TypeError, ValueError):
+            continue
+        if end < start:
+            continue
+        states[behavior][start : end + 1] = True
+        source_event_rows[behavior] += 1
+        level_counts[behavior][level or "extended"] += 1
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    intervals: list[dict[str, Any]] = []
+    clip_counts: dict[str, int] = {}
+    clip_frames = max(int(round(float(clip_seconds) * fps)), 1)
+    for behavior in selected_behaviors:
+        behavior_dir = output_dir / behavior
+        behavior_dir.mkdir(parents=True, exist_ok=True)
+        selected = _clip_intervals_from_state(
+            states[behavior].astype(np.int8),
+            1,
+            fps,
+            clip_seconds,
+            min_start_interval_seconds,
+            max_clips_per_behavior,
+        )
+        clip_counts[behavior] = len(selected)
+        for clip_index, (start, end) in enumerate(selected, start=1):
+            path = behavior_dir / (
+                f"{behavior}_{clip_index:04d}_{start / fps:.2f}s_{end / fps:.2f}s.mp4"
+            )
+            intervals.append(
+                {
+                    "clip_index": clip_index,
+                    "behavior": behavior,
+                    "behavior_name_zh": BEHAVIOR_NAMES_ZH.get(behavior, behavior),
+                    "source_event_rows": int(source_event_rows[behavior]),
+                    "event_level": event_level,
+                    "start_frame": start,
+                    "end_frame": end,
+                    "start_time_s": start / fps,
+                    "end_time_s": end / fps,
+                    "duration_s": (end - start + 1) / fps,
+                    "path": str(path),
+                    "source_video": str(video_path),
+                    "source_events": str(events_path),
+                }
+            )
+
+    # One sequential source read serves all behavior clips; no annotations are drawn.
+    start_map: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for interval in intervals:
+        start_map[int(interval["start_frame"])].append(interval)
+    active: dict[str, tuple[Any, dict[str, Any]]] = {}
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"无法重新打开源视频: {video_path}")
+    frame_index = 0
+    try:
+        while frame_index < total_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            for interval in start_map.get(frame_index, []):
+                writer = cv2.VideoWriter(
+                    interval["path"],
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    fps,
+                    (width, height),
+                )
+                if not writer.isOpened():
+                    writer.release()
+                    raise RuntimeError(f"无法创建行为片段: {interval['path']}")
+                active[interval["path"]] = (writer, interval)
+            finished: list[str] = []
+            for path, (writer, interval) in active.items():
+                writer.write(frame)
+                if frame_index >= int(interval["end_frame"]):
+                    writer.release()
+                    finished.append(path)
+            for path in finished:
+                active.pop(path, None)
+            frame_index += 1
+            if frame_index == 1 or frame_index % 1000 == 0 or frame_index == total_frames:
+                LOGGER.info(
+                    "[behavior clips] source %d/%d frames",
+                    frame_index,
+                    total_frames,
+                )
+    finally:
+        cap.release()
+        for writer, _interval in active.values():
+            writer.release()
+
+    manifest_path = output_dir / "behavior_clip_manifest.csv"
+    _write_csv(manifest_path, intervals)
+    summary = {
+        "source_video": str(video_path),
+        "events_csv": str(events_path),
+        "event_level": event_level,
+        "behaviors": selected_behaviors,
+        "fps": fps,
+        "source_frames": total_frames,
+        "clip_seconds": float(clip_seconds),
+        "clip_frames": clip_frames,
+        "min_start_interval_seconds": float(min_start_interval_seconds),
+        "max_clips_per_behavior": int(max_clips_per_behavior),
+        "source_event_rows": source_event_rows,
+        "source_event_level_counts": {
+            behavior: dict(level_counts[behavior])
+            for behavior in selected_behaviors
+        },
+        "clip_counts": clip_counts,
+        "total_clips": int(len(intervals)),
+        "rendered_video": False,
+    }
+    with (output_dir / "behavior_clip_summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, ensure_ascii=False, indent=2)
+    LOGGER.info(
+        "[behavior clips] completed: %s",
+        ", ".join(f"{behavior}={clip_counts.get(behavior, 0)}" for behavior in selected_behaviors),
+    )
+    return output_dir
+
+
 def _interaction_radius(config: Mapping[str, Any]) -> float:
     engine_cfg = dict(config.get("standard_behavior_engine", {}))
     interaction_cfg = dict(engine_cfg.get("interaction_graph", {}))
@@ -3467,7 +3675,42 @@ def main() -> int:
     parser.add_argument(
         "--extract-four-class-clips",
         action="store_true",
-        help="只从已有事件 CSV 裁剪四类原始视频，不生成渲染视频。",
+        help="兼容旧接口：只从已有事件 CSV 裁剪四类原始视频，不生成渲染视频。",
+    )
+    parser.add_argument(
+        "--extract-behavior-clips",
+        action="store_true",
+        help="按 lightweight_behavior_events.csv 中的行为名称分别裁剪原始视频。",
+    )
+    parser.add_argument(
+        "--behaviors",
+        nargs="+",
+        default=None,
+        help="行为切片名称；默认输出事件 CSV 中出现的全部行为。",
+    )
+    parser.add_argument(
+        "--behavior-level",
+        choices=("all", "weak", "strong"),
+        default="all",
+        help="行为切片保留的 candidate_level；默认 all，也包含扩展 ethogram 行。",
+    )
+    parser.add_argument(
+        "--behavior-clips-output",
+        type=Path,
+        default=None,
+        help="按行为切片的输出目录；默认 output-dir/behavior_clips。",
+    )
+    parser.add_argument(
+        "--behavior-clip-seconds",
+        type=float,
+        default=5.0,
+        help="每个行为切片的长度，默认 5 秒。",
+    )
+    parser.add_argument(
+        "--max-clips-per-behavior",
+        type=int,
+        default=200,
+        help="每种行为最多输出的片段数，默认 200。",
     )
     parser.add_argument(
         "--clip-level",
@@ -3515,6 +3758,21 @@ def main() -> int:
             max_frames=args.max_frames,
         )
         LOGGER.info("render_output=%s", render_output)
+        return 0
+
+    if args.extract_behavior_clips:
+        events_path = args.events or (args.output_dir / "lightweight_behavior_events.csv")
+        clips_output = args.behavior_clips_output or (args.output_dir / "behavior_clips")
+        extract_behavior_clips(
+            args.video,
+            events_path,
+            clips_output,
+            behavior_names=args.behaviors,
+            event_level=args.behavior_level,
+            clip_seconds=max(float(args.behavior_clip_seconds), 0.1),
+            max_clips_per_behavior=max(int(args.max_clips_per_behavior), 1),
+        )
+        LOGGER.info("behavior_clips_output=%s", clips_output)
         return 0
 
     if args.extract_four_class_clips:
