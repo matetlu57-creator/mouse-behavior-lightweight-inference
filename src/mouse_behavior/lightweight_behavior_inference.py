@@ -43,6 +43,7 @@ from . import adaptive_arena_boundary as arena_boundary
 from .parallel_behavior_fsm import ParallelBehaviorFSM
 from . import standard_behavior_engine as behavior_engine
 from .annotation_website_export import export_complete_video_package
+from .config import load_config
 from .logging_config import configure_logging
 
 
@@ -3234,10 +3235,7 @@ def analyze(
 ) -> Path:
     started = time.perf_counter()
     output_dir.mkdir(parents=True, exist_ok=True)
-    with config_path.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-    if not isinstance(config, dict):
-        raise ValueError(f"配置不是 YAML 对象: {config_path}")
+    config = load_config(config_path)
     configured_fps = config.pop("_fps_override", 29.329)
     source_fps = float(configured_fps if fps_override is None else fps_override)
     if not np.isfinite(source_fps) or source_fps <= 0.0:
@@ -3859,10 +3857,7 @@ def main() -> int:
     if args.config is None or args.fps is None:
         parser.error("普通分析模式需要同时提供 --config 和 --fps；渲染已有结果请使用 --render-only。")
     # Keep the function signature self-contained while passing the video FPS.
-    with args.config.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-    if not isinstance(config, dict):
-        raise ValueError(f"invalid YAML: {args.config}")
+    config = load_config(args.config)
     config["_fps_override"] = float(args.fps)
     temp_config = args.output_dir / ".lightweight_runtime_config.yaml"
     with temp_config.open("w", encoding="utf-8") as handle:

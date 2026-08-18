@@ -1477,13 +1477,97 @@ lightweight_behavior_inference:
   render_output: 轻量行为推理_渲染.mp4
   max_frames: null
 
+# Extended Beiyi ethogram for the lightweight cache path.  These labels are
+# emitted in addition to, and never instead of, the legacy chase/attack events
+# and the independent nose-head/nose-tail contact CSV.
+extended_behavior:
+  enabled: true
+  individual:
+    stationary_max_speed_cm_s: 4.0
+    walking_max_speed_cm_s: 18.0
+    running_min_speed_cm_s: 18.0
+    confirm_seconds: 0.30
+    fill_gap_seconds: 0.20
+    min_pose_quality: 0.20
+  social:
+    pair_max_distance_cm: 17.0
+    together_max_distance_cm: 8.0
+    together_max_combined_speed_cm_s: 28.0
+    approach_min_distance_drop_cm: 1.5
+    approach_min_closing_speed_cm_s: 2.0
+    approach_max_actor_speed_cm_s: 22.0
+    approach_max_target_speed_cm_s: 22.0
+    approach_min_speed_gap_cm_s: 1.5
+    approach_min_actor_speed_cm_s: 3.0
+    approach_allow_together_transition: true
+    approach_min_duration_seconds: 0.10
+    chase_fallback:
+      enabled: true
+      max_distance_cm: 12.0
+      min_score: 0.70
+      min_actor_speed_cm_s: 3.0
+      min_target_speed_cm_s: 2.5
+      min_pursuit_alignment: 0.40
+      min_target_escape_alignment: 0.30
+      min_direction_similarity: 0.55
+      min_role_confidence: 0.04
+      min_duration_seconds: 0.25
+      fill_gap_seconds: 0.15
+    attack_fallback:
+      enabled: true
+      max_distance_cm: 7.6
+      min_dynamic_score: 0.78
+      min_context_frames: 1
+      min_attack_evidence: 3
+      min_raw_actor_speed_cm_s: 8.0
+      min_impact_pursuit_alignment: 0.55
+      max_impact_target_escape_alignment: 0.10
+      min_impact_behavior_speed_gap_cm_s: 1.5
+      min_impact_actor_acceleration_cm_s2: 120.0
+      min_impact_initiation_score: 0.90
+      min_rebound_target_escape_alignment: 0.55
+      max_rebound_pursuit_alignment: 0.20
+      min_rebound_post_distance_increase_cm: 0.50
+      min_rebound_immediate_distance_increase_cm: 0.25
+      rebound_distance_window_seconds: 0.10
+      min_rebound_reaction_score: 0.70
+      min_rebound_contact_pursuit_alignment: 0.55
+      min_target_turn_angle_deg: 25.0
+      min_target_nose_speed_cm_s: 12.0
+      min_role_confidence: 0.04
+      min_duration_seconds: 0.033
+      fill_gap_seconds: 0.10
+    avoidance_min_target_escape_alignment: 0.45
+    avoidance_min_target_speed_cm_s: 1.5
+    avoidance_min_distance_increase_cm: 1.0
+    avoidance_min_actor_speed_cm_s: 1.5
+    avoidance_max_distance_cm: 17.0
+    avoidance_require_pursuit_context: true
+    avoidance_context_seconds: 1.00
+    avoidance_close_context_distance_cm: 10.0
+    avoidance_min_pursuit_alignment: 0.35
+    avoidance_min_prior_distance_drop_cm: 0.50
+    avoidance_min_duration_seconds: 0.10
+    pair_fill_gap_seconds: 0.15
+  group:
+    huddle_distance_cm: 9.0
+    huddle_fraction: 0.55
+    huddle_min_cluster_size: 3
+    huddle_min_cluster_fraction: 0.30
+    huddle_min_cluster_density: 0.50
+    isolation_distance_cm: 15.0
+    isolation_neighbor_fraction: 0.15
+    confirm_seconds: 0.30
+    fill_gap_seconds: 0.20
+
 # Orthogonal temporal state machines for the lightweight ethogram.  The
-detector thresholds above remain unchanged; this layer only manages temporal
-confirmation/recovery for individual, pair, group and contact regions.
+# detector thresholds above remain unchanged; this layer only manages temporal
+# confirmation/recovery for individual, pair, group and contact regions.
 parallel_behavior_fsm:
   enabled: true
   mode: active
   version: parallel_hierarchical_fsm_v1
+  # 调试时改为 true 可保留每个区域的逐帧状态；正常分析只输出最终事件，避免额外内存和数组分配。
   collect_diagnostics: false
 
 # 阶段二可视化只消费正式ID。插值仅连接前后真实观测；视频首尾可短时零速度保持，二者均不进入行为计算。

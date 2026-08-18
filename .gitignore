@@ -33,12 +33,21 @@ dist/
 *.db
 *.sqlite
 *.sqlite3
-weights/
 yolo_precompute/
 *_precompute/
 
+# Keep repository documentation/placeholders while excluding local datasets,
+# downloaded weights, and generated output directories.
+data/*
+!data/README.md
+outputs/*
+!outputs/.gitkeep
+weights/*
+!weights/README.md
+weights/pose/*
+!weights/pose/README.md
+
 # Generated analysis outputs
-outputs/
 output/
 results/
 正式分析结果/

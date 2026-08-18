@@ -78,7 +78,7 @@ standard_behavior_engine:
 同一视频、同一模型、同一 tracking 配置分别跑 v1.42.1 和 v1.43：
 
 ```powershell
-python tests\regression_v143_behavior.py "F:\...\v1421" "F:\...\v143"
+python tests\regression_v143_behavior.py "D:\data\v1421_results" "D:\data\v143_results"
 ```
 
 默认：

@@ -12,10 +12,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import yaml
 
 from _bootstrap import REPO_ROOT
 from mouse_behavior import standard_behavior_engine as engine
+from mouse_behavior.config import load_config
 from mouse_behavior.logging_config import configure_logging
 
 
@@ -191,7 +191,7 @@ def sweep_attack(videos: list[dict[str, Any]], config: dict[str, Any], fps: floa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "default.yaml")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--dataset", action="append", required=True, metavar="LABEL=RESULT_ROOT")
     parser.add_argument("--output", type=Path, required=True)
@@ -206,8 +206,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     configure_logging(args.log_level)
-    with args.config.open(encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
+    config = load_config(args.config)
     datasets = parse_datasets(args.dataset)
     videos = load_videos(datasets, config, args.fps)
     rows = sweep_chase(videos, config, args.fps) + sweep_attack(videos, config, args.fps)

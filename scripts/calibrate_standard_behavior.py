@@ -11,10 +11,10 @@ frame boundaries and role annotations, which this input format does not carry.
 Example::
 
     python calibrate_standard_behavior.py \
-      --dataset chase=F:\\...\\threshold_calibration..._chase \
-      --dataset attack=F:\\...\\threshold_calibration..._attack \
-      --dataset none=F:\\...\\threshold_calibration..._social6 \
-      --output-dir F:\\...\\threshold_calibration_report
+      --dataset chase=D:\\data\\threshold_calibration_chase \
+      --dataset attack=D:\\data\\threshold_calibration_attack \
+      --dataset none=D:\\data\\threshold_calibration_social6 \
+      --output-dir D:\\reports\\threshold_calibration
 """
 from __future__ import annotations
 
@@ -28,10 +28,10 @@ from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
-import yaml
 
 from _bootstrap import REPO_ROOT
 from mouse_behavior import standard_behavior_engine as engine
+from mouse_behavior.config import load_config
 from mouse_behavior.logging_config import configure_logging
 
 
@@ -250,8 +250,7 @@ def _write_summary(path: Path, report: dict[str, Any]) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    project_dir = REPO_ROOT
-    parser.add_argument("--config", type=Path, default=project_dir / "mouse_chase_attack_config.yaml")
+    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "default.yaml")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument(
         "--dataset",
@@ -277,8 +276,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     configure_logging(args.log_level)
-    with args.config.open(encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
+    config = load_config(args.config)
     config = copy.deepcopy(config)
     if args.no_selected_role_fallback:
         config.setdefault("standard_behavior_engine", {}).setdefault("selected_role_fallback", {})[

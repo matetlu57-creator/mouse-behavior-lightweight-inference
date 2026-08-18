@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,3 +82,67 @@ def test_simultaneous_head_and_tail_contact_keeps_both_components():
     assert len(events) == 1
     assert events[0]["contact_type"] == "nose_head_and_nose_tail"
     assert events[0]["contact_type_components"] == "nose_head;nose_tail"
+
+
+def test_extended_individual_and_group_events_keep_scopes_separate():
+    lightweight = load_lightweight()
+    frames = 12
+    valid = np.ones((frames, 3), dtype=bool)
+    centers = np.zeros((frames, 3, 2), dtype=float)
+    centers[:, 0] = np.array([0.0, 0.0])
+    centers[:, 1] = np.array([2.0, 0.0])
+    centers[:, 2] = np.array([4.0, 0.0])
+    centers[6:, 2, 0] = 30.0
+    kin = {
+        "valid": valid,
+        "behavior_speed": np.zeros((frames, 3), dtype=float),
+        "pose_quality": np.ones((frames, 3), dtype=float),
+        "centers_cm": centers,
+    }
+    events = lightweight._extended_individual_and_group_events(
+        kin,
+        pair_metrics={},
+        pair_i=np.array([0, 0, 1]),
+        pair_j=np.array([1, 2, 2]),
+        source_video=Path("example.mov"),
+        source_fps=30.0,
+        sample_stride=1,
+        config={"extended_behavior": {"enabled": True}},
+    )
+    assert events
+    assert {event["event_scope"] for event in events} == {"individual", "group"}
+    assert any(event["behavior"] == "stationary" for event in events)
+    assert any(event["behavior"] == "huddle" for event in events)
+
+
+def test_huddle_uses_local_cluster_in_multi_mouse_scene():
+    lightweight = load_lightweight()
+    frames = 12
+    valid = np.ones((frames, 8), dtype=bool)
+    centers = np.zeros((frames, 8, 2), dtype=float)
+    # Five mice form a dense local cluster; three visible mice remain apart.
+    centers[:, 0] = np.array([0.0, 0.0])
+    centers[:, 1] = np.array([2.0, 0.0])
+    centers[:, 2] = np.array([0.0, 2.0])
+    centers[:, 3] = np.array([2.0, 2.0])
+    centers[:, 4] = np.array([1.0, 1.0])
+    centers[:, 5] = np.array([40.0, 0.0])
+    centers[:, 6] = np.array([60.0, 0.0])
+    centers[:, 7] = np.array([80.0, 0.0])
+    kin = {
+        "valid": valid,
+        "behavior_speed": np.zeros((frames, 8), dtype=float),
+        "pose_quality": np.ones((frames, 8), dtype=float),
+        "centers_cm": centers,
+    }
+    events = lightweight._extended_individual_and_group_events(
+        kin,
+        pair_metrics={},
+        pair_i=np.array([], dtype=int),
+        pair_j=np.array([], dtype=int),
+        source_video=Path("cluster.mov"),
+        source_fps=30.0,
+        sample_stride=1,
+        config={"extended_behavior": {"enabled": True}},
+    )
+    assert any(event["behavior"] == "huddle" for event in events)

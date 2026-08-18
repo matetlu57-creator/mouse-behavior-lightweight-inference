@@ -24,6 +24,7 @@ from ultralytics import YOLO
 
 from _bootstrap import REPO_ROOT
 from mouse_behavior import lightweight_behavior_inference as lightweight
+from mouse_behavior.config import load_config
 from mouse_behavior import pose_cache
 from mouse_behavior.logging_config import configure_logging
 
@@ -173,10 +174,7 @@ def run_validation(
         raise ValueError(f"未找到北医视频: {dataset}")
 
     output.mkdir(parents=True, exist_ok=True)
-    with config_path.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-    if not isinstance(config, dict):
-        raise ValueError(f"配置不是 YAML 对象: {config_path}")
+    config = load_config(config_path)
     config["_fps_override"] = 30.0
     runtime_config = output / ".beiyi_runtime_config.yaml"
     runtime_config.write_text(
@@ -304,7 +302,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--config", type=Path, default=REPO_ROOT / "mouse_chase_attack_config.yaml")
+    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "default.yaml")
     parser.add_argument("--model", type=Path, default=REPO_ROOT / "weights" / "pose" / "best.pt")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--chunk-frames", type=int, default=300)

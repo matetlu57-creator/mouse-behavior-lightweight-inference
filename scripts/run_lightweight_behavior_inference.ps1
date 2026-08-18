@@ -19,7 +19,7 @@ if ([string]::IsNullOrWhiteSpace($ProjectDir)) {
 }
 $ProjectDir = (Resolve-Path $ProjectDir).Path
 $Script = Join-Path $ProjectDir "scripts\run_lightweight_behavior_inference.py"
-$Config = Join-Path $ProjectDir "mouse_chase_attack_config.yaml"
+$Config = Join-Path $ProjectDir "configs\profiles\balanced.yaml"
 
 if (-not (Get-Command $Python -ErrorAction SilentlyContinue)) {
     throw "Python was not found: $Python. Activate the project environment or pass -Python with the full path to python.exe."

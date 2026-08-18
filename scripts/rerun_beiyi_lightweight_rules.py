@@ -10,10 +10,10 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
 from _bootstrap import REPO_ROOT
 from mouse_behavior import lightweight_behavior_inference as lightweight
+from mouse_behavior.config import load_config
 from mouse_behavior.logging_config import configure_logging
 from validate_beiyi_extended_ethogram import LABELS, VIDEO_EXTENSIONS, _behavior_hit, _contact_hit, _safe_case_name, _video_info
 
@@ -40,10 +40,7 @@ def main() -> int:
     source_output = args.source_output.resolve()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    with args.config.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-    if not isinstance(config, dict):
-        raise ValueError(args.config)
+    config = load_config(args.config)
     cases = []
     for video in sorted(path for path in dataset.rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS):
         rel = video.relative_to(dataset)
@@ -115,7 +112,7 @@ def main() -> int:
     summary = {
         "dataset": str(dataset),
         "source_pose_cache": str(source_output),
-        "model": str(Path(r"F:\mouse-pose-v8-delivery\best.pt")),
+        "model": "weights/pose/best.pt (local Release asset, if available)",
         "pose_only": True,
         "obb_used": False,
         "multi_mouse_scene": True,

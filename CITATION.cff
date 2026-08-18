@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the repository and the release you used."
+title: "Mouse Behavior Lightweight Inference"
+type: software
+version: 0.1.0
+date-released: 2026-08-18
+repository-code: "https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference"
+authors:
+  - name: "mouse-behavior-lightweight-inference contributors"

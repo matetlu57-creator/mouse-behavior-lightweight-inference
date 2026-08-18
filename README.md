@@ -118,6 +118,13 @@ right hip -> tail
 ├─ mouse_chase_attack_high_recall.py       # 完整管线兼容入口/集成入口
 ├─ mouse_chase_attack_extractor_base.py    # 原有提取器基础代码
 ├─ tests/                                   # 单元、回归和性能测试
+├─ configs/                                 # 默认配置、profile 和实验覆盖
+├─ docs/                                    # 安装、架构、算法和开发文档
+├─ examples/                                # 可复用 API 和配置示例
+├─ data/                                    # 本地数据占位目录，不提交数据
+├─ outputs/                                 # 本地结果占位目录，不提交结果
+├─ tools/                                   # 仓库检查和维护工具
+├─ .github/                                 # CI、Issue 和 PR 模板
 ├─ pyproject.toml                           # 包元数据和 pytest 配置
 ├─ CONTRIBUTING.md                          # Git/模块/日志/测试约定
 ├─ weights/                                 # 下载 Release 后放置的本地权重目录
@@ -131,7 +138,7 @@ right hip -> tail
 
 根目录的同名 Python 文件只为旧命令、旧 notebook 和完整管线保留兼容路径；新代码应从 `mouse_behavior` 包导入，新的命令行入口应放到 `scripts/`。这个分层参考了 [SOAR-PKU/mTrack](https://github.com/SOAR-PKU/mTrack) 中 `mtrack/` 与 `scripts/` 的职责分离方式。
 
-`historical_*` 和 `original/` 用于审计与回归对照，不应作为当前运行入口。视频、缓存和生成结果由 `.gitignore` 排除；模型权重作为本仓库 Release 附件发布。
+`historical_*` 和 `original/` 用于审计与回归对照，不应作为当前运行入口。视频、缓存、权重和生成结果由 `.gitignore` 排除；如果确认拥有发布权，模型权重再作为单独的 GitHub Release 附件发布。
 
 ## 4.1 模型权重
 
@@ -141,7 +148,7 @@ right hip -> tail
 |---|---|
 | `pose_best.pt` | 下载后放到 `weights/pose/best.pt`，YOLO Pose 小鼠关键点模型 |
 
-`pose_best.pt` 来自 `F:\mouse-pose-v8-delivery\best.pt`，大小为 56,602,034 字节。它作为本仓库公开 Release 的唯一模型附件发布，不把大二进制塞进源码树。下载后放到 `weights/pose/best.pt`。轻量入口只分析已有 `yolo_precompute` 缓存，因此不会因为读取缓存而重复加载模型；如果需要在上游生成缓存时调用模型，也只使用这份 Pose 权重。OBB 权重不属于当前轻量路径，本仓库不上传也不依赖 OBB 模型。
+模型权重不随源码提交，也不应把本机权重路径写入配置或结果。若版权和发布许可已经确认，可将批准发布的 Pose 权重作为 GitHub Release 附件，下载后放到 `weights/pose/best.pt`。轻量入口只分析已有 `yolo_precompute` 缓存，因此不会因为读取缓存而重复加载模型；如果需要在上游生成缓存时调用模型，也只使用这份 Pose 权重。OBB 权重不属于当前轻量路径，本仓库不上传也不依赖 OBB 模型。
 
 SHA-256：`AB2F2FBE7A52980DF993FAD1914B630D9004254A9547FA48F245244662A1BED8`。
 
@@ -176,7 +183,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 python .\scripts\run_lightweight_behavior_inference.py `
   --video "D:\data\part_001.mp4" `
   --yolo-cache "D:\cache\part_001\yolo_precompute" `
-  --config .\mouse_chase_attack_config.yaml `
+  --config .\configs\profiles\balanced.yaml `
   --output-dir .\outputs\part_001 `
   --fps 29.329 `
   --expected-mice 20 `
@@ -191,7 +198,7 @@ python .\scripts\run_lightweight_behavior_inference.py `
 python .\scripts\run_lightweight_behavior_inference.py `
   --video "D:\data\part_001.mp4" `
   --yolo-cache "D:\cache\part_001\yolo_precompute" `
-  --config .\mouse_chase_attack_config.yaml `
+  --config .\configs\profiles\high_accuracy.yaml `
   --output-dir .\outputs\part_001_stride1 `
   --fps 29.329 `
   --expected-mice 20 `
@@ -204,8 +211,8 @@ python .\scripts\run_lightweight_behavior_inference.py `
 
 ```powershell
 python .\scripts\build_lightweight_pose_cache.py `
-  --video "F:\北医标注-行为例子\北医标注-行为例子\社交行为\2.接近-被接近\社交-接近1.mov" `
-  --output "D:\beyi_cache\社交-接近1\yolo_precompute" `
+  --video "D:\data\beyi_examples\social\approach_001.mov" `
+  --output "D:\cache\beyi_examples\approach_001\yolo_precompute" `
   --model ".\weights\pose\best.pt" `
   --device 0
 ```
@@ -276,13 +283,13 @@ outputs/part_001/
 
 ## 9. 配置开关
 
-`mouse_chase_attack_config.yaml` 中的当前默认配置为：
+`configs/profiles/balanced.yaml` 是当前轻量路径的推荐默认 profile；它继承 `configs/default.yaml`，再由 default 继承根目录兼容配置。实验只需要在 `configs/experiments/` 或独立实验文件中覆盖差异：
 
 ```yaml
 lightweight_behavior_inference:
   enabled: true
   expected_mice: 20
-  sample_stride: 3
+  sample_stride: 1
   extract_four_class_clips: false
   clip_level: strong
   clip_seconds: 5.0
@@ -326,7 +333,7 @@ lightweight_behavior_inference:
 
 本次结构整理后的本地验证记录为：
 
-- `pytest`：25 个测试通过；
+- `pytest`：45 个测试通过；
 - `compileall` 和关键模块语法检查：通过；
 - YAML/FSM 不变量检查：通过；
 - Identity Cascade fuzz：50/50 通过；
@@ -338,7 +345,8 @@ lightweight_behavior_inference:
 
 ```powershell
 python -m pytest -q
-python -m py_compile lightweight_behavior_inference.py standard_behavior_engine.py
+python -m compileall -q src scripts tests
+python tools/check_repository.py
 ```
 
 ## 12. CPU、GPU 与渲染说明
@@ -372,8 +380,8 @@ git diff --stat
 git ls-files
 ```
 
-如果需要公开仓库，建议再次检查代码中的实验路径、机构名称、视频文件名和任何本地账号信息；当前仓库按 Private 方式发布。
+仓库公开前和每次推送前，都应再次检查代码中的实验路径、机构名称、视频文件名和任何本地账号信息；视频、缓存、权重和结果仍必须留在仓库之外。
 
 ## 14. 许可证和使用责任
 
-当前仓库暂未声明开源许可证，因此不应默认将代码当作可再分发的开源软件。行为识别结果应经过人工抽检和代表性标注集验证后再用于科研结论或自动化决策。
+当前仓库的 `LICENSE` 明确记录尚未选择开源许可证；在版权持有人补充正式许可证前，不应默认将代码当作可再分发的开源软件。行为识别结果应经过人工抽检和代表性标注集验证后再用于科研结论或自动化决策。

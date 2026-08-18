@@ -15,6 +15,8 @@
 - 旧 `strict/window/near/close-follow/impulse/grapple/occlusion` 规则保留为 evidence provider，不再在 standard 模式下直接 OR 成最终行为。
 - Chase/Attack 角色分开推断；grapple/occlusion 可以“攻击事件成立但发起者未知”，以 `actor_id=-1` 明确表示不确定。
 - 新增独立 Ethogram：`标准行为事件_时序引擎.csv`。追逐和攻击分别聚合，不因旧四分类兼容标签切换而切断持续行为。
+- 轻量缓存路径新增北医扩展 Ethogram：按鼠对输出一起/接近/回避，按 ID 输出奔跑/行走/静止，按帧输出扎堆/孤立；鼻头/鼻尾接触仍为独立接触事件。
+- 轻量分析结束后新增独立 `annotation_website_import/<视频名>/` 兼容包，包含原视频、`annotations.json`、连续逐帧 `tracks.jsonl` 和 `metadata.json`；该适配层不改变追踪、行为阈值、现有 CSV、渲染或裁剪模块。
 - Interaction Graph 已实现；默认 `prune_pair_computation: false`，先保持原鼠对覆盖，实机验证后再开启裁剪。
 - `decision_mode` 支持 `standard / shadow / legacy`，方便科研 A/B 与快速回退。
 

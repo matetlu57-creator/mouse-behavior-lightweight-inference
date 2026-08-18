@@ -1,0 +1,8 @@
+extends: ../mouse_chase_attack_config.yaml
+
+# This file is intentionally a small inheritance entry point. The large
+# compatibility YAML remains readable by legacy scripts while new profiles
+# can override only the settings relevant to an experiment.
+repository:
+  config_schema_version: "1"
+  profile: default

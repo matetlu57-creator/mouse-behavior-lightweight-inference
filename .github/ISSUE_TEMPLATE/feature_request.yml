@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a scoped, testable improvement.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and motivation
+      description: What research or maintenance problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed interface or behavior
+      description: Describe inputs, outputs, configuration, and compatibility expectations.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: Which pytest, regression, or real-data checks should demonstrate success?
