@@ -90,6 +90,7 @@ right hip -> tail
 ├─ src/mouse_behavior/                      # 可复用 Python 模块
 │  ├─ lightweight_behavior_inference.py     # 轻量单视频分析实现
 │  ├─ standard_behavior_engine.py           # 标准追逐/攻击行为引擎
+│  ├─ parallel_behavior_fsm.py              # 个体/鼠对/接触/群体并行FSM
 │  ├─ adaptive_arena_boundary.py            # 自适应笼界学习
 │  ├─ annotation_website_export.py          # 标注网站输出适配器
 │  ├─ pose_cache.py                          # Pose cache 写入模块
@@ -103,6 +104,7 @@ right hip -> tail
 │  ├─ calibrate_standard_behavior.py        # 离线阈值校准
 │  ├─ sweep_standard_behavior.py            # 阈值扫描
 │  ├─ rerun_beiyi_lightweight_rules.py      # 复用缓存重跑规则
+│  ├─ compare_parallel_fsm_validation.py    # 并行FSM前后事件级A/B比较
 │  ├─ run_lightweight_behavior_inference.ps1
 │  └─ run_stage1_stage2.ps1
 ├─ lightweight_behavior_inference.py       # 根目录兼容 CLI

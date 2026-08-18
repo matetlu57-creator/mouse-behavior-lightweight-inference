@@ -40,6 +40,7 @@ except Exception:  # pragma: no cover - a deterministic greedy fallback is below
     linear_sum_assignment = None
 
 from . import adaptive_arena_boundary as arena_boundary
+from .parallel_behavior_fsm import ParallelBehaviorFSM
 from . import standard_behavior_engine as behavior_engine
 from .annotation_website_export import export_complete_video_package
 from .logging_config import configure_logging
@@ -1260,6 +1261,7 @@ def _event_rows_from_mask(
     min_duration_seconds: float = 0.15,
     fill_gap_seconds: float = 0.10,
     event_scope: str = "pair",
+    fsm_coordinator: ParallelBehaviorFSM | None = None,
 ) -> list[dict[str, Any]]:
     mask = np.asarray(mask, dtype=bool)
     if mask.size == 0:
@@ -1270,9 +1272,17 @@ def _event_rows_from_mask(
     actor_values = np.asarray(actor_id if actor_id is not None else np.full(mask.shape, -1), dtype=int)
     target_values = np.asarray(target_id if target_id is not None else np.full(mask.shape, -1), dtype=int)
     events: list[dict[str, Any]] = []
-    for start, end in _boolean_runs_with_gap(mask, gap_frames):
-        if end - start + 1 < min_frames:
-            continue
+    coordinator = fsm_coordinator or ParallelBehaviorFSM()
+    fsm_result = coordinator.run_boolean_region(
+        scope=str(event_scope),
+        region_id=str(pair_key or event_scope),
+        behavior=str(behavior),
+        mask=mask,
+        min_duration_frames=min_frames,
+        max_gap_frames=gap_frames,
+    )
+    for span in fsm_result.spans:
+        start, end = int(span.start), int(span.end)
         segment = score_values[start : end + 1]
         finite_segment = segment[np.isfinite(segment)]
         peak_offset = int(np.nanargmax(segment)) if finite_segment.size else 0
@@ -1415,6 +1425,7 @@ def _extended_short_clip_pair_events(
     source_fps: float,
     sample_stride: int,
     config: Mapping[str, Any],
+    fsm_coordinator: ParallelBehaviorFSM | None = None,
 ) -> list[dict[str, Any]]:
     """Recover short high-evidence chase/attack bouts missed by the legacy FSM.
 
@@ -1433,6 +1444,9 @@ def _extended_short_clip_pair_events(
     attack_cfg = dict(social.get("attack_fallback", {}))
     valid = pair_df.get("valid_pair", pd.Series(True, index=pair_df.index)).fillna(False).astype(bool).to_numpy()
     n = len(pair_df)
+    fsm_coordinator = fsm_coordinator or ParallelBehaviorFSM(
+        dict(config.get("parallel_behavior_fsm", {}))
+    )
 
     def pair_values(column: str, default: float = 0.0) -> np.ndarray:
         values = pair_df[column] if column in pair_df else pd.Series(default, index=pair_df.index)
@@ -1584,6 +1598,7 @@ def _extended_short_clip_pair_events(
                 pair_key=pair_key,
                 min_duration_seconds=float(chase_cfg.get("min_duration_seconds", 0.25)),
                 fill_gap_seconds=float(chase_cfg.get("fill_gap_seconds", 0.15)),
+                fsm_coordinator=fsm_coordinator,
             )
         )
 
@@ -1668,6 +1683,7 @@ def _extended_short_clip_pair_events(
                 pair_key=pair_key,
                 min_duration_seconds=float(attack_cfg.get("min_duration_seconds", 0.08)),
                 fill_gap_seconds=float(attack_cfg.get("fill_gap_seconds", 0.10)),
+                fsm_coordinator=fsm_coordinator,
             )
         )
     return events
@@ -1683,6 +1699,7 @@ def _extended_pair_events(
     source_fps: float,
     sample_stride: int,
     config: Mapping[str, Any],
+    fsm_coordinator: ParallelBehaviorFSM | None = None,
 ) -> list[dict[str, Any]]:
     """Infer social labels that are not part of the legacy chase/attack FSM.
 
@@ -1698,6 +1715,9 @@ def _extended_pair_events(
     cfg = _extended_behavior_config(config)
     social = dict(cfg["social"])
     n = len(pair_df)
+    fsm_coordinator = fsm_coordinator or ParallelBehaviorFSM(
+        dict(config.get("parallel_behavior_fsm", {}))
+    )
     distance = pd.to_numeric(pair_df["center_distance_cm"], errors="coerce").to_numpy(float)
     valid = pair_df.get("valid_pair", pd.Series(True, index=pair_df.index)).fillna(False).astype(bool).to_numpy()
     actor_speed = pd.to_numeric(pair_df.get("selected_actor_behavior_speed_cm_s", 0.0), errors="coerce").fillna(0).to_numpy(float)
@@ -1850,6 +1870,7 @@ def _extended_pair_events(
             pair_key=str(pair_df["pair_key"].iloc[0]),
             min_duration_seconds=0.30,
             fill_gap_seconds=float(social["pair_fill_gap_seconds"]),
+            fsm_coordinator=fsm_coordinator,
         )
     )
     events.extend(
@@ -1866,6 +1887,7 @@ def _extended_pair_events(
             pair_key=str(pair_df["pair_key"].iloc[0]),
             min_duration_seconds=float(social["approach_min_duration_seconds"]),
             fill_gap_seconds=float(social["pair_fill_gap_seconds"]),
+            fsm_coordinator=fsm_coordinator,
         )
     )
     events.extend(
@@ -1882,6 +1904,7 @@ def _extended_pair_events(
             pair_key=str(pair_df["pair_key"].iloc[0]),
             min_duration_seconds=float(social["avoidance_min_duration_seconds"]),
             fill_gap_seconds=float(social["pair_fill_gap_seconds"]),
+            fsm_coordinator=fsm_coordinator,
         )
     )
     return events
@@ -1909,6 +1932,9 @@ def _extended_individual_and_group_events(
     frames, mice = valid.shape
     analysis_fps = source_fps / max(sample_stride, 1)
     events: list[dict[str, Any]] = []
+    fsm_coordinator = ParallelBehaviorFSM(
+        dict(config.get("parallel_behavior_fsm", {}))
+    )
 
     stationary = valid & (speed <= float(individual_cfg["stationary_max_speed_cm_s"])) & (
         pose_quality >= float(individual_cfg["min_pose_quality"])
@@ -1938,6 +1964,7 @@ def _extended_individual_and_group_events(
                     min_duration_seconds=float(individual_cfg["confirm_seconds"]),
                     fill_gap_seconds=float(individual_cfg["fill_gap_seconds"]),
                     event_scope="individual",
+                    fsm_coordinator=fsm_coordinator,
                 )
             )
 
@@ -2035,6 +2062,7 @@ def _extended_individual_and_group_events(
                 min_duration_seconds=float(group_cfg["confirm_seconds"]),
                 fill_gap_seconds=float(group_cfg["fill_gap_seconds"]),
                 event_scope="group",
+                fsm_coordinator=fsm_coordinator,
             )
         )
     return events
@@ -2121,6 +2149,7 @@ def _extract_contact_events(
     source_fps: float,
     sample_stride: int,
     contact_config: Mapping[str, Any],
+    fsm_coordinator: ParallelBehaviorFSM | None = None,
 ) -> list[dict[str, Any]]:
     """Extract nose-head and nose-tail contacts independently of behavior.
 
@@ -2244,17 +2273,16 @@ def _extract_contact_events(
             state["contact_target_id"],
         )
 
+    coordinator = fsm_coordinator or ParallelBehaviorFSM()
+    contact_fsm = coordinator.run_categorical_region(
+        scope="pair",
+        region_id=str(pair_key),
+        states=states,
+        state_key=state_key,
+    )
     events: list[dict[str, Any]] = []
-    index = 0
-    while index < len(states):
-        if states[index] is None:
-            index += 1
-            continue
-        start = index
-        key = state_key(states[index])
-        while index + 1 < len(states) and state_key(states[index + 1]) == key:
-            index += 1
-        end = index
+    for span in contact_fsm.spans:
+        start, end = int(span.start), int(span.end)
         segment = [state for state in states[start : end + 1] if state is not None]
         assert segment
         distances = np.asarray([state["contact_distance_cm"] for state in segment], dtype=float)
@@ -2297,8 +2325,6 @@ def _extract_contact_events(
                 "analysis_mode": "lightweight_cache_tracking",
             }
         )
-        index += 1
-
     return events
 
 
@@ -3312,6 +3338,9 @@ def analyze(
         float(pair_window_stats["fill_gap_seconds"]),
     )
     candidate_ordinal = 0
+    pair_fsm_coordinator = ParallelBehaviorFSM(
+        dict(config.get("parallel_behavior_fsm", {}))
+    )
     for pair_index, (mouse_a, mouse_b) in enumerate(zip(all_pair_i, all_pair_j)):
         metric_index = candidate_metric_index.get(pair_index)
         base_summary: dict[str, Any] = {
@@ -3371,6 +3400,7 @@ def analyze(
             source_fps=source_fps,
             sample_stride=sample_stride,
             contact_config=dict(config.get("contact_detection", {})),
+            fsm_coordinator=pair_fsm_coordinator,
         )
         contact_events.extend(pair_contact_events)
         enriched = behavior_engine.apply_standard_behavior_engine(pair_df, fps, config)
@@ -3384,6 +3414,7 @@ def analyze(
                 source_fps=source_fps,
                 sample_stride=sample_stride,
                 config=config,
+                fsm_coordinator=pair_fsm_coordinator,
             )
         )
         extended_events.extend(
@@ -3394,6 +3425,7 @@ def analyze(
                 source_fps=source_fps,
                 sample_stride=sample_stride,
                 config=config,
+                fsm_coordinator=pair_fsm_coordinator,
             )
         )
         summary = base_summary
@@ -3629,6 +3661,26 @@ def analyze(
             )
             if fsm_candidate_timeline_frames
             else 0.0,
+        },
+        "parallel_behavior_fsm": {
+            "enabled": bool(
+                dict(config.get("parallel_behavior_fsm", {})).get("enabled", True)
+            ),
+            "mode": str(
+                dict(config.get("parallel_behavior_fsm", {})).get("mode", "active")
+            ),
+            "version": ParallelBehaviorFSM.VERSION,
+            "collect_diagnostics": bool(
+                dict(config.get("parallel_behavior_fsm", {})).get(
+                    "collect_diagnostics", False
+                )
+            ),
+            "regions": {
+                "individual": "stationary|walking|running per mouse",
+                "pair": "together|approach|chase|avoidance|attack per pair",
+                "contact": "nose_head|nose_tail|combined per pair",
+                "group": "huddle|isolation per video",
+            },
         },
         "pair_prefilter": {
             "enabled": bool(prefilter["enabled"]),

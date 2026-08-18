@@ -1477,6 +1477,15 @@ lightweight_behavior_inference:
   render_output: 轻量行为推理_渲染.mp4
   max_frames: null
 
+# Orthogonal temporal state machines for the lightweight ethogram.  The
+detector thresholds above remain unchanged; this layer only manages temporal
+confirmation/recovery for individual, pair, group and contact regions.
+parallel_behavior_fsm:
+  enabled: true
+  mode: active
+  version: parallel_hierarchical_fsm_v1
+  collect_diagnostics: false
+
 # 阶段二可视化只消费正式ID。插值仅连接前后真实观测；视频首尾可短时零速度保持，二者均不进入行为计算。
 stage2_render:
   # 仅在同一正式ID的前后真实观测都存在且端点速度合理时插值；
