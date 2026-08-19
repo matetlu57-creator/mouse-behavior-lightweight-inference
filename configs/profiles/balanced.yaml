@@ -1,0 +1,10 @@
+extends: ../default.yaml
+
+repository:
+  profile: balanced
+lightweight_behavior_inference:
+  sample_stride: 1
+  render_video: false
+  extract_four_class_clips: false
+parallel_behavior_fsm:
+  collect_diagnostics: false

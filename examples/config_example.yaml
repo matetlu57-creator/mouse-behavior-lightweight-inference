@@ -1,0 +1,9 @@
+extends: ../configs/profiles/balanced.yaml
+
+# Keep experiment-specific changes small and reviewable. The resolved config
+# should be copied into the run metadata by the invoking pipeline.
+repository:
+  profile: example
+  experiment_id: replace-with-a-short-id
+lightweight_behavior_inference:
+  sample_stride: 1

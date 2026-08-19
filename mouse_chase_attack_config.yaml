@@ -173,17 +173,22 @@ detector_first:
     pose_free_blob_track_ttl_frames: 10
 
 # v1.40：在正式ID分配前，从全视频运动轨迹热力图学习笼子地面边界。
-# 最大连通运动区域取凸包后围绕质心外扩5%，边界外候选不能创建或接管正式ID。
+# 笼子按矩形处理：最大连通运动区域取轴对齐外接矩形，再向内收缩3%。
+# 比例值0.97表示-3%；边界外候选不能创建或接管正式ID。
 adaptive_arena:
   enabled: true
-  boundary_expansion_ratio: 1.05
+  boundary_expansion_ratio: 0.97
+  # Each video learns its own polygon by default.  Reuse is only for rerunning
+  # the same video, and the saved source path/file fingerprint must match.
   reuse_boundary_json: ""
+  reuse_require_video_match: true
   min_box_confidence: 0.12
   min_pose_quality: 0.08
   min_motion_px_per_frame: 1.5
   max_motion_px_per_frame: 120.0
   min_motion_samples: 300
   long_track_min_frames: 30
+  max_track_gap_frames: 2
   heatmap_cell_px: 20
   heatmap_blur_sigma_cells: 1.25
   heatmap_positive_quantile: 0.20
@@ -907,6 +912,13 @@ features:
   # PPT追逐定义需要至少覆盖足够长的共同轨迹；2.5 s窗口仍低于60 cm事件的上限。
   history_seconds: 2.5
   response_lookback_seconds: 0.3
+contact_detection:
+  # 接触是独立的几何事件流，不是攻击/追逐分类；普通接触不会单独打开攻击FSM。
+  enabled: true
+  # A鼻头到B头部关键点的距离，以及A鼻头到B尾部关键点的距离。
+  # 采用和攻击接触门一致的3 cm初始值，后续可用人工接触片段单独校准。
+  nose_head_distance_cm: 3.0
+  nose_tail_distance_cm: 3.0
 wall_jump:
   # 单鼠靠墙跳跃/攀爬只作为排除门，不改变追踪结果。
   enabled: true
@@ -1064,17 +1076,27 @@ attack:
   weak:
     contact_distance_cm: 3.0
     stationary_fight_distance_cm: 5.0
-    actor_lunge_speed_cm_s: 8.0
-    rapid_closing_distance_cm: 2.0
-    target_escape_speed_cm_s: 7.0
-    target_escape_alignment_min: 0.30
-    attack_pursuit_alignment_min: 0.50
-    target_turn_angle_deg: 40.0
-    head_motion_speed_cm_s: 12.0
-    head_to_center_speed_ratio: 1.35
+    actor_lunge_speed_cm_s: 12.0
+    rapid_closing_distance_cm: 3.0
+    target_escape_speed_cm_s: 10.0
+    target_escape_alignment_min: 0.45
+    attack_pursuit_alignment_min: 0.65
+    target_turn_angle_deg: 50.0
+    head_motion_speed_cm_s: 16.0
+    head_to_center_speed_ratio: 1.50
     repeated_contact_window_seconds: 2.0
     repeated_contact_count: 2
-    min_dynamic_evidence: 2
+    # For attack specificity weak/strong share the same calibrated causal
+    # floor; weak remains more permissive for chase, not for contact attacks.
+    min_dynamic_evidence: 3
+    # Anti-contact specificity calibrated from the three attack clips plus
+    # the ordinary nose-head/nose-tail contact negatives.
+    attack_direction_similarity_max: 0.85
+    attack_direction_min_pose_deformation: 0.06
+    attack_direction_min_target_turn_deg: 40.0
+    attack_direction_min_distance_drop_cm: 8.0
+    attack_direction_max_target_escape_alignment: 0.95
+    impulse_min_distance_drop_cm: 8.0
     stationary_fight_max_center_speed_cm_s: 5.0
     stationary_fight_min_angular_speed_deg_s: 110.0
     min_duration_seconds: 0.12
@@ -1155,6 +1177,12 @@ attack:
     repeated_contact_window_seconds: 2.0
     repeated_contact_count: 2
     min_dynamic_evidence: 3
+    attack_direction_similarity_max: 0.85
+    attack_direction_min_pose_deformation: 0.06
+    attack_direction_min_target_turn_deg: 40.0
+    attack_direction_min_distance_drop_cm: 8.0
+    attack_direction_max_target_escape_alignment: 0.95
+    impulse_min_distance_drop_cm: 8.0
     stationary_fight_max_center_speed_cm_s: 4.0
     stationary_fight_min_angular_speed_deg_s: 140.0
     min_duration_seconds: 0.15
@@ -1225,6 +1253,9 @@ attack:
 standard_behavior_engine:
   enabled: true
   decision_mode: standard   # standard / shadow / legacy
+  # 轻量路径保留完整时间轴，但窗口外 valid_pair=false 的行不再计算
+  # 双向连续证据；FSM仍接收硬否决行以重置状态。设为false可做结果A/B。
+  skip_inactive_rows: true
 
   # Observation Quality。低质量帧可以维持已存在事件，但不能单独开启新事件。
   quality:
@@ -1285,6 +1316,14 @@ standard_behavior_engine:
       confirm_seconds: 0.80
       exit_hold_seconds: 0.20
     attack_fsm:
+      # Attack opening requires the calibrated physical-causality gate.  A
+      # close nose-head/nose-tail contact by itself remains CONTACT, not ATTACK.
+      require_causal_attack_gate: true
+      specificity_hold_seconds: 0.35
+      min_dynamic_gate_frames: 2
+      min_stationary_gate_frames: 2
+      dynamic_gate_count_window_seconds: 2.0
+      causal_max_center_distance_cm: 7.6
       prepare_enter_score: 0.55
       contact_enter_score: 0.62
       reaction_enter_score: 0.52
@@ -1316,6 +1355,12 @@ standard_behavior_engine:
       confirm_seconds: 0.40
       exit_hold_seconds: 0.15
     attack_fsm:
+      require_causal_attack_gate: true
+      specificity_hold_seconds: 0.35
+      min_dynamic_gate_frames: 2
+      min_stationary_gate_frames: 2
+      dynamic_gate_count_window_seconds: 2.0
+      causal_max_center_distance_cm: 7.6
       prepare_enter_score: 0.64
       contact_enter_score: 0.70
       reaction_enter_score: 0.62
@@ -1407,11 +1452,21 @@ lightweight_behavior_inference:
   expected_mice: 20
   # 轻量默认每3帧取1帧；需要逐帧高召回时可显式改成1。
   sample_stride: 3
+  # 先用中心距离和身体朝向筛选有意义的鼠对，再计算昂贵的关键点几何与行为特征。
+  # close_distance_cm 是接触/攻击的近距离兜底；更远的鼠对至少一方需要朝向另一方。
+  pair_prefilter:
+    enabled: true
+    close_distance_cm: 10.0
+    min_heading_cosine: 0.0
+    window:
+      enabled: true
+      padding_seconds: 2.5
+      fill_gap_seconds: 0.15
   # 留空表示使用当前视频输出目录下的yolo_precompute；也支持{video_stem}/{video_name}。
   # 自定义路径只复用已完成缓存，缓存不存在时仍在默认输出目录生成。
   yolo_cache_dir: ""
-  # 延续当前任务要求：输出四类原始视频片段，但不绘制框、骨架、ID或行为标签。
-  extract_four_class_clips: true
+  # 主分类只输出独立的chase/attack事件；四类原始片段仅保留为显式兼容入口。
+  extract_four_class_clips: false
   clips_output_dir: 四类视频
   clip_level: strong
   clip_seconds: 5.0
@@ -1421,6 +1476,99 @@ lightweight_behavior_inference:
   render_video: false
   render_output: 轻量行为推理_渲染.mp4
   max_frames: null
+
+# Extended Beiyi ethogram for the lightweight cache path.  These labels are
+# emitted in addition to, and never instead of, the legacy chase/attack events
+# and the independent nose-head/nose-tail contact CSV.
+extended_behavior:
+  enabled: true
+  individual:
+    stationary_max_speed_cm_s: 4.0
+    walking_max_speed_cm_s: 18.0
+    running_min_speed_cm_s: 18.0
+    confirm_seconds: 0.30
+    fill_gap_seconds: 0.20
+    min_pose_quality: 0.20
+  social:
+    pair_max_distance_cm: 17.0
+    together_max_distance_cm: 8.0
+    together_max_combined_speed_cm_s: 28.0
+    approach_min_distance_drop_cm: 1.5
+    approach_min_closing_speed_cm_s: 2.0
+    approach_max_actor_speed_cm_s: 22.0
+    approach_max_target_speed_cm_s: 22.0
+    approach_min_speed_gap_cm_s: 1.5
+    approach_min_actor_speed_cm_s: 3.0
+    approach_allow_together_transition: true
+    approach_min_duration_seconds: 0.10
+    chase_fallback:
+      enabled: true
+      max_distance_cm: 12.0
+      min_score: 0.70
+      min_actor_speed_cm_s: 3.0
+      min_target_speed_cm_s: 2.5
+      min_pursuit_alignment: 0.40
+      min_target_escape_alignment: 0.30
+      min_direction_similarity: 0.55
+      min_role_confidence: 0.04
+      min_duration_seconds: 0.25
+      fill_gap_seconds: 0.15
+    attack_fallback:
+      enabled: true
+      max_distance_cm: 7.6
+      min_dynamic_score: 0.78
+      min_context_frames: 1
+      min_attack_evidence: 3
+      min_raw_actor_speed_cm_s: 8.0
+      min_impact_pursuit_alignment: 0.55
+      max_impact_target_escape_alignment: 0.10
+      min_impact_behavior_speed_gap_cm_s: 1.5
+      min_impact_actor_acceleration_cm_s2: 120.0
+      min_impact_initiation_score: 0.90
+      min_rebound_target_escape_alignment: 0.55
+      max_rebound_pursuit_alignment: 0.20
+      min_rebound_post_distance_increase_cm: 0.50
+      min_rebound_immediate_distance_increase_cm: 0.25
+      rebound_distance_window_seconds: 0.10
+      min_rebound_reaction_score: 0.70
+      min_rebound_contact_pursuit_alignment: 0.55
+      min_target_turn_angle_deg: 25.0
+      min_target_nose_speed_cm_s: 12.0
+      min_role_confidence: 0.04
+      min_duration_seconds: 0.033
+      fill_gap_seconds: 0.10
+    avoidance_min_target_escape_alignment: 0.45
+    avoidance_min_target_speed_cm_s: 1.5
+    avoidance_min_distance_increase_cm: 1.0
+    avoidance_min_actor_speed_cm_s: 1.5
+    avoidance_max_distance_cm: 17.0
+    avoidance_require_pursuit_context: true
+    avoidance_context_seconds: 1.00
+    avoidance_close_context_distance_cm: 10.0
+    avoidance_min_pursuit_alignment: 0.35
+    avoidance_min_prior_distance_drop_cm: 0.50
+    avoidance_min_duration_seconds: 0.10
+    pair_fill_gap_seconds: 0.15
+  group:
+    huddle_distance_cm: 9.0
+    huddle_fraction: 0.55
+    huddle_min_cluster_size: 3
+    huddle_min_cluster_fraction: 0.30
+    huddle_min_cluster_density: 0.50
+    isolation_distance_cm: 15.0
+    isolation_neighbor_fraction: 0.15
+    confirm_seconds: 0.30
+    fill_gap_seconds: 0.20
+
+# Orthogonal temporal state machines for the lightweight ethogram.  The
+# detector thresholds above remain unchanged; this layer only manages temporal
+# confirmation/recovery for individual, pair, group and contact regions.
+parallel_behavior_fsm:
+  enabled: true
+  mode: active
+  version: parallel_hierarchical_fsm_v1
+  # 调试时改为 true 可保留每个区域的逐帧状态；正常分析只输出最终事件，避免额外内存和数组分配。
+  collect_diagnostics: false
 
 # 阶段二可视化只消费正式ID。插值仅连接前后真实观测；视频首尾可短时零速度保持，二者均不进入行为计算。
 stage2_render:

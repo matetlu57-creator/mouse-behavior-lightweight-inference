@@ -39,6 +39,6 @@ strong chase 没有降阈值：搜索中能召回 2/3 追逐视频的候选会�
 
 - `calibrate_standard_behavior.py`：对已有成对特征 CSV 按鼠对重放 FSM，并输出视频级指标。
 - `sweep_standard_behavior.py`：对追逐进入/确认时长以及攻击动态、扭打、遮挡确认阈值做网格搜索。
-- 外部复测报告：`F:\tmp_compare_behavior\threshold_calibration_20260810_report_calibrated\calibration_summary.md`、`calibration_report.json`、`video_results.csv`、`standard_events.csv`。
+- 外部复测报告：`D:\reports\threshold_calibration_20260810\calibration_summary.md`、`calibration_report.json`、`video_results.csv`、`standard_events.csv`。
 
 下一轮如果要真正校准 event-level Precision/Recall/F1 和 actor/target accuracy，需要为每个视频补充逐帧事件区间及 actor/target ID；仅靠文件夹分类标签无法可靠计算这两个层面的指标。

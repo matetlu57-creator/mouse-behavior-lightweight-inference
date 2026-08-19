@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_lightweight():
+    path = ROOT / "lightweight_behavior_inference.py"
+    spec = importlib.util.spec_from_file_location("lightweight_contact_test", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def contact_frame(frame: int, head: float, tail: float) -> dict[str, object]:
+    return {
+        "frame": frame,
+        "valid_pair": True,
+        "mouse_a_id": 1,
+        "mouse_b_id": 2,
+        "a_to_b_nose_head_distance_cm": head,
+        "a_to_b_nose_tail_distance_cm": tail,
+        "b_to_a_nose_head_distance_cm": float("inf"),
+        "b_to_a_nose_tail_distance_cm": float("inf"),
+    }
+
+
+def test_nose_head_and_nose_tail_contacts_are_separate_events():
+    lightweight = load_lightweight()
+    pair_df = pd.DataFrame(
+        [
+            contact_frame(0, 2.0, 5.0),
+            contact_frame(1, 2.2, 5.1),
+            contact_frame(2, 5.0, 2.0),
+            contact_frame(3, 5.1, 2.1),
+            contact_frame(4, 8.0, 8.0),
+        ]
+    )
+    events = lightweight._extract_contact_events(
+        pair_df,
+        pair_key="1_2",
+        source_video=Path("contact.mp4"),
+        source_fps=30.0,
+        sample_stride=1,
+        contact_config={
+            "enabled": True,
+            "nose_head_distance_cm": 3.0,
+            "nose_tail_distance_cm": 3.0,
+        },
+    )
+
+    assert [event["contact_type"] for event in events] == ["nose_head", "nose_tail"]
+    assert [(event["start_frame"], event["end_frame"]) for event in events] == [
+        (0, 1),
+        (2, 3),
+    ]
+    assert all(event["contact_actor_id"] == 1 for event in events)
+    assert all(event["contact_target_id"] == 2 for event in events)
+
+
+def test_simultaneous_head_and_tail_contact_keeps_both_components():
+    lightweight = load_lightweight()
+    pair_df = pd.DataFrame([contact_frame(4, 2.0, 2.0)])
+    events = lightweight._extract_contact_events(
+        pair_df,
+        pair_key="1_2",
+        source_video=Path("contact.mp4"),
+        source_fps=30.0,
+        sample_stride=1,
+        contact_config={"enabled": True},
+    )
+
+    assert len(events) == 1
+    assert events[0]["contact_type"] == "nose_head_and_nose_tail"
+    assert events[0]["contact_type_components"] == "nose_head;nose_tail"
+
+
+def test_extended_individual_and_group_events_keep_scopes_separate():
+    lightweight = load_lightweight()
+    frames = 12
+    valid = np.ones((frames, 3), dtype=bool)
+    centers = np.zeros((frames, 3, 2), dtype=float)
+    centers[:, 0] = np.array([0.0, 0.0])
+    centers[:, 1] = np.array([2.0, 0.0])
+    centers[:, 2] = np.array([4.0, 0.0])
+    centers[6:, 2, 0] = 30.0
+    kin = {
+        "valid": valid,
+        "behavior_speed": np.zeros((frames, 3), dtype=float),
+        "pose_quality": np.ones((frames, 3), dtype=float),
+        "centers_cm": centers,
+    }
+    events = lightweight._extended_individual_and_group_events(
+        kin,
+        pair_metrics={},
+        pair_i=np.array([0, 0, 1]),
+        pair_j=np.array([1, 2, 2]),
+        source_video=Path("example.mov"),
+        source_fps=30.0,
+        sample_stride=1,
+        config={"extended_behavior": {"enabled": True}},
+    )
+    assert events
+    assert {event["event_scope"] for event in events} == {"individual", "group"}
+    assert any(event["behavior"] == "stationary" for event in events)
+    assert any(event["behavior"] == "huddle" for event in events)
+
+
+def test_huddle_uses_local_cluster_in_multi_mouse_scene():
+    lightweight = load_lightweight()
+    frames = 12
+    valid = np.ones((frames, 8), dtype=bool)
+    centers = np.zeros((frames, 8, 2), dtype=float)
+    # Five mice form a dense local cluster; three visible mice remain apart.
+    centers[:, 0] = np.array([0.0, 0.0])
+    centers[:, 1] = np.array([2.0, 0.0])
+    centers[:, 2] = np.array([0.0, 2.0])
+    centers[:, 3] = np.array([2.0, 2.0])
+    centers[:, 4] = np.array([1.0, 1.0])
+    centers[:, 5] = np.array([40.0, 0.0])
+    centers[:, 6] = np.array([60.0, 0.0])
+    centers[:, 7] = np.array([80.0, 0.0])
+    kin = {
+        "valid": valid,
+        "behavior_speed": np.zeros((frames, 8), dtype=float),
+        "pose_quality": np.ones((frames, 8), dtype=float),
+        "centers_cm": centers,
+    }
+    events = lightweight._extended_individual_and_group_events(
+        kin,
+        pair_metrics={},
+        pair_i=np.array([], dtype=int),
+        pair_j=np.array([], dtype=int),
+        source_video=Path("cluster.mov"),
+        source_fps=30.0,
+        sample_stride=1,
+        config={"extended_behavior": {"enabled": True}},
+    )
+    assert any(event["behavior"] == "huddle" for event in events)

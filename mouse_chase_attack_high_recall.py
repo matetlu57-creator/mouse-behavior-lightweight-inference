@@ -9445,6 +9445,8 @@ def process_video(
                 reuse_path,
                 width=width,
                 height=height,
+                source_video=video_path,
+                require_video_match=bool(adaptive_arena_cfg.get("reuse_require_video_match", True)),
             )
             heatmap = np.zeros((max(height // 20, 2), max(width // 20, 2)), dtype=np.float32)
         else:
@@ -9454,12 +9456,14 @@ def process_video(
                 height=height,
                 config=adaptive_arena_cfg,
                 configured_polygon=configured_polygon,
+                source_video=video_path,
             )
         arena_boundary.save_boundary_artifacts(
             adaptive_arena_result,
             heatmap,
             output_dir / "阶段一_自适应笼界.json",
             output_dir / "阶段一_运动热力图与笼界.png",
+            output_dir / "阶段一_原视频帧叠加笼界.png",
         )
         learned_mask = dict(detector_cfg.get("arena_mask", {}))
         learned_mask["enabled"] = True
@@ -9468,7 +9472,7 @@ def process_video(
         detector_cfg["arena_mask"] = learned_mask
         config.setdefault("detector_first", {})["arena_mask"] = copy.deepcopy(learned_mask)
         logging.info(
-            "自适应笼界：%s | 运动样本%d/%d | 面积比%.3f | 已外扩%.1f%%；边界外候选不进入ID分配。",
+            "自适应笼界：%s | 运动样本%d/%d | 面积比%.3f | 边界尺寸调整%+.1f%%；边界外候选不进入ID分配。",
             adaptive_arena_result.source,
             adaptive_arena_result.motion_sample_count,
             adaptive_arena_result.sample_count,

@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a reproducible problem in the code or a documented workflow.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not attach private videos, pose caches, model weights, or credentials to a public issue.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or release
+      description: Which Git commit, branch, or release reproduces the issue?
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Give the command, configuration profile, and a minimal synthetic or safe example.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and environment
+      description: Paste redacted logs, Python version, OS, and package versions. Remove paths and secrets.
