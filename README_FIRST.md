@@ -1,5 +1,19 @@
 # v1.43 STANDARD BEHAVIOR ENGINE — 先看这里
 
+## 当前 GitHub 仓库入口
+
+本文件主要说明行为算法；仓库工程结构和日常开发入口请结合以下文档阅读：
+
+- [项目总览](README.md)
+- [文档总索引](docs/index.md)
+- [架构与目录职责](docs/architecture.md)
+- [配置 profile](configs/README.md)
+- [开发与 Git 约定](CONTRIBUTING.md)
+
+当前推荐的可复用代码入口是 `src/mouse_behavior/`，命令行入口是
+`scripts/`，普通轻量分析使用 `configs/profiles/balanced.yaml`。根目录旧
+Python 文件和旧配置仍保留为兼容层，不代表新的代码应继续堆放在根目录。
+
 本包从 v1.42.1 FINAL CODE MERGE 继续升级。v1.43 **不修改 YOLO Pose、Identity、Observation 的核心执行语义**，主要重构追逐/攻击行为学部分，使行为判定从“多个独立 gate 最终 OR”升级为统一的标准时序框架：
 
 `Observation Quality -> Pair Kinematics -> Contact Events + Continuous Evidence -> Behavior-specific Role -> FSM/Hysteresis -> Independent chase/attack Ethogram`

@@ -7,7 +7,11 @@
 ```text
 src/mouse_behavior/       可复用 Python 模块；导入模块不应启动任务
 scripts/                  命令行、批处理和一次性评估入口
-tests/                    pytest 单元测试和回归测试
+configs/                  默认配置、运行 profile 和实验覆盖
+tests/                    pytest 单元、集成和回归测试
+docs/                     面向用户和开发者的说明
+examples/                 可运行的最小 API/配置示例
+tools/                    仓库检查和维护工具
 original/                 历史原始版本，仅用于对照
 historical_*/             历史验证材料和迁移记录
 weights/、outputs/        本地模型和结果，不提交到 Git
@@ -33,8 +37,9 @@ python -m pytest -q
 # 运行一个测试文件
 python -m pytest tests/test_lightweight_contact_detection.py -q
 
-# 检查模块和脚本语法
-python -m compileall -q src scripts
+# 检查模块和脚本语法、仓库边界
+python -m compileall -q src scripts tests
+python tools/check_repository.py
 ```
 
 ## 日志约定

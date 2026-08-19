@@ -8,6 +8,9 @@ source of truth for historical versions.
 
 - Standardize the repository around `src/mouse_behavior`, `scripts`,
   `configs`, `tests`, `docs`, and `examples`.
+- Refresh the GitHub-facing Markdown navigation so the repository homepage,
+  algorithm overview, architecture guide, and development guide point to the
+  same maintained directory boundaries.
 - Add inherited configuration profiles for fast, balanced, and high-accuracy
   runs.
 - Add the reusable configuration, pipeline, data-schema, path, logging, and

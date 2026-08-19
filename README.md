@@ -4,6 +4,18 @@
 
 这个仓库保存源代码、配置、测试和运行文档，不保存实验视频、模型权重、YOLO 缓存或大体积分析结果。
 
+## 0. GitHub 仓库导航
+
+如果你是第一次打开 GitHub 仓库，建议按下面的顺序阅读：
+
+1. [README_FIRST.md](README_FIRST.md)：先了解 v1.43 标准行为引擎、并行 FSM 和行为输出边界；
+2. [docs/index.md](docs/index.md)：工程结构、安装、快速运行、算法和开发文档总索引；
+3. [docs/architecture.md](docs/architecture.md)：理解 `src/`、`scripts/`、`configs/`、`tests/` 的职责；
+4. [configs/profiles/balanced.yaml](configs/profiles/balanced.yaml)：普通轻量分析的推荐配置；
+5. [CONTRIBUTING.md](CONTRIBUTING.md)：Git 分支、worktree、pytest、logging 和 AI 协作约定。
+
+GitHub 上的源码入口是 `src/mouse_behavior/`，可执行入口是 `scripts/`，配置入口是 `configs/`。根目录同名 Python 文件只作为旧命令和旧 notebook 的兼容层保留。
+
 ## 1. 当前版本和工作边界
 
 当前代码以 v1.43 Standard Behavior Engine 的行为判定逻辑为基础，并增加了 `lightweight_behavior_inference.py` 作为新的主入口。
@@ -91,6 +103,18 @@ right hip -> tail
 │  ├─ lightweight_behavior_inference.py     # 轻量单视频分析实现
 │  ├─ standard_behavior_engine.py           # 标准追逐/攻击行为引擎
 │  ├─ parallel_behavior_fsm.py              # 个体/鼠对/接触/群体并行FSM
+│  ├─ core/                                 # 流程编排和 Pipeline facade
+│  ├─ models/                               # Pose/cache 模型接口
+│  ├─ behavior/                             # 行为引擎稳定导出接口
+│  ├─ data/                                 # 事件 CSV schema 和数据契约
+│  ├─ io/                                   # 运行目录和输出路径
+│  ├─ utils/                                # logging 和计时器
+│  ├─ tracking/                             # 追踪职责边界
+│  ├─ preprocessing/                        # 预处理职责边界
+│  ├─ postprocessing/                       # 后处理职责边界
+│  ├─ visualization/                        # 可视化职责边界
+│  ├─ evaluation/                           # 评估职责边界
+│  ├─ reports/                              # 报告职责边界
 │  ├─ adaptive_arena_boundary.py            # 自适应笼界学习
 │  ├─ annotation_website_export.py          # 标注网站输出适配器
 │  ├─ pose_cache.py                          # Pose cache 写入模块
@@ -136,13 +160,15 @@ right hip -> tail
 └─ requirements-dev.txt                     # 测试依赖
 ```
 
+其中，`src/mouse_behavior/` 中的职责目录是稳定的模块边界；当前部分历史实现仍集中在轻量分析模块中，后续拆分必须以 pytest 回归测试为前提，不能通过复制 `v2`、`final2` 等目录维护多个版本。
+
 根目录的同名 Python 文件只为旧命令、旧 notebook 和完整管线保留兼容路径；新代码应从 `mouse_behavior` 包导入，新的命令行入口应放到 `scripts/`。这个分层参考了 [SOAR-PKU/mTrack](https://github.com/SOAR-PKU/mTrack) 中 `mtrack/` 与 `scripts/` 的职责分离方式。
 
 `historical_*` 和 `original/` 用于审计与回归对照，不应作为当前运行入口。视频、缓存、权重和生成结果由 `.gitignore` 排除；如果确认拥有发布权，模型权重再作为单独的 GitHub Release 附件发布。
 
 ## 4.1 模型权重
 
-仓库 Release 只随附当前轻量路径使用的这一份 YOLO Pose 权重：
+源码仓库不包含模型权重。只有在版权和发布许可确认后，才应把批准发布的这一份 YOLO Pose 权重作为 GitHub Release 附件提供：
 
 | 文件 | 用途 |
 |---|---|
@@ -361,7 +387,7 @@ python tools/check_repository.py
 
 - Python 源码、PowerShell 脚本和 YAML 配置；
 - 单元测试、回归工具和工程说明；
-- GitHub Release 中明确列出的这一份 Pose 模型权重；
+- 经过版权和发布许可确认后单独发布的 Pose Release 资产（不进入源码仓库）；
 - 依赖清单、README 和 Git 忽略规则。
 
 本仓库不上传：
