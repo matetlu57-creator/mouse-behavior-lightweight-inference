@@ -12,4 +12,9 @@ lightweight analyzer writes these compatibility files:
 | `annotation_website_import/` | complete-video website-compatible package |
 
 The generated metadata records the source video, cache, resolved runtime
-settings, software mode and elapsed time. Do not commit generated files.
+settings, software mode and total elapsed time. Its additive
+`stage_timings_s` object reports wall-clock seconds for video probing, arena
+preparation, cache loading, kinematics, pair filtering, pair metrics, candidate
+pair analysis, global event finalization, website export and CSV output. This
+helps distinguish algorithm time from export time without changing event
+semantics. Do not commit generated files.
