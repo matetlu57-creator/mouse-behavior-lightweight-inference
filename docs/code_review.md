@@ -88,3 +88,65 @@ For future performance work, compare sorted event outputs and stable hashes in
 addition to unit tests. Reducing context padding or changing candidate-pair
 rules is a scientific recall tradeoff and must be evaluated separately from
 pure implementation optimization.
+
+## Second-pass implementation status
+
+The follow-up refactor addresses or narrows findings 1 through 4 without
+shortening the timeline seen by any FSM:
+
+- Pair prefiltering/window construction and candidate-only metrics now form an
+  explicit `_PairWorkset` stage. Candidate-index mapping is tested separately
+  from all-pair summary order.
+- Candidate-pair analysis now has its own `_analyze_candidate_pairs` boundary,
+  and stable event ID/time assignment is isolated in a finalization helper.
+- Contact extraction no longer converts the complete wide DataFrame to Python
+  row dictionaries. It reads eight required arrays and constructs categorical
+  states only for actual contact frames while retaining `None` for every other
+  timeline position.
+- The standard engine narrows row dictionaries to evidence inputs, converts
+  level-independent arrays once, vectorizes contact-type assignment, and lets
+  the lightweight owner enrich its temporary pair DataFrame in place. The
+  public default remains non-mutating.
+- `parallel_behavior_fsm.enabled=false` now suppresses parallel-region events,
+  while `mode` accepts only the implemented `active` value. Metadata reports
+  the effective coordinator values and execution semantics.
+
+The 190-pair distance/heading prefilter remains intentionally vectorized over
+all pairs. It is the inexpensive discovery layer that decides which pairs are
+worth heavy geometry and FSM work; replacing it with Python spatial indexing
+at 20 mice would add complexity without evidence of a useful runtime gain.
+
+Finding 5 is narrowed by `tools/compare_analysis_outputs.py`, a reproducible
+release gate that compares every generated artifact and returns failure for a
+missing or changed file. It canonicalizes only runtime measurements and paths
+rooted in the two output directories. A tiny deterministic cache/video golden
+fixture is still not checked into the repository; generated videos and real
+YOLO caches remain excluded from Git by the repository boundary policy.
+
+### Second-pass verification
+
+The same 156-frame annotated attack clip and YOLO cache used for the first-pass
+golden comparison were run from commit `35d27dd` and the second-pass working
+tree. All four primary CSV files, arena artifacts, website annotations,
+`tracks.jsonl` and exported video remained byte-identical by SHA-256. The
+machine-readable input and output signatures are retained in
+`docs/validation/2026-08-19_second_pass_output_equivalence.json`; reruns use
+`tools/compare_analysis_outputs.py` as a non-zero-exit release gate.
+
+| Measurement | First pass | Second pass | Change |
+|---|---:|---:|---:|
+| `candidate_pair_analysis` | 3.569 s | 3.266 s | 8.5% faster |
+| Total short-clip elapsed time | 6.129 s | 5.726 s | 6.6% faster |
+| Full pytest suite | 52 passed | 67 passed | 15 additional tests |
+
+A synthetic contact benchmark used 18,321 rows, 98 DataFrame columns and six
+sparse contact runs. Median contact extraction time changed from 0.319 s to
+0.00385 s, an 82.9x local speedup with the same six events. This is a local
+hotspot result, not an end-to-end ten-minute-video prediction.
+
+A separate 5,000-row public standard-engine microbenchmark was unchanged
+within measurement noise (approximately 1.002 s in both versions). The narrow
+record view therefore has no standalone wall-time claim; its immediate value
+is lower Python-object materialization and a cleaner input boundary. The
+measured end-to-end pair-stage improvement comes from the combined contact,
+owned-DataFrame and orchestration changes.

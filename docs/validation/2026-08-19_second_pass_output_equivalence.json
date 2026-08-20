@@ -1,0 +1,43 @@
+{
+  "schema_version": "mouse-behavior-output-equivalence/v1",
+  "date": "2026-08-19",
+  "baseline_commit": "35d27dd4485393e73c88e3a1f9fd485729e6e1b9",
+  "candidate": "this commit",
+  "input": {
+    "video_name": "社交-攻击1.mov",
+    "video_sha256": "736716852411d947248c941c2a47b083d55614c0906d4573955db88d9a993a67",
+    "cache_status_sha256": "e38e257a73a54738d7e9ab19d927602df76d9ca7ec49aaa886e3e678fc92d564",
+    "cache_chunk_sha256": "3f41ee3a80e11039e6ff547bda02f6b71a10264b305e975ac2580ef0669b4e1a",
+    "config_sha256": "88ee0f01b2c9d8cd3a122a2f451ae98fdeac3b8de47db0dfcdeebcd313b46eef",
+    "frames": 156,
+    "fps": 29.329,
+    "expected_mice": 20,
+    "sample_stride": 1
+  },
+  "comparison": {
+    "tool": "tools/compare_analysis_outputs.py",
+    "compared_files": 13,
+    "equivalent": true,
+    "differences": [],
+    "canonicalization": [
+      "elapsed_s and stage_timings_s are excluded as measured runtime values",
+      "absolute paths rooted in each output directory are replaced with <OUTPUT_ROOT>",
+      "a missing legacy execution_semantics field is inferred from parallel_behavior_fsm.enabled"
+    ]
+  },
+  "common_signatures": {
+    "annotation_website_export_report.json": "5b6a07186f920251229749884f49470b75a5447cce6c5fb49c7f44bab3ab3637",
+    "annotation_website_import/社交-攻击1/annotations.json": "d11385a67fb79b6f83a54f2eafc2e9e3d63b0e633eb45b1b041f5d8104820f5c",
+    "annotation_website_import/社交-攻击1/metadata.json": "d432ae2b4305861e0ce187149e5841b5360cdf5d0d797f24970422914bc3b814",
+    "annotation_website_import/社交-攻击1/tracks.jsonl": "bc622e55c6e9ee0fcdfb952eaf3fdc75afcf9d7e99c53fc8945e5bc3650ea7d2",
+    "annotation_website_import/社交-攻击1/video.mov": "736716852411d947248c941c2a47b083d55614c0906d4573955db88d9a993a67",
+    "lightweight_analysis_metadata.json": "d5555744cefb0ac19ad95ac370e15b7d83969138cf20c70f56fd09ae22e05997",
+    "lightweight_behavior_events.csv": "6c17d415d1c0547c58ce9f852b428d3f0c8d286fce5394fb08ad1cc29981f5a8",
+    "lightweight_contact_events.csv": "1c628af6132a6554b93915d762f56eaecb0656a49654c45c786d0afb03ed559f",
+    "lightweight_pair_summary.csv": "6e42d141a897c98a6d08e33bed193e7dcaf3626bd7ed2ca5ce798537e2e7e816",
+    "lightweight_top_evidence.csv": "8ebb8614728dd8e4d9698fa14b1898e93bd5063661d4a778c05e0829f841d1d8",
+    "阶段一_原视频帧叠加笼界.png": "81ff3a3908dc57bafdf96a9f236095d41c0c886de8ac05ec280c188248adb53d",
+    "阶段一_自适应笼界.json": "b775f59b0a6dce2ea798aae0dc8b7a613b891fe99f085ac8ee451a9f862b719b",
+    "阶段一_运动热力图与笼界.png": "4fafed9098ddca11c634b223b6c874dab32f4046bb9b3c6ffd892c85c2efaafd"
+  }
+}

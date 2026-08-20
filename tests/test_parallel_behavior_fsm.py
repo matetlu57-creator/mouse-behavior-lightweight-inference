@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mouse_behavior.parallel_behavior_fsm import (
     BooleanBehaviorFSM,
@@ -78,3 +79,33 @@ def test_categorical_fsm_keeps_contact_direction_and_geometry_as_state_key():
         (2, 2, ("nose_tail", "a_to_b")),
         (4, 4, ("nose_tail", "b_to_a")),
     ]
+
+
+def test_disabled_coordinator_emits_no_parallel_region_events():
+    coordinator = ParallelBehaviorFSM(
+        {"enabled": False, "mode": "active", "collect_diagnostics": True}
+    )
+    boolean = coordinator.run_boolean_region(
+        scope="pair",
+        region_id="1_2",
+        behavior="approach",
+        mask=np.array([True, True, False, True]),
+        min_duration_frames=1,
+        max_gap_frames=0,
+    )
+    categorical = coordinator.run_categorical_region(
+        scope="contact",
+        region_id="1_2",
+        states=["nose_head", "nose_head", None],
+    )
+
+    assert boolean.spans == ()
+    assert not bool(boolean.active_mask.any())
+    assert boolean.state.tolist() == ["IDLE"] * 4
+    assert categorical.spans == ()
+    assert len(coordinator.regions) == 2
+
+
+def test_coordinator_rejects_unimplemented_modes():
+    with pytest.raises(ValueError, match="supports only 'active'"):
+        ParallelBehaviorFSM({"mode": "shadow"})

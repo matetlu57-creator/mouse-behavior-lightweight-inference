@@ -285,6 +285,71 @@ def test_provider_hint_is_not_skipped_when_pair_is_temporarily_invalid():
     assert bool(out.loc[0, "standard_behavior_compute_row"])
 
 
+def test_owned_dataframe_can_be_enriched_in_place_without_output_changes():
+    engine = load_engine()
+    cfg = config()
+    source = pd.DataFrame([base_row(i) for i in range(30)])
+    source_before = source.copy(deep=True)
+
+    copied = engine.apply_standard_behavior_engine(source, 30.0, cfg)
+    owned = source.copy(deep=True)
+    inplace = engine.apply_standard_behavior_engine(
+        owned,
+        30.0,
+        cfg,
+        copy_input=False,
+    )
+
+    assert inplace is owned
+    pd.testing.assert_frame_equal(inplace, copied)
+    pd.testing.assert_frame_equal(source, source_before)
+
+
+def test_standard_contact_type_retains_nose_body_fallback():
+    engine = load_engine()
+    row = base_row(0)
+    row["a_to_b_nose_body_distance_cm"] = 2.0
+    row["b_to_a_nose_body_distance_cm"] = 8.0
+    row["a_to_b_nose_head_distance_cm"] = np.inf
+    row["b_to_a_nose_head_distance_cm"] = np.inf
+    row["a_to_b_nose_tail_distance_cm"] = np.inf
+    row["b_to_a_nose_tail_distance_cm"] = np.inf
+
+    out = engine.apply_standard_behavior_engine(
+        pd.DataFrame([row]),
+        30.0,
+        config(),
+    )
+
+    assert out.loc[0, "weak_standard_contact_type"] == "nose_body"
+    assert out.loc[0, "strong_standard_contact_type"] == "nose_body"
+
+
+def test_invalid_timeline_gap_cannot_bridge_standard_fsm_events():
+    engine = load_engine()
+    rows = [base_row(i) for i in range(50)]
+    for index in range(18, 32):
+        rows[index]["valid_pair"] = False
+
+    out = engine.apply_standard_behavior_engine(
+        pd.DataFrame(rows),
+        30.0,
+        config(),
+    )
+    events = engine.extract_standard_behavior_events(
+        out,
+        30.0,
+        "weak",
+        pair_key="1_2",
+    )
+
+    assert set(out.loc[18:31, "weak_standard_chase_state"]) == {"IDLE"}
+    assert all(
+        not (event["start_frame"] < 18 and event["end_frame"] > 31)
+        for event in events
+    )
+
+
 def test_ethogram_aggregates_chase_and_attack_independently():
     engine = load_engine()
     frames = np.arange(40)

@@ -29,6 +29,80 @@ import pandas as pd
 ENGINE_VERSION = "1.43.0-standard-behavior-engine"
 LOGGER = logging.getLogger(__name__)
 
+_PROVIDER_SUFFIXES = (
+    "strict_chase",
+    "window_chase",
+    "near_recovery_chase",
+    "close_follow_chase",
+    "strict_attack",
+    "impulse_attack",
+    "grapple_attack",
+    "occlusion_overlap_attack",
+)
+
+_EVIDENCE_BASE_COLUMNS = {
+    "pose_pair_quality",
+    "identity_pair_quality",
+    "mouse_a_track_state",
+    "mouse_b_track_state",
+    "center_distance_cm",
+    "selected_actor_speed_cm_s",
+    "selected_target_speed_cm_s",
+    "direction_similarity",
+    "pursuit_alignment",
+    "target_escape_alignment",
+    "trajectory_correlation",
+    "actor_behind_target",
+    "selected_distance_drop_cm",
+    "selected_nose_body_distance_cm",
+    "selected_target_turn_angle_deg",
+    "repeated_contact_count",
+    "cluster_attack_hint",
+    "cluster_detection_deficit",
+    "cluster_merged_like",
+    "cluster_overlap_iou",
+    "cluster_motion_bl_per_frame",
+    "cluster_active_frames",
+    "cluster_expected_count",
+    "cluster_observed_count",
+}
+
+_EVIDENCE_DIRECTION_SUFFIXES = {
+    "center_distance_body_lengths",
+    "actor_speed_cm_s",
+    "target_speed_cm_s",
+    "direction_similarity",
+    "pursuit_alignment",
+    "target_escape_alignment",
+    "trajectory_correlation",
+    "behind_score",
+    "actor_behind_target",
+    "closing_speed_cm_s",
+    "nose_body_distance_cm",
+    "actor_acceleration_cm_s2",
+    "target_acceleration_cm_s2",
+    "actor_nose_speed_cm_s",
+    "actor_head_relative_speed_cm_s",
+    "target_turn_angle_deg",
+    "actor_angular_speed_deg_s",
+    "target_angular_speed_deg_s",
+    "actor_pose_deformation_energy",
+    "target_pose_deformation_energy",
+}
+
+
+def _evidence_record_columns(columns: Sequence[str]) -> list[str]:
+    """Return only columns consumed by row-wise evidence calculations."""
+
+    required = set(_EVIDENCE_BASE_COLUMNS)
+    for prefix in ("a_to_b", "b_to_a"):
+        required.update(
+            f"{prefix}_{suffix}" for suffix in _EVIDENCE_DIRECTION_SUFFIXES
+        )
+    for level in ("weak", "strong"):
+        required.update(f"{level}_{suffix}" for suffix in _PROVIDER_SUFFIXES)
+    return [column for column in columns if column in required]
+
 
 def _clip01(value: Any) -> float:
     try:
@@ -844,6 +918,8 @@ def apply_standard_behavior_engine(
     df: pd.DataFrame,
     fps: float,
     config: Mapping[str, Any],
+    *,
+    copy_input: bool = True,
 ) -> pd.DataFrame:
     """Add v1.43 evidence/state columns and optionally replace final labels.
 
@@ -851,15 +927,22 @@ def apply_standard_behavior_engine(
       - ``standard``: standard FSM owns weak/strong final_chase/final_attack.
       - ``shadow``: compute every standard column but retain legacy final labels.
       - ``legacy``: no replacement; useful for emergency rollback.
+
+    ``copy_input`` keeps the historical non-mutating public behavior by
+    default. Internal callers that own a temporary pair DataFrame may opt into
+    in-place enrichment to avoid a full-width timeline copy.
     """
     if df.empty:
-        return df.copy()
+        return df.copy() if copy_input else df
     LOGGER.debug("Applying %s to %d pair rows at %.3f FPS", ENGINE_VERSION, len(df), fps)
     engine_cfg = dict(config.get("standard_behavior_engine", {}))
     if not bool(engine_cfg.get("enabled", True)):
-        return df.copy()
+        return df.copy() if copy_input else df
 
-    output = df.copy()
+    # Public callers keep the historical non-mutating default. The lightweight
+    # analyzer owns its per-pair DataFrame and can enrich it in place, avoiding
+    # one full-width, full-timeline copy for every retained pair.
+    output = df.copy() if copy_input else df
     decision_mode = str(engine_cfg.get("decision_mode", "standard")).strip().lower()
     if decision_mode not in {"standard", "shadow", "legacy"}:
         raise ValueError("standard_behavior_engine.decision_mode must be standard/shadow/legacy")
@@ -898,18 +981,8 @@ def apply_standard_behavior_engine(
         "valid_pair", pd.Series(True, index=output.index)
     ).fillna(False).astype(bool).to_numpy()
     provider_hint = np.zeros(row_count, dtype=bool)
-    provider_suffixes = (
-        "strict_chase",
-        "window_chase",
-        "near_recovery_chase",
-        "close_follow_chase",
-        "strict_attack",
-        "impulse_attack",
-        "grapple_attack",
-        "occlusion_overlap_attack",
-    )
     for level in ("weak", "strong"):
-        for suffix in provider_suffixes:
+        for suffix in _PROVIDER_SUFFIXES:
             column = f"{level}_{suffix}"
             if column in output:
                 provider_hint |= output[column].fillna(False).astype(bool).to_numpy()
@@ -924,7 +997,10 @@ def apply_standard_behavior_engine(
         else np.ones(row_count, dtype=bool)
     )
     compute_indices = np.flatnonzero(compute_row_mask)
-    compute_rows = output.iloc[compute_indices].to_dict("records")
+    evidence_columns = _evidence_record_columns(output.columns.tolist())
+    compute_rows = output.loc[:, evidence_columns].iloc[compute_indices].to_dict(
+        "records"
+    )
 
     distance_all = pd.to_numeric(
         output.get("center_distance_cm", pd.Series(np.nan, index=output.index)),
@@ -932,6 +1008,65 @@ def apply_standard_behavior_engine(
     ).to_numpy(dtype=float)
     interaction_candidate = np.isfinite(distance_all) & (
         distance_all <= interaction_radius
+    )
+    a_ids = (
+        pd.to_numeric(output["mouse_a_id"], errors="coerce")
+        .fillna(-1)
+        .astype(int)
+        .to_numpy()
+    )
+    b_ids = (
+        pd.to_numeric(output["mouse_b_id"], errors="coerce")
+        .fillna(-1)
+        .astype(int)
+        .to_numpy()
+    )
+    selected_actor = (
+        pd.to_numeric(
+            output.get("selected_actor_id", pd.Series(-1, index=output.index)),
+            errors="coerce",
+        )
+        .fillna(-1)
+        .astype(int)
+        .to_numpy()
+    )
+    selected_target = (
+        pd.to_numeric(
+            output.get("selected_target_id", pd.Series(-1, index=output.index)),
+            errors="coerce",
+        )
+        .fillna(-1)
+        .astype(int)
+        .to_numpy()
+    )
+    selected_role_cfg = dict(engine_cfg.get("selected_role_fallback", {}))
+    valid_pair = output["valid_pair"].fillna(False).astype(bool).to_numpy()
+    wall_veto = output.get(
+        "pair_wall_jump_excluded", pd.Series(False, index=output.index)
+    ).fillna(False).astype(bool).to_numpy()
+    physics_veto = (~valid_pair) | wall_veto | (~np.isfinite(distance_all))
+    physics_veto |= distance_all > interaction_radius
+
+    def finite_numeric_column(column: str) -> np.ndarray:
+        values = output.get(column, pd.Series(np.inf, index=output.index))
+        numeric = pd.to_numeric(values, errors="coerce").to_numpy(
+            dtype=float,
+            copy=True,
+        )
+        numeric[~np.isfinite(numeric)] = np.inf
+        return numeric
+
+    head_distance = np.minimum(
+        finite_numeric_column("a_to_b_nose_head_distance_cm"),
+        finite_numeric_column("b_to_a_nose_head_distance_cm"),
+    )
+    tail_distance = np.minimum(
+        finite_numeric_column("a_to_b_nose_tail_distance_cm"),
+        finite_numeric_column("b_to_a_nose_tail_distance_cm"),
+    )
+    body_distance = np.minimum(
+        finite_numeric_column("a_to_b_nose_body_distance_cm"),
+        finite_numeric_column("b_to_a_nose_body_distance_cm"),
     )
     for i, row in zip(compute_indices, compute_rows):
         pq, iq, bq = _pair_quality(row, engine_cfg)
@@ -1043,19 +1178,8 @@ def apply_standard_behavior_engine(
 
         # Role inference is behavior-specific.  Chase and attack can disagree
         # during close contact, so never force both through one role score.
-        a_ids = pd.to_numeric(output["mouse_a_id"], errors="coerce").fillna(-1).astype(int).to_numpy()
-        b_ids = pd.to_numeric(output["mouse_b_id"], errors="coerce").fillna(-1).astype(int).to_numpy()
         chase_role_conf = np.abs(ab_chase - ba_chase)
         chase_ab_is_actor = ab_chase >= ba_chase
-        selected_actor = pd.to_numeric(
-            output.get("selected_actor_id", pd.Series(-1, index=output.index)),
-            errors="coerce",
-        ).fillna(-1).astype(int).to_numpy()
-        selected_target = pd.to_numeric(
-            output.get("selected_target_id", pd.Series(-1, index=output.index)),
-            errors="coerce",
-        ).fillna(-1).astype(int).to_numpy()
-        selected_role_cfg = dict(engine_cfg.get("selected_role_fallback", {}))
         selected_role_fallback = np.zeros(row_count, dtype=bool)
         if bool(selected_role_cfg.get("enabled", False)):
             selected_valid = (
@@ -1098,15 +1222,12 @@ def apply_standard_behavior_engine(
         stationary_gate = np.where(attack_ab_is_actor, ab_stationary_gate, ba_stationary_gate)
         potential_contact = np.where(attack_ab_is_actor, ab_potential_contact, ba_potential_contact)
         attack_evidence_count = np.where(attack_ab_is_actor, ab_evidence_count, ba_evidence_count)
-        causal_distance = pd.to_numeric(
-            output["center_distance_cm"], errors="coerce"
-        ).to_numpy(dtype=float)
         causal_distance_max = float(
             attack_fsm_cfg.get("causal_max_center_distance_cm", float("inf"))
         )
         if np.isfinite(causal_distance_max):
-            causal_near = np.isfinite(causal_distance) & (
-                causal_distance <= causal_distance_max
+            causal_near = np.isfinite(distance_all) & (
+                distance_all <= causal_distance_max
             )
             dynamic_gate &= causal_near
             dynamic_context_gate &= causal_near
@@ -1115,17 +1236,6 @@ def apply_standard_behavior_engine(
         dynamic_score = np.maximum(np.where(attack_ab_is_actor, ab_dynamic, ba_dynamic), dynamic_provider)
         grapple_score = np.maximum(np.maximum(ab_grapple, ba_grapple), grapple_provider)
         attack_score = np.maximum.reduce([dynamic_score, grapple_score, occ])
-
-        valid_pair = output["valid_pair"].fillna(False).astype(bool).to_numpy()
-        wall_veto = output.get(
-            "pair_wall_jump_excluded", pd.Series(False, index=output.index)
-        ).fillna(False).astype(bool).to_numpy()
-        max_distance = float(chase_cfg["max_distance_cm"])
-        distance = pd.to_numeric(output["center_distance_cm"], errors="coerce").to_numpy(float)
-        physics_veto = (~valid_pair) | wall_veto | (~np.isfinite(distance))
-        # The interaction graph radius is a compute/QA boundary, not the chase
-        # threshold itself.  It prevents far-away pairs from opening states.
-        physics_veto |= distance > interaction_radius
 
         chase_fsm = _run_chase_fsm(
             chase_score,
@@ -1173,32 +1283,13 @@ def apply_standard_behavior_engine(
 
         contact_types = np.full(row_count, "", dtype=object)
         contact_threshold = float(attack_cfg.get("contact_distance_cm", 3.0))
-        for i, row in zip(compute_indices, compute_rows):
-            head_values = [
-                _num(row, "a_to_b_nose_head_distance_cm", float("inf")),
-                _num(row, "b_to_a_nose_head_distance_cm", float("inf")),
-            ]
-            tail_values = [
-                _num(row, "a_to_b_nose_tail_distance_cm", float("inf")),
-                _num(row, "b_to_a_nose_tail_distance_cm", float("inf")),
-            ]
-            body_values = [
-                _num(row, "a_to_b_nose_body_distance_cm", float("inf")),
-                _num(row, "b_to_a_nose_body_distance_cm", float("inf")),
-            ]
-            head_min = min(head_values)
-            tail_min = min(tail_values)
-            body_min = min(body_values)
-            head_contact = head_min <= contact_threshold
-            tail_contact = tail_min <= contact_threshold
-            if head_contact and tail_contact:
-                contact_types[i] = "nose_head_and_nose_tail"
-            elif head_contact:
-                contact_types[i] = "nose_head"
-            elif tail_contact:
-                contact_types[i] = "nose_tail"
-            elif body_min <= contact_threshold:
-                contact_types[i] = "nose_body"
+        head_contact = compute_row_mask & (head_distance <= contact_threshold)
+        tail_contact = compute_row_mask & (tail_distance <= contact_threshold)
+        body_contact = compute_row_mask & (body_distance <= contact_threshold)
+        contact_types[head_contact & tail_contact] = "nose_head_and_nose_tail"
+        contact_types[head_contact & ~tail_contact] = "nose_head"
+        contact_types[~head_contact & tail_contact] = "nose_tail"
+        contact_types[~head_contact & ~tail_contact & body_contact] = "nose_body"
 
         output[f"{level}_standard_a_to_b_chase_score"] = ab_chase
         output[f"{level}_standard_b_to_a_chase_score"] = ba_chase

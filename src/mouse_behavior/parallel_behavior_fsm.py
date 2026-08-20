@@ -218,7 +218,9 @@ class ParallelBehaviorFSM:
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
         configured = dict(config or {})
         self.enabled = bool(configured.get("enabled", True))
-        self.mode = str(configured.get("mode", "active"))
+        self.mode = str(configured.get("mode", "active")).strip().lower()
+        if self.mode != "active":
+            raise ValueError("parallel_behavior_fsm.mode currently supports only 'active'")
         self.collect_diagnostics = bool(configured.get("collect_diagnostics", False))
         self.regions: dict[str, BooleanFSMResult | CategoricalFSMResult] = {}
 
@@ -235,10 +237,34 @@ class ParallelBehaviorFSM:
         """Run one orthogonal boolean channel and retain its diagnostic state."""
 
         key = f"{scope}:{region_id}:{behavior}"
-        result = BooleanBehaviorFSM(
-            min_duration_frames=min_duration_frames,
-            max_gap_frames=max_gap_frames,
-        ).run(mask, collect_diagnostics=self.collect_diagnostics)
+        if self.enabled:
+            result = BooleanBehaviorFSM(
+                min_duration_frames=min_duration_frames,
+                max_gap_frames=max_gap_frames,
+            ).run(mask, collect_diagnostics=self.collect_diagnostics)
+        else:
+            raw = np.asarray(
+                list(mask) if not isinstance(mask, np.ndarray) else mask,
+                dtype=bool,
+            ).reshape(-1)
+            result = BooleanFSMResult(
+                active_mask=(
+                    np.zeros(raw.shape, dtype=bool)
+                    if self.collect_diagnostics
+                    else np.empty(0, dtype=bool)
+                ),
+                state=(
+                    np.full(raw.shape, "IDLE", dtype=object)
+                    if self.collect_diagnostics
+                    else np.empty(0, dtype=object)
+                ),
+                effective_mask=(
+                    np.zeros(raw.shape, dtype=bool)
+                    if self.collect_diagnostics
+                    else np.empty(0, dtype=bool)
+                ),
+                spans=(),
+            )
         if self.collect_diagnostics:
             self.regions[key] = result
         return result
@@ -254,7 +280,10 @@ class ParallelBehaviorFSM:
         """Run one categorical contact/interaction region."""
 
         key = f"{scope}:{region_id}:categorical"
-        result = CategoricalBehaviorFSM().run(states, state_key=state_key)
+        if self.enabled:
+            result = CategoricalBehaviorFSM().run(states, state_key=state_key)
+        else:
+            result = CategoricalFSMResult(state=tuple(states), spans=())
         if self.collect_diagnostics:
             self.regions[key] = result
         return result

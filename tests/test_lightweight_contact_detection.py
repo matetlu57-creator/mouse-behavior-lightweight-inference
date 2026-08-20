@@ -84,6 +84,120 @@ def test_simultaneous_head_and_tail_contact_keeps_both_components():
     assert events[0]["contact_type_components"] == "nose_head;nose_tail"
 
 
+def test_contact_extraction_avoids_full_dataframe_record_materialization(monkeypatch):
+    lightweight = load_lightweight()
+    pair_df = pd.DataFrame(
+        [
+            contact_frame(0, 8.0, 8.0),
+            contact_frame(1, 2.0, 8.0),
+            contact_frame(2, 8.0, 8.0),
+        ]
+    )
+
+    def fail_to_dict(*args, **kwargs):
+        raise AssertionError("contact extraction must not materialize all rows")
+
+    monkeypatch.setattr(pd.DataFrame, "to_dict", fail_to_dict)
+    events = lightweight._extract_contact_events(
+        pair_df,
+        pair_key="1_2",
+        source_video=Path("contact.mp4"),
+        source_fps=30.0,
+        sample_stride=1,
+        contact_config={"enabled": True},
+    )
+
+    assert [(event["start_frame"], event["end_frame"]) for event in events] == [(1, 1)]
+
+
+def test_bidirectional_contact_remains_role_ambiguous():
+    lightweight = load_lightweight()
+    row = contact_frame(7, 2.0, 8.0)
+    row["b_to_a_nose_head_distance_cm"] = 8.0
+    row["b_to_a_nose_tail_distance_cm"] = 2.0
+
+    events = lightweight._extract_contact_events(
+        pd.DataFrame([row]),
+        pair_key="1_2",
+        source_video=Path("contact.mp4"),
+        source_fps=30.0,
+        sample_stride=1,
+        contact_config={"enabled": True},
+    )
+
+    assert len(events) == 1
+    assert events[0]["contact_direction"] == "both"
+    assert events[0]["contact_actor_id"] == -1
+    assert events[0]["contact_target_id"] == -1
+    assert events[0]["role_ambiguous"] is True
+
+
+def test_invalid_endpoint_id_keeps_both_contact_roles_unknown():
+    lightweight = load_lightweight()
+    row = contact_frame(7, 2.0, 8.0)
+    row["mouse_b_id"] = np.nan
+
+    events = lightweight._extract_contact_events(
+        pd.DataFrame([row]),
+        pair_key="1_2",
+        source_video=Path("contact.mp4"),
+        source_fps=30.0,
+        sample_stride=1,
+        contact_config={"enabled": True},
+    )
+
+    assert len(events) == 1
+    assert events[0]["contact_actor_id"] == -1
+    assert events[0]["contact_target_id"] == -1
+    assert events[0]["role_ambiguous"] is True
+
+
+def test_disabled_parallel_fsm_suppresses_contact_events():
+    lightweight = load_lightweight()
+    pair_df = pd.DataFrame([contact_frame(0, 2.0, 8.0)])
+
+    events = lightweight._extract_contact_events(
+        pair_df,
+        pair_key="1_2",
+        source_video=Path("contact.mp4"),
+        source_fps=30.0,
+        sample_stride=1,
+        contact_config={"enabled": True},
+        fsm_coordinator=lightweight.ParallelBehaviorFSM(
+            {"enabled": False, "mode": "active"}
+        ),
+    )
+
+    assert events == []
+
+
+def test_disabled_parallel_fsm_suppresses_individual_and_group_events():
+    lightweight = load_lightweight()
+    frames = 12
+    kin = {
+        "valid": np.ones((frames, 1), dtype=bool),
+        "behavior_speed": np.zeros((frames, 1), dtype=float),
+        "pose_quality": np.ones((frames, 1), dtype=float),
+        "centers_cm": np.zeros((frames, 1, 2), dtype=float),
+    }
+
+    events = lightweight._extended_individual_and_group_events(
+        kin,
+        pair_metrics={},
+        pair_i=np.array([], dtype=int),
+        pair_j=np.array([], dtype=int),
+        source_video=Path("disabled.mov"),
+        source_fps=30.0,
+        sample_stride=1,
+        config={
+            "extended_behavior": {"enabled": True},
+            "parallel_behavior_fsm": {"enabled": False, "mode": "active"},
+        },
+    )
+
+    assert events == []
+
+
 def test_extended_individual_and_group_events_keep_scopes_separate():
     lightweight = load_lightweight()
     frames = 12
