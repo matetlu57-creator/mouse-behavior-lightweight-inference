@@ -34,4 +34,6 @@ input video + completed Pose cache
 
 The current tracker and lightweight analyzer are intentionally not split into
 many copied files. Their future extraction must proceed one responsibility at
-a time with regression tests, preserving the root compatibility wrappers.
+a time with regression tests. The maintained CLI wrappers live under `scripts/`;
+only the remaining full-pipeline and import-compatibility files stay at the
+repository root until their consumers are migrated.

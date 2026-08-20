@@ -165,6 +165,12 @@ right hip -> tail
 └─ requirements-dev.txt                     # 测试依赖
 ```
 
+根目录不再保留 Pose 缓存构建、阈值校准、阈值扫描、北医验证和缓存重跑的
+兼容 CLI 文件；这些命令的唯一维护入口是 `scripts/` 下的同名脚本。这样可以
+保证可复用代码在 `src/mouse_behavior/`、运行入口在 `scripts/`，不会因为旧命令
+入口而继续扩大根目录。历史根目录兼容文件仍只为完整旧管线和旧导入路径保留，
+后续新增功能不得再放入根目录。
+
 其中，`src/mouse_behavior/` 中的职责目录是稳定的模块边界；当前部分历史实现仍集中在轻量分析模块中，后续拆分必须以 pytest 回归测试为前提，不能通过复制 `v2`、`final2` 等目录维护多个版本。
 
 根目录的同名 Python 文件只为旧命令、旧 notebook 和完整管线保留兼容路径；新代码应从 `mouse_behavior` 包导入，新的命令行入口应放到 `scripts/`。这个分层参考了 [SOAR-PKU/mTrack](https://github.com/SOAR-PKU/mTrack) 中 `mtrack/` 与 `scripts/` 的职责分离方式。
@@ -350,7 +356,10 @@ lightweight_behavior_inference:
 误报分析：普通接触误判攻击、同向共行误判追逐、遮挡期间重复事件
 ```
 
-`calibrate_standard_behavior.py` 用于离线校准和生成结构化结果；`sweep_standard_behavior.py` 用于在已缓存的 Pair 特征上扫描选定阈值。使用时应固定视频划分、模型、FPS、采样步长和追踪配置，避免把同一视频同时用于阈值选择和最终测试。
+`scripts/calibrate_standard_behavior.py` 用于离线校准和生成结构化结果；
+`scripts/sweep_standard_behavior.py` 用于在已缓存的 Pair 特征上扫描选定阈值。
+使用时应固定视频划分、模型、FPS、采样步长和追踪配置，避免把同一视频同时用于
+阈值选择和最终测试。
 
 最终报告至少应记录：
 

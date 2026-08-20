@@ -74,21 +74,15 @@ OBSOLETE_ROOT_FILES = {
     "fast_video_analysis_v124.yaml",
 }
 ALLOWED_ROOT_PYTHON = {
-    "_script_compat.py",
     "adaptive_arena_boundary.py",
     "annotation_website_export.py",
-    "build_lightweight_pose_cache.py",
-    "calibrate_standard_behavior.py",
     "lightweight_behavior_inference.py",
     "lightweight_cache_behavior_analysis.py",
     "mask_trigger_controller.py",
     "mouse_chase_attack_extractor_base.py",
     "mouse_chase_attack_high_recall.py",
     "nvenc_video_writer.py",
-    "rerun_beiyi_lightweight_rules.py",
     "standard_behavior_engine.py",
-    "sweep_standard_behavior.py",
-    "validate_beiyi_extended_ethogram.py",
 }
 PRIVATE_KEY_PATTERN = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 TOKEN_PATTERNS = (

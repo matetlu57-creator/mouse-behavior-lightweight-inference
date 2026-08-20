@@ -27,9 +27,11 @@ tools/                仓库边界检查和维护工具
 .github/              CI、Issue 模板和 PR 模板
 ```
 
-根目录的同名 Python 文件有明确的兼容用途。历史源码和验证记录由 Git
-commit/tag 管理；新功能不要复制目录形成 `v2`、`final2` 等版本，使用 Git
-分支、tag 或 worktree 管理版本。仅回归测试所需的旧实现放在测试 fixture 中。
+根目录剩余的 Python 文件仅有明确的旧管线或导入兼容用途；Pose 缓存构建、北医
+验证、缓存重跑、阈值校准和阈值扫描的根目录 CLI 包装器已经移除，正式入口统一
+在 `scripts/`。历史源码和验证记录由 Git commit/tag 管理；新功能不要复制目录
+形成 `v2`、`final2` 等版本，使用 Git 分支、tag 或 worktree 管理版本。仅回归
+测试所需的旧实现放在测试 fixture 中。
 
 ## 开发入口
 

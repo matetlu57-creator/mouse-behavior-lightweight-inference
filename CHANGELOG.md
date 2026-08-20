@@ -23,6 +23,9 @@ source of truth for historical versions.
   validation, pytest coverage and source/wheel build inspection.
 - Remove copied historical source trees, duplicate review reports and obsolete
   generated validation manifests; Git history and ADR-0001 preserve provenance.
+- Remove the obsolete root CLI compatibility wrappers and `_script_compat.py` for
+  cache building, Beiyi validation, cache reruns, threshold calibration and
+  threshold sweeps; the maintained commands now live only under `scripts/`.
 
 ## [0.1.0] - 2026-08-18
 
