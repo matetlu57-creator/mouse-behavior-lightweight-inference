@@ -29,6 +29,27 @@ def test_cli_and_library_boundaries_are_explicit():
     assert not hasattr(lightweight, "_PARSED_ARGUMENTS")
 
 
+def test_obsolete_root_cli_wrappers_are_removed():
+    for filename in (
+        "_script_compat.py",
+        "build_lightweight_pose_cache.py",
+        "calibrate_standard_behavior.py",
+        "rerun_beiyi_lightweight_rules.py",
+        "sweep_standard_behavior.py",
+        "validate_beiyi_extended_ethogram.py",
+    ):
+        assert not (ROOT / filename).exists(), filename
+
+    for filename in (
+        "build_lightweight_pose_cache.py",
+        "calibrate_standard_behavior.py",
+        "rerun_beiyi_lightweight_rules.py",
+        "sweep_standard_behavior.py",
+        "validate_beiyi_extended_ethogram.py",
+    ):
+        assert (ROOT / "scripts" / filename).is_file(), filename
+
+
 def test_repository_has_executable_quality_and_test_layers():
     for relative in (
         ".quality-gate.toml",

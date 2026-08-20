@@ -10,7 +10,7 @@ frame boundaries and role annotations, which this input format does not carry.
 
 Example::
 
-    python calibrate_standard_behavior.py \
+    python scripts/calibrate_standard_behavior.py \
       --dataset chase=D:\\data\\threshold_calibration_chase \
       --dataset attack=D:\\data\\threshold_calibration_attack \
       --dataset none=D:\\data\\threshold_calibration_social6 \
