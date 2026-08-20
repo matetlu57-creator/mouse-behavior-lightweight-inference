@@ -99,9 +99,7 @@ def _canonical_json_sha256(path: Path, output_root: Path) -> str:
     with path.open("r", encoding="utf-8-sig") as handle:
         payload = json.load(handle)
     canonical = _canonicalize_json(payload, output_root)
-    if path.name == "lightweight_analysis_metadata.json" and isinstance(
-        canonical, dict
-    ):
+    if path.name == "lightweight_analysis_metadata.json" and isinstance(canonical, dict):
         fsm = canonical.get("parallel_behavior_fsm")
         if isinstance(fsm, dict) and "execution_semantics" not in fsm:
             # v1.43 metadata predating the explicit field still has an
@@ -219,10 +217,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if report.equivalent:
         print(f"PASS  complete output equivalence | files={report.compared_files}")
     else:
-        print(
-            f"SUMMARY compared={report.compared_files} "
-            f"differences={len(report.differences)}"
-        )
+        print(f"SUMMARY compared={report.compared_files} differences={len(report.differences)}")
 
     if args.report is not None:
         report_path = args.report.expanduser().resolve()

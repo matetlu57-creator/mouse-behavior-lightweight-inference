@@ -1,4 +1,5 @@
 """Stable behavior-engine facade for callers outside the implementation files."""
+
 from __future__ import annotations
 
 from ..parallel_behavior_fsm import ParallelBehaviorFSM

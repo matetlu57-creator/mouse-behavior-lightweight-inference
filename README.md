@@ -8,8 +8,8 @@
 
 如果你是第一次打开 GitHub 仓库，建议按下面的顺序阅读：
 
-1. [README_FIRST.md](README_FIRST.md)：先了解 v1.43 标准行为引擎、并行 FSM 和行为输出边界；
-2. [docs/index.md](docs/index.md)：工程结构、安装、快速运行、算法和开发文档总索引；
+1. [docs/index.md](docs/index.md)：工程结构、安装、快速运行、算法和开发文档总索引；
+2. [docs/algorithms.md](docs/algorithms.md)：了解标准行为引擎、并行 FSM 和行为输出边界；
 3. [docs/architecture.md](docs/architecture.md)：理解 `src/`、`scripts/`、`configs/`、`tests/` 的职责；
 4. [configs/profiles/balanced.yaml](configs/profiles/balanced.yaml)：普通轻量分析的推荐配置；
 5. [CONTRIBUTING.md](CONTRIBUTING.md)：Git 分支、worktree、pytest、logging 和 AI 协作约定。
@@ -141,21 +141,26 @@ right hip -> tail
 ├─ mouse_chase_attack_config.yaml           # 行为阈值和运行开关
 ├─ mouse_chase_attack_high_recall.py       # 完整管线兼容入口/集成入口
 ├─ mouse_chase_attack_extractor_base.py    # 原有提取器基础代码
-├─ tests/                                   # 单元、回归和性能测试
+├─ tests/                                   # 分层自动化测试
+│  ├─ unit/                                 # 纯函数和模块级测试
+│  ├─ integration/                          # 跨模块和输出契约测试
+│  ├─ regression/                           # 历史行为与性能回归
+│  │  └─ fixtures/legacy_v138/              # 最小旧实现对照夹具
+│  └─ e2e/                                  # CLI 冒烟测试
 ├─ configs/                                 # 默认配置、profile 和实验覆盖
 ├─ docs/                                    # 安装、架构、算法和开发文档
 ├─ examples/                                # 可复用 API 和配置示例
 ├─ data/                                    # 本地数据占位目录，不提交数据
 ├─ outputs/                                 # 本地结果占位目录，不提交结果
-├─ tools/                                   # 仓库检查和维护工具
+├─ tools/                                   # 仓库检查、构建检查和输出比较
+├─ scripts/run_quality.py                   # 统一的本地/CI 质量门入口
+├─ scripts/validate_repository.py           # 仓库边界验证入口
 ├─ .github/                                 # CI、Issue 和 PR 模板
+├─ .quality-gate.toml                       # 可执行质量门定义
 ├─ pyproject.toml                           # 包元数据和 pytest 配置
 ├─ CONTRIBUTING.md                          # Git/模块/日志/测试约定
 ├─ weights/                                 # 下载 Release 后放置的本地权重目录
 │  └─ README.md
-├─ historical_v1.40_v1.41/                 # 历史工程资料
-├─ historical_v1.42.1/                     # v1.42.1 资料
-├─ original/                                # 原始版本备份
 ├─ requirements.txt                         # 运行依赖
 └─ requirements-dev.txt                     # 测试依赖
 ```
@@ -164,7 +169,7 @@ right hip -> tail
 
 根目录的同名 Python 文件只为旧命令、旧 notebook 和完整管线保留兼容路径；新代码应从 `mouse_behavior` 包导入，新的命令行入口应放到 `scripts/`。这个分层参考了 [SOAR-PKU/mTrack](https://github.com/SOAR-PKU/mTrack) 中 `mtrack/` 与 `scripts/` 的职责分离方式。
 
-`historical_*` 和 `original/` 用于审计与回归对照，不应作为当前运行入口。视频、缓存、权重和生成结果由 `.gitignore` 排除；如果确认拥有发布权，模型权重再作为单独的 GitHub Release 附件发布。
+历史版本由 Git commit/tag 保存，不再复制到根目录。回归测试确实需要的两份 v1.38 旧实现已缩减为 `tests/regression/fixtures/legacy_v138/` 夹具；清理决策见 [ADR-0001](docs/adr/0001-use-git-history-instead-of-copied-version-trees.md)。视频、缓存、权重和生成结果由 `.gitignore` 排除；如果确认拥有发布权，模型权重再作为单独的 GitHub Release 附件发布。
 
 ## 4.1 模型权重
 
@@ -180,11 +185,12 @@ SHA-256：`AB2F2FBE7A52980DF993FAD1914B630D9004254A9547FA48F245244662A1BED8`。
 
 ## 5. 环境安装
 
-推荐使用已经安装 PyTorch/YOLO 依赖的 Conda 环境；轻量行为分析本身只需要 Python 科学计算和 OpenCV 依赖。
+推荐使用项目内虚拟环境，避免改变系统 Python 或已有 Conda 环境；Pose 缓存生成也可以继续使用已经安装 PyTorch/YOLO 的独立 Conda 环境。
 
 ```powershell
-conda activate pytorch
-python -m pip install -r requirements.txt
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
 python -m pip install -r requirements-dev.txt
 ```
 
@@ -357,22 +363,17 @@ lightweight_behavior_inference:
 
 ## 11. 验证状态
 
-本次结构整理后的本地验证记录为：
+仓库质量门覆盖 Ruff 格式与 lint、稳定边界的增量 mypy、仓库结构/隐私/大文件检查、完整 pytest 覆盖率运行以及 sdist/wheel 构建检查。单元、集成、回归和 CLI 冒烟测试均由同一个配置驱动，本地和 GitHub Actions 不维护两套命令。
 
-- `pytest`：45 个测试通过；
-- `compileall` 和关键模块语法检查：通过；
-- YAML/FSM 不变量检查：通过；
-- Identity Cascade fuzz：50/50 通过；
-- 标准行为引擎的持续追逐、攻击因果链、低质量观测保护、接触与行为分离和骨架几何性质测试：通过；
-- 真实视频上的 Precision、Recall、F1、actor/target accuracy：尚未作为仓库级科学验收冻结；
-- 完整旧管线的实际运行：当前源码目录仍缺少 `disk_sequence_guard.py`、`pose_quality_recovery.py`、`mask_cluster_reid.py` 等外部/未随本目录提供的模块，因此优先使用轻量缓存入口。
+真实视频上的 Precision、Recall、F1、actor/target accuracy 尚未作为仓库级科学验收冻结。完整旧管线仍依赖当前仓库外未提供的模块，因此正式可复现入口是轻量缓存分析；仓库测试通过不能替代代表性人工标注集的科学验证。
 
 验证命令：
 
 ```powershell
-python -m pytest -q
-python -m compileall -q src scripts tests
-python tools/check_repository.py
+python scripts/validate_repository.py
+python scripts/run_quality.py
+# 与 GitHub Actions 相同的完整门禁（含 coverage 和 package build）
+python scripts/run_quality.py --ci
 ```
 
 ## 12. CPU、GPU 与渲染说明
@@ -404,6 +405,8 @@ python tools/check_repository.py
 git status --short
 git diff --stat
 git ls-files
+python scripts/validate_repository.py
+python scripts/run_quality.py --ci
 ```
 
 仓库公开前和每次推送前，都应再次检查代码中的实验路径、机构名称、视频文件名和任何本地账号信息；视频、缓存、权重和结果仍必须留在仓库之外。

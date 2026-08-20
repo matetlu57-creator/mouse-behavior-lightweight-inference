@@ -1,8 +1,0 @@
-PASS CASE:
-PASS  sub/test.csv | cell-identical (encoding/newline bytes differ only)
-SUMMARY compared=1 failures=0
-
-INTENTIONAL DIFFERENCE CASE:
-FAIL  sub/test.csv | row 2, column 2: '2' != '3'
-SUMMARY compared=1 failures=1
-exit_code=1

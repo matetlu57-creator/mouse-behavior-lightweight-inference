@@ -1,4 +1,5 @@
 """Small logging timer for pipeline stages."""
+
 from __future__ import annotations
 
 import logging

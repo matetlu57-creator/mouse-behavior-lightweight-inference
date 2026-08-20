@@ -6,6 +6,7 @@ This helper intentionally loads only the seven-keypoint YOLO Pose model.  It
 does not load or require an OBB model.  Cache records are chunked so a long
 video is not accumulated as one Python list in memory.
 """
+
 from __future__ import annotations
 
 import gzip

@@ -20,6 +20,7 @@ finite-state machine, with ``CANDIDATE``, ``ACTIVE``, ``RECOVERY`` and
 ``IDLE`` states.  This makes the migration behavior-preserving while giving
 future rules a place to add state-specific hysteresis.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -78,9 +79,7 @@ def _fill_internal_gaps(mask: np.ndarray, max_gap_frames: int) -> np.ndarray:
     size = len(effective)
     false_starts, false_ends = _span_bounds(~effective)
     internal = (
-        (false_starts > 0)
-        & (false_ends < size - 1)
-        & ((false_ends - false_starts + 1) <= gap)
+        (false_starts > 0) & (false_ends < size - 1) & ((false_ends - false_starts + 1) <= gap)
     )
     for start, end in zip(false_starts[internal], false_ends[internal]):
         effective[int(start) : int(end) + 1] = True
@@ -103,10 +102,7 @@ def _true_spans(values: np.ndarray) -> list[BooleanFSMSpan]:
     """Return contiguous true spans without relying on pandas or scipy."""
 
     starts, ends = _span_bounds(values)
-    return [
-        BooleanFSMSpan(start=int(start), end=int(end))
-        for start, end in zip(starts, ends)
-    ]
+    return [BooleanFSMSpan(start=int(start), end=int(end)) for start, end in zip(starts, ends)]
 
 
 class BooleanBehaviorFSM:
@@ -129,7 +125,9 @@ class BooleanBehaviorFSM:
         *,
         collect_diagnostics: bool = True,
     ) -> BooleanFSMResult:
-        raw = np.asarray(list(mask) if not isinstance(mask, np.ndarray) else mask, dtype=bool).reshape(-1)
+        raw = np.asarray(
+            list(mask) if not isinstance(mask, np.ndarray) else mask, dtype=bool
+        ).reshape(-1)
         effective = _fill_internal_gaps(raw, self.max_gap_frames)
         spans = tuple(
             span
@@ -291,7 +289,9 @@ class ParallelBehaviorFSM:
     def summary(self) -> dict[str, Any]:
         """Return a compact, JSON-serializable coordinator summary."""
 
-        boolean_regions = sum(isinstance(value, BooleanFSMResult) for value in self.regions.values())
+        boolean_regions = sum(
+            isinstance(value, BooleanFSMResult) for value in self.regions.values()
+        )
         categorical_regions = sum(
             isinstance(value, CategoricalFSMResult) for value in self.regions.values()
         )

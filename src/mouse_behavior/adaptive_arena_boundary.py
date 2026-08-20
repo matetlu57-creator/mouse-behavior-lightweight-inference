@@ -200,11 +200,7 @@ def _detection_center(payload: Mapping[str, Any]) -> Optional[_DetectionPoint]:
         points = np.empty((0, 2), dtype=np.float64)
     else:
         points = points[:, :2]
-    valid = (
-        np.all(np.isfinite(points), axis=1)
-        if len(points)
-        else np.zeros(0, dtype=bool)
-    )
+    valid = np.all(np.isfinite(points), axis=1) if len(points) else np.zeros(0, dtype=bool)
     if len(confidence) < len(points):
         confidence = np.pad(confidence, (0, len(points) - len(confidence)), constant_values=0.0)
     confidence = confidence[: len(points)]
@@ -358,8 +354,12 @@ def _learn_polygon_from_heatmap(
         return None, 0.0, "empty_blurred_heatmap"
     normalized = blurred / peak
     positive = normalized[normalized > 0.0]
-    quantile = float(np.clip(_finite_float(cfg.get("heatmap_positive_quantile", 0.20), 0.20), 0.0, 1.0))
-    minimum_density = float(np.clip(_finite_float(cfg.get("heatmap_min_density", 0.08), 0.08), 0.0, 1.0))
+    quantile = float(
+        np.clip(_finite_float(cfg.get("heatmap_positive_quantile", 0.20), 0.20), 0.0, 1.0)
+    )
+    minimum_density = float(
+        np.clip(_finite_float(cfg.get("heatmap_min_density", 0.08), 0.08), 0.0, 1.0)
+    )
     threshold = max(float(np.quantile(positive, quantile)), minimum_density)
     binary = (normalized >= threshold).astype(np.uint8)
 
@@ -455,10 +455,7 @@ def learn_from_yolo_records(
             track.hits += 1
             track.body_length = 0.70 * track.body_length + 0.30 * detection.body_length
             matched_detection_ids.add(id(detection))
-            if (
-                track.hits >= minimum_track_frames
-                and minimum_motion <= speed <= maximum_motion
-            ):
+            if track.hits >= minimum_track_frames and minimum_motion <= speed <= maximum_motion:
                 for point in (track.last_center, track.last_center - delta):
                     x = int(np.clip(math.floor(float(point[0]) / cell_px), 0, heatmap.shape[1] - 1))
                     y = int(np.clip(math.floor(float(point[1]) / cell_px), 0, heatmap.shape[0] - 1))
@@ -476,16 +473,14 @@ def learn_from_yolo_records(
                         body_length=float(detection.body_length),
                     )
                 )
-        tracks = [
-            track
-            for track in tracks
-            if int(frame) - int(track.last_frame) <= max_gap_frames
-        ]
+        tracks = [track for track in tracks if int(frame) - int(track.last_frame) <= max_gap_frames]
 
     minimum_motion_samples = max(int(cfg.get("min_motion_samples", 300)), 1)
     if motion_sample_count < minimum_motion_samples:
-        polygon, area_ratio, reason = None, 0.0, (
-            f"insufficient_motion_samples:{motion_sample_count}<{minimum_motion_samples}"
+        polygon, area_ratio, reason = (
+            None,
+            0.0,
+            (f"insufficient_motion_samples:{motion_sample_count}<{minimum_motion_samples}"),
         )
     else:
         polygon, area_ratio, reason = _learn_polygon_from_heatmap(heatmap, width, height, cfg)
@@ -550,9 +545,7 @@ def load_boundary_json(
         if not stored_video:
             raise ValueError("笼界 JSON 没有 source_video，拒绝将未绑定边界用于当前视频")
         if not _same_path(stored_video, current_video):
-            raise ValueError(
-                f"笼界 JSON 属于其他视频：文件={stored_video}，当前={current_video}"
-            )
+            raise ValueError(f"笼界 JSON 属于其他视频：文件={stored_video}，当前={current_video}")
         stored_fingerprint = raw.get("source_video_fingerprint", {})
         current_fingerprint = _video_fingerprint(current_video)
         if isinstance(stored_fingerprint, Mapping) and stored_fingerprint and current_fingerprint:
@@ -638,7 +631,16 @@ def save_boundary_overlay_frame(
         f"area={result.occupied_area_ratio:.3f} | boundary={adjustment:+.1f}%"
     )
     cv2.rectangle(frame, (10, 8), (min(frame.shape[1] - 1, 760), 48), (0, 0, 0), -1)
-    cv2.putText(frame, label[:110], (20, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(
+        frame,
+        label[:110],
+        (20, 36),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
     _write_png(frame, Path(output_path))
 
 
@@ -665,9 +667,13 @@ def save_boundary_artifacts(
     maximum = float(np.max(heatmap)) if np.any(np.isfinite(heatmap)) else 0.0
     normalized = np.zeros_like(heatmap, dtype=np.uint8)
     if maximum > 0.0 and np.isfinite(maximum):
-        normalized = np.clip(255.0 * np.nan_to_num(heatmap, nan=0.0) / maximum, 0.0, 255.0).astype(np.uint8)
+        normalized = np.clip(255.0 * np.nan_to_num(heatmap, nan=0.0) / maximum, 0.0, 255.0).astype(
+            np.uint8
+        )
     color = cv2.applyColorMap(normalized, cv2.COLORMAP_TURBO)
-    canvas = cv2.resize(color, (int(result.width), int(result.height)), interpolation=cv2.INTER_NEAREST)
+    canvas = cv2.resize(
+        color, (int(result.width), int(result.height)), interpolation=cv2.INTER_NEAREST
+    )
     canvas = cv2.addWeighted(canvas, 0.72, np.full_like(canvas, 35), 0.28, 0.0)
     polygon = np.asarray(result.polygon, dtype=np.float32).reshape(-1, 1, 2)
     if len(polygon) >= 3:
@@ -677,7 +683,16 @@ def save_boundary_artifacts(
         f"{result.source} | samples={result.motion_sample_count}/{result.sample_count} | "
         f"area={result.occupied_area_ratio:.3f} | boundary={adjustment:+.1f}%"
     )
-    cv2.putText(canvas, label[:180], (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(
+        canvas,
+        label[:180],
+        (16, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
     _write_png(canvas, png_path)
     if comparison_path is not None and result.source_video:
         save_boundary_overlay_frame(result.source_video, result, comparison_path, frame_index=0)

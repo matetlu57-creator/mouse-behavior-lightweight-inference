@@ -13,6 +13,10 @@ env/
 *.egg-info/
 build/
 dist/
+artifacts/
+.coverage
+coverage.xml
+htmlcov/
 
 # Video, model, detector cache, and large binary data
 *.mp4

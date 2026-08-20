@@ -1,4 +1,5 @@
 """Small, dependency-light contracts for generated event files."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable

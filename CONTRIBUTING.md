@@ -8,12 +8,13 @@
 src/mouse_behavior/       可复用 Python 模块；导入模块不应启动任务
 scripts/                  命令行、批处理和一次性评估入口
 configs/                  默认配置、运行 profile 和实验覆盖
-tests/                    pytest 单元、集成和回归测试
+tests/unit/               隔离的模块和算法测试
+tests/integration/        跨模块、导出和仓库契约测试
+tests/regression/         历史行为、输出等价和性能回归
+tests/e2e/                CLI/入口端到端冒烟测试
 docs/                     面向用户和开发者的说明
 examples/                 可运行的最小 API/配置示例
 tools/                    仓库检查和维护工具
-original/                 历史原始版本，仅用于对照
-historical_*/             历史验证材料和迁移记录
 weights/、outputs/        本地模型和结果，不提交到 Git
 ```
 
@@ -31,15 +32,14 @@ python -m pip install -r requirements-dev.txt
 # 可选：以 editable 方式安装，使任意工作目录都能 import 包
 python -m pip install -e .
 
-# 运行全部测试
-python -m pytest -q
+# 运行本地质量门（格式、lint、类型、仓库和分层测试）
+python scripts/run_quality.py
 
 # 运行一个测试文件
-python -m pytest tests/test_lightweight_contact_detection.py -q
+python -m pytest tests/unit/test_lightweight_contact_detection.py -q
 
-# 检查模块和脚本语法、仓库边界
-python -m compileall -q src scripts tests
-python tools/check_repository.py
+# 与 CI 相同的覆盖率和构建门禁
+python scripts/run_quality.py --ci
 ```
 
 ## 日志约定
@@ -62,10 +62,10 @@ git switch main
 git pull --ff-only
 git switch -c feat/short-description
 
-python -m pytest -q
+python scripts/run_quality.py
 git diff --check
 git status --short
-git add src scripts tests README.md CONTRIBUTING.md pyproject.toml
+git add <本次修改的明确文件>
 git commit -m "refactor: separate reusable modules and scripts"
 git push -u origin feat/short-description
 ```

@@ -7,6 +7,7 @@ tracking, feature calculation, thresholding, or behavior classification.  The
 adapter follows ``已标记行为数据导入格式说明.md`` schema version 1.0 and the
 website's existing three-file detection-import contract.
 """
+
 from __future__ import annotations
 
 import json
@@ -211,9 +212,7 @@ def _event_mouse_ids(
     if behavior == "huddle":
         return [
             track_id
-            for track_id in _huddle_ids(
-                tracks, start, end, huddle_distance_cm, cm_per_pixel
-            )
+            for track_id in _huddle_ids(tracks, start, end, huddle_distance_cm, cm_per_pixel)
             if track_id in visible
         ]
     if behavior == "isolation":
@@ -329,9 +328,7 @@ def build_annotations(
             skipped.append(
                 {
                     "source_event_id": str(
-                        event.get("light_event_id")
-                        or event.get("contact_event_id")
-                        or ""
+                        event.get("light_event_id") or event.get("contact_event_id") or ""
                     ),
                     "behavior": WEBSITE_BEHAVIOR_NAMES[behavior],
                     "reason": "participant_count_mismatch",
@@ -426,9 +423,7 @@ def _write_tracks_jsonl(
                             "box_xyxy_px": [x1, y1, x2, y2],
                             "detection_confidence": float(
                                 np.clip(
-                                    _json_number(
-                                        pose_quality[frame_index, track_id], default=0.0
-                                    ),
+                                    _json_number(pose_quality[frame_index, track_id], default=0.0),
                                     0.0,
                                     1.0,
                                 )

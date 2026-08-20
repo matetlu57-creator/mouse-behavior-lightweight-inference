@@ -55,9 +55,7 @@ def rolling_sum(
     if was_1d:
         values_array = values_array[:, None]
     if values_array.ndim != 2:
-        raise ValueError(
-            f"rolling_sum expects a 1D or 2D array, got shape={values_array.shape}"
-        )
+        raise ValueError(f"rolling_sum expects a 1D or 2D array, got shape={values_array.shape}")
 
     if active_mask is None:
         active = np.ones_like(values_array, dtype=bool)
@@ -67,8 +65,7 @@ def rolling_sum(
             active = active[:, None]
         if active.shape != values_array.shape:
             raise ValueError(
-                "active_mask must have shape "
-                f"{values_array.shape}, got {active.shape}"
+                f"active_mask must have shape {values_array.shape}, got {active.shape}"
             )
 
     if bool(np.all(active)):
@@ -108,25 +105,18 @@ def rolling_corr(
     values_a = np.asarray(velocity_a, dtype=float)
     values_b = np.asarray(velocity_b, dtype=float)
     if values_a.shape != values_b.shape or values_a.ndim != 3 or values_a.shape[2] != 2:
-        raise ValueError(
-            "velocity_a and velocity_b must have matching shape (frames, pairs, 2)"
-        )
+        raise ValueError("velocity_a and velocity_b must have matching shape (frames, pairs, 2)")
     frames, pairs, _ = values_a.shape
     valid_array = np.asarray(valid, dtype=bool)
     if valid_array.shape != (frames, pairs):
-        raise ValueError(
-            f"valid must have shape ({frames}, {pairs}), got {valid_array.shape}"
-        )
+        raise ValueError(f"valid must have shape ({frames}, {pairs}), got {valid_array.shape}")
     window = max(int(window), 4)
     if active_mask is None:
         active = np.ones((frames, pairs), dtype=bool)
     else:
         active = np.asarray(active_mask, dtype=bool)
         if active.shape != (frames, pairs):
-            raise ValueError(
-                "active_mask must have shape "
-                f"({frames}, {pairs}), got {active.shape}"
-            )
+            raise ValueError(f"active_mask must have shape ({frames}, {pairs}), got {active.shape}")
 
     result = np.zeros((frames, pairs), dtype=np.float32)
     for pair in range(pairs):

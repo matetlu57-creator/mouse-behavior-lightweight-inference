@@ -7,8 +7,13 @@ the normal inference entry points; those belong in `scripts/`.
 tools/
 ├── check_repository.py             # tracked-file, required-path and secret-risk checks
 ├── compare_analysis_outputs.py     # complete baseline/current output equivalence gate
+├── inspect_distribution.py         # verify built sdist/wheel contents and metadata
 └── README.md
 ```
+
+Normal development should call `python scripts/run_quality.py` or
+`python scripts/run_quality.py --ci`; `scripts/validate_repository.py` is the
+stable wrapper used by contributors and CI.
 
 Run the output-equivalence gate after analyzing the same video/cache/config
 with a baseline revision and the proposed revision:

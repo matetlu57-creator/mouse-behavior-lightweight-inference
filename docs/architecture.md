@@ -29,7 +29,8 @@ input video + completed Pose cache
 - `io/` defines canonical run-directory naming.
 - `scripts/` contains thin command-line and validation entry points.
 - `tools/` contains repository and development checks.
-- `historical_*` and `original/` are audit material, not runtime imports.
+- `tests/regression/fixtures/` contains only the minimal frozen legacy code
+  required by a regression; all other historical versions live in Git.
 
 The current tracker and lightweight analyzer are intentionally not split into
 many copied files. Their future extraction must proceed one responsibility at

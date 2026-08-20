@@ -1,0 +1,24 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff lint
+        entry: ruff check --no-cache
+        language: python
+        additional_dependencies: [ruff==0.16.3]
+        types: [python]
+        files: ^(src|scripts|tests|tools|examples)/.*\.py$
+        exclude: ^tests/regression/fixtures/legacy_v138/
+      - id: ruff-format-check
+        name: Ruff format check
+        entry: ruff format --check --no-cache
+        language: python
+        additional_dependencies: [ruff==0.16.3]
+        types: [python]
+        files: ^(src|scripts|tests|tools|examples)/.*\.py$
+        exclude: ^tests/regression/fixtures/legacy_v138/
+      - id: repository-boundaries
+        name: Repository boundaries
+        entry: python scripts/validate_repository.py
+        language: python
+        pass_filenames: false
