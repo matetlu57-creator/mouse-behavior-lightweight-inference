@@ -14,3 +14,11 @@ for the full occlusion/ReID pipeline.
 The parallel FSM deliberately preserves the previous minimum-duration and
 short-gap semantics. Any change to thresholds or temporal gates requires a
 regression comparison against frozen event outputs.
+
+`parallel_behavior_fsm.enabled` is an execution switch. With the default
+`true`, individual, extended pair, contact and group regions use the temporal
+FSM exactly as described above. With `false`, those parallel-region events are
+not emitted; standard-engine chase/attack remain available because they own a
+separate causal FSM. The only currently supported mode is `active`. Unknown
+mode values fail during coordinator construction instead of being silently
+reported in metadata without affecting execution.

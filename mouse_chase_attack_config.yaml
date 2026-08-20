@@ -1564,7 +1564,10 @@ extended_behavior:
 # detector thresholds above remain unchanged; this layer only manages temporal
 # confirmation/recovery for individual, pair, group and contact regions.
 parallel_behavior_fsm:
+  # false 会关闭由并行 FSM 聚合的接触、个体、群体和扩展 pair 事件；
+  # 标准行为引擎自己的 chase/attack FSM 不受此开关影响。
   enabled: true
+  # 当前唯一受支持的执行模式。未知值会直接报错，避免配置与实际执行不一致。
   mode: active
   version: parallel_hierarchical_fsm_v1
   # 调试时改为 true 可保留每个区域的逐帧状态；正常分析只输出最终事件，避免额外内存和数组分配。

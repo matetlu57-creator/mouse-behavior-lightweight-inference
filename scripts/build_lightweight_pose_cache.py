@@ -15,9 +15,7 @@ from mouse_behavior.pose_cache import VIDEO_EXTENSIONS, build_cache
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", type=Path, required=True)
-    parser.add_argument(
-        "--output", type=Path, required=True, help="输出 yolo_precompute 目录"
-    )
+    parser.add_argument("--output", type=Path, required=True, help="输出 yolo_precompute 目录")
     parser.add_argument(
         "--model",
         type=Path,

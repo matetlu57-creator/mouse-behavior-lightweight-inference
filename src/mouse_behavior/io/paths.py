@@ -1,4 +1,5 @@
 """Canonical output-directory layout for one analysis run."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -32,6 +33,13 @@ class RunDirectories:
         return self.root / "logs"
 
     def create(self) -> "RunDirectories":
-        for path in (self.root, self.tracking, self.behavior, self.visualization, self.report, self.logs):
+        for path in (
+            self.root,
+            self.tracking,
+            self.behavior,
+            self.visualization,
+            self.report,
+            self.logs,
+        ):
             path.mkdir(parents=True, exist_ok=True)
         return self

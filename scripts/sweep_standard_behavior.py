@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Grid-search selected v1.43 FSM thresholds using cached pair features."""
+
 from __future__ import annotations
 
 import argparse
 import copy
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -35,7 +35,9 @@ def parse_datasets(items: list[str]) -> list[tuple[str, Path]]:
     return datasets
 
 
-def load_videos(datasets: list[tuple[str, Path]], config: dict[str, Any], fps: float) -> list[dict[str, Any]]:
+def load_videos(
+    datasets: list[tuple[str, Path]], config: dict[str, Any], fps: float
+) -> list[dict[str, Any]]:
     videos: list[dict[str, Any]] = []
     for truth, root in datasets:
         for child in sorted(root.iterdir()):
@@ -61,9 +63,12 @@ def load_videos(datasets: list[tuple[str, Path]], config: dict[str, Any], fps: f
 
 def hard_veto(frame_table: pd.DataFrame) -> np.ndarray:
     valid = frame_table["valid_pair"].fillna(False).astype(bool).to_numpy()
-    wall = frame_table.get(
-        "pair_wall_jump_excluded", pd.Series(False, index=frame_table.index)
-    ).fillna(False).astype(bool).to_numpy()
+    wall = (
+        frame_table.get("pair_wall_jump_excluded", pd.Series(False, index=frame_table.index))
+        .fillna(False)
+        .astype(bool)
+        .to_numpy()
+    )
     candidate = frame_table["standard_interaction_candidate"].fillna(False).astype(bool).to_numpy()
     return (~valid) | wall | (~candidate)
 
@@ -93,7 +98,9 @@ def metrics(videos: list[dict[str, Any]], predictions: list[bool], behavior: str
     }
 
 
-def chase_predictions(videos: list[dict[str, Any]], level: str, fsm_cfg: dict[str, Any], fps: float) -> list[bool]:
+def chase_predictions(
+    videos: list[dict[str, Any]], level: str, fsm_cfg: dict[str, Any], fps: float
+) -> list[bool]:
     predictions: list[bool] = []
     for video in videos:
         present = False
@@ -112,11 +119,14 @@ def chase_predictions(videos: list[dict[str, Any]], level: str, fsm_cfg: dict[st
     return predictions
 
 
-def attack_predictions(videos: list[dict[str, Any]], level: str, fsm_cfg: dict[str, Any], fps: float) -> list[bool]:
+def attack_predictions(
+    videos: list[dict[str, Any]], level: str, fsm_cfg: dict[str, Any], fps: float
+) -> list[bool]:
     predictions: list[bool] = []
     for video in videos:
         present = False
         for table in video["pairs"]:
+
             def gate_column(name: str, default: bool = True) -> np.ndarray:
                 if name not in table:
                     return np.full(len(table), default, dtype=bool)
@@ -144,7 +154,9 @@ def attack_predictions(videos: list[dict[str, Any]], level: str, fsm_cfg: dict[s
     return predictions
 
 
-def sweep_chase(videos: list[dict[str, Any]], config: dict[str, Any], fps: float) -> list[dict[str, Any]]:
+def sweep_chase(
+    videos: list[dict[str, Any]], config: dict[str, Any], fps: float
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for level in LEVELS:
         base = copy.deepcopy(config["standard_behavior_engine"][level]["chase_fsm"])
@@ -154,18 +166,22 @@ def sweep_chase(videos: list[dict[str, Any]], config: dict[str, Any], fps: float
                 fsm["enter_score"] = round(float(enter), 2)
                 fsm["confirm_seconds"] = confirm
                 result = metrics(videos, chase_predictions(videos, level, fsm, fps), "chase")
-                rows.append({
-                    "behavior": "chase",
-                    "level": level,
-                    "parameter": "enter_score+confirm_seconds",
-                    "enter_score": fsm["enter_score"],
-                    "confirm_seconds": confirm,
-                    **result,
-                })
+                rows.append(
+                    {
+                        "behavior": "chase",
+                        "level": level,
+                        "parameter": "enter_score+confirm_seconds",
+                        "enter_score": fsm["enter_score"],
+                        "confirm_seconds": confirm,
+                        **result,
+                    }
+                )
     return rows
 
 
-def sweep_attack(videos: list[dict[str, Any]], config: dict[str, Any], fps: float) -> list[dict[str, Any]]:
+def sweep_attack(
+    videos: list[dict[str, Any]], config: dict[str, Any], fps: float
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for level in LEVELS:
         base = copy.deepcopy(config["standard_behavior_engine"][level]["attack_fsm"])
@@ -177,15 +193,17 @@ def sweep_attack(videos: list[dict[str, Any]], config: dict[str, Any], fps: floa
                     fsm["grapple_confirm_score"] = grapple
                     fsm["occlusion_confirm_score"] = occlusion
                     result = metrics(videos, attack_predictions(videos, level, fsm, fps), "attack")
-                    rows.append({
-                        "behavior": "attack",
-                        "level": level,
-                        "parameter": "dynamic+grapple+occlusion",
-                        "dynamic_confirm_score": dynamic,
-                        "grapple_confirm_score": grapple,
-                        "occlusion_confirm_score": occlusion,
-                        **result,
-                    })
+                    rows.append(
+                        {
+                            "behavior": "attack",
+                            "level": level,
+                            "parameter": "dynamic+grapple+occlusion",
+                            "dynamic_confirm_score": dynamic,
+                            "grapple_confirm_score": grapple,
+                            "occlusion_confirm_score": occlusion,
+                            **result,
+                        }
+                    )
     return rows
 
 

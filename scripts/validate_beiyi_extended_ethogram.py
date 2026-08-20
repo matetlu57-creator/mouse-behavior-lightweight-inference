@@ -7,6 +7,7 @@ script therefore reports *video coverage* (whether the expected label appears
 in its labelled video) and does not claim Precision/Recall/F1.  It processes
 all visible mice in each cage and never assumes a single- or two-mouse clip.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -245,8 +246,12 @@ def run_validation(
                     "cache_reused": bool(cache_reused),
                     "event_count": int(len(events_df)),
                     "contact_event_count": int(len(contacts_df)),
-                    "behavior_counts_json": json.dumps(behavior_counts, ensure_ascii=False, sort_keys=True),
-                    "contact_counts_json": json.dumps(contact_counts, ensure_ascii=False, sort_keys=True),
+                    "behavior_counts_json": json.dumps(
+                        behavior_counts, ensure_ascii=False, sort_keys=True
+                    ),
+                    "contact_counts_json": json.dumps(
+                        contact_counts, ensure_ascii=False, sort_keys=True
+                    ),
                     "analysis_elapsed_s": float(metadata.get("elapsed_s", 0.0)),
                     "case_output": str(case_dir),
                 }

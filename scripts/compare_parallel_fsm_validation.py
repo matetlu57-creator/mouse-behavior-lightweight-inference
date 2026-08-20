@@ -6,6 +6,7 @@ The comparison intentionally ignores generated event IDs and elapsed time.
 It checks the behavior/event content that can affect downstream annotation:
 scope, roles, analysis/source frame boundaries, scores and contact geometry.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -175,7 +176,13 @@ def main() -> int:
         index=False,
         encoding="utf-8-sig",
     )
-    print(json.dumps({key: value for key, value in report.items() if key != "cases"}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {key: value for key, value in report.items() if key != "cases"},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

@@ -17,6 +17,12 @@ source of truth for historical versions.
   timing facades without changing the existing lightweight algorithm.
 - Add repository checks, CI, contribution guidance, and a draft-release
   workflow through GitHub pull requests.
+- Split tests into unit, integration, regression and end-to-end layers while
+  preserving the minimum v1.38 source fixtures required for output regression.
+- Add one TOML-driven quality gate for Ruff, incremental mypy, repository
+  validation, pytest coverage and source/wheel build inspection.
+- Remove copied historical source trees, duplicate review reports and obsolete
+  generated validation manifests; Git history and ADR-0001 preserve provenance.
 
 ## [0.1.0] - 2026-08-18
 

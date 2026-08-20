@@ -1,0 +1,54 @@
+version = 1
+
+[commands]
+format_check = [
+  ["{python}", "-m", "ruff", "format", "--check", "src", "scripts", "tests", "tools", "examples"],
+]
+lint = [
+  ["{python}", "-m", "ruff", "check", "src", "scripts", "tests", "tools", "examples"],
+]
+type_check = [
+  ["{python}", "-m", "mypy", "src/mouse_behavior/config.py", "src/mouse_behavior/version.py", "src/mouse_behavior/data/schema.py", "src/mouse_behavior/io/paths.py", "src/mouse_behavior/utils/timer.py"],
+]
+repository = [
+  ["{python}", "scripts/validate_repository.py"],
+]
+unit_test = [
+  ["{python}", "-m", "pytest", "-q", "tests/unit"],
+]
+integration_test = [
+  ["{python}", "-m", "pytest", "-q", "tests/integration"],
+]
+regression_test = [
+  ["{python}", "-m", "pytest", "-q", "tests/regression"],
+]
+e2e_test = [
+  ["{python}", "-m", "pytest", "-q", "tests/e2e"],
+]
+coverage = [
+  ["{python}", "-m", "pytest", "-q", "--cov=mouse_behavior", "--cov-report=term-missing:skip-covered", "--cov-report=xml:artifacts/coverage.xml"],
+]
+build = [
+  ["{python}", "-m", "build", "--sdist", "--wheel", "--outdir", "artifacts/dist"],
+  ["{python}", "tools/inspect_distribution.py", "artifacts/dist"],
+]
+
+[profiles]
+local = [
+  "format_check",
+  "lint",
+  "type_check",
+  "repository",
+  "unit_test",
+  "integration_test",
+  "regression_test",
+  "e2e_test",
+]
+ci = [
+  "format_check",
+  "lint",
+  "type_check",
+  "repository",
+  "coverage",
+  "build",
+]

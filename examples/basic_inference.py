@@ -4,6 +4,7 @@ Install the project first with ``python -m pip install -e .``.  The example
 does not build a pose cache; pass a completed cache produced by the pose-cache
 script or another approved upstream pipeline.
 """
+
 from __future__ import annotations
 
 import argparse

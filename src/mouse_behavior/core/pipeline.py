@@ -1,4 +1,5 @@
 """Thin orchestration API for the current lightweight analysis path."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

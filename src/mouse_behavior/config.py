@@ -1,4 +1,5 @@
 """Load YAML configurations with explicit, repository-local inheritance."""
+
 from __future__ import annotations
 
 from copy import deepcopy

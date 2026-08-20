@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "mouse-behavior-lightweight-inference"
 version = "0.1.0"
 description = "Reusable modules and CLI tools for mouse behavior analysis"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
@@ -15,6 +16,9 @@ dependencies = [
     "opencv-python>=4.8",
     "tqdm>=4.65",
 ]
+
+[project.scripts]
+mouse-behavior-lightweight = "mouse_behavior.lightweight_behavior_inference:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -26,3 +30,35 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-ra"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+    "tests/regression/fixtures/legacy_v138",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+exclude = [
+    "tests/regression/fixtures/legacy_v138",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["mouse_behavior"]
+omit = [
+    "tests/regression/fixtures/*",
+]
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = true

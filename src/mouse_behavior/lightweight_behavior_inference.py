@@ -14,10 +14,10 @@ It does not claim to replace the full occlusion/ReID pipeline.  The output
 metadata explicitly records that limitation so a detected event can be
 reviewed separately from a full-pipeline result.
 """
+
 from __future__ import annotations
 
 import argparse
-import csv
 import gzip
 import json
 import logging
@@ -25,7 +25,7 @@ import math
 import pickle
 import time
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
@@ -45,6 +45,9 @@ from . import standard_behavior_engine as behavior_engine
 from .annotation_website_export import export_complete_video_package
 from .config import load_config
 from .logging_config import configure_logging
+from .utils.rolling import rolling_corr as _rolling_corr
+from .utils.rolling import rolling_sum as _rolling_sum
+from .utils.timer import Timer
 
 
 LOGGER = logging.getLogger(__name__)
@@ -137,7 +140,9 @@ def _angle_deg(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return out
 
 
-def _weighted_mean(points: np.ndarray, confidence: np.ndarray, indices: Sequence[int]) -> np.ndarray:
+def _weighted_mean(
+    points: np.ndarray, confidence: np.ndarray, indices: Sequence[int]
+) -> np.ndarray:
     points = np.asarray(points, dtype=float)
     confidence = np.asarray(confidence, dtype=float).reshape(-1)
     valid_indices = [
@@ -178,11 +183,7 @@ def _payload_detection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     bbox = np.asarray(payload.get("bbox_xyxy", []), dtype=float).reshape(-1)
     if points.shape != (KEYPOINTS, 2) or confidence.shape != (KEYPOINTS,) or bbox.shape != (4,):
         return None
-    valid = (
-        np.all(np.isfinite(points), axis=1)
-        & np.isfinite(confidence)
-        & (confidence >= 0.10)
-    )
+    valid = np.all(np.isfinite(points), axis=1) & np.isfinite(confidence) & (confidence >= 0.10)
     if int(valid.sum()) < 4:
         return None
     center = _weighted_mean(points, confidence, (KP_NECK, KP_LEFT_HIP, KP_RIGHT_HIP))
@@ -203,7 +204,8 @@ def _payload_detection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         "body_length": body_length,
         "pose_quality": pose_quality if np.isfinite(pose_quality) else 0.0,
         "box_conf": box_conf if np.isfinite(box_conf) else 0.0,
-        "score": (box_conf if np.isfinite(box_conf) else 0.0) + 0.10 * (pose_quality if np.isfinite(pose_quality) else 0.0),
+        "score": (box_conf if np.isfinite(box_conf) else 0.0)
+        + 0.10 * (pose_quality if np.isfinite(pose_quality) else 0.0),
     }
 
 
@@ -282,9 +284,7 @@ def _prepare_video_arena_boundary(
     if not bool(arena_cfg.get("enabled", True)):
         return None, None
     configured_polygon = (
-        dict(config.get("detector_first", {}))
-        .get("arena_mask", {})
-        .get("polygon", [])
+        dict(config.get("detector_first", {})).get("arena_mask", {}).get("polygon", [])
     )
     reuse_value = str(arena_cfg.get("reuse_boundary_json", "") or "").strip()
     if reuse_value:
@@ -371,7 +371,9 @@ def _assign_tracks(
         return assignments, initialized
 
     if not initialized:
-        selected = sorted(detections, key=lambda item: (float(item["center"][1]), float(item["center"][0])))[:expected_mice]
+        selected = sorted(
+            detections, key=lambda item: (float(item["center"][1]), float(item["center"][0]))
+        )[:expected_mice]
         for logical_id, detection in enumerate(selected):
             assignments[logical_id] = detection
             last_center[logical_id] = detection["center"]
@@ -390,15 +392,26 @@ def _assign_tracks(
 
     cost = np.full((len(active_ids), detection_count), 1e6, dtype=float)
     for row, logical_id in enumerate(active_ids):
-        prediction = last_center[logical_id] + last_velocity[logical_id] * max(int(missed[logical_id]) + 1, 1)
+        prediction = last_center[logical_id] + last_velocity[logical_id] * max(
+            int(missed[logical_id]) + 1, 1
+        )
         for column, detection in enumerate(detections):
             scale = max(float(last_body[logical_id]), float(detection["body_length"]), 20.0)
             center_cost = float(np.linalg.norm(prediction - detection["center"])) / scale
             previous_points = last_points[logical_id]
             current_points = detection["points"]
-            valid = np.all(np.isfinite(previous_points), axis=1) & np.all(np.isfinite(current_points), axis=1)
+            valid = np.all(np.isfinite(previous_points), axis=1) & np.all(
+                np.isfinite(current_points), axis=1
+            )
             if int(valid.sum()) >= 4:
-                pose_cost = float(np.mean(np.linalg.norm(previous_points[valid] - current_points[valid], axis=1))) / scale
+                pose_cost = (
+                    float(
+                        np.mean(
+                            np.linalg.norm(previous_points[valid] - current_points[valid], axis=1)
+                        )
+                    )
+                    / scale
+                )
             else:
                 pose_cost = center_cost
             cost[row, column] = 0.58 * center_cost + 0.42 * pose_cost
@@ -409,7 +422,9 @@ def _assign_tracks(
         rows, columns = [], []
         used: set[int] = set()
         for row in range(cost.shape[0]):
-            column = int(np.argmin(np.where(np.isin(np.arange(detection_count), list(used)), 1e6, cost[row])))
+            column = int(
+                np.argmin(np.where(np.isin(np.arange(detection_count), list(used)), 1e6, cost[row]))
+            )
             if column not in used:
                 rows.append(row)
                 columns.append(column)
@@ -418,11 +433,19 @@ def _assign_tracks(
     matched_ids: set[int] = set()
     for row, column in zip(rows, columns):
         logical_id = int(active_ids[int(row)])
-        scale = max(float(last_body[logical_id]), float(detections[int(column)]["body_length"]), 20.0)
-        center_distance = float(np.linalg.norm(
-            last_center[logical_id] + last_velocity[logical_id] * max(int(missed[logical_id]) + 1, 1)
-            - detections[int(column)]["center"]
-        )) / scale
+        scale = max(
+            float(last_body[logical_id]), float(detections[int(column)]["body_length"]), 20.0
+        )
+        center_distance = (
+            float(
+                np.linalg.norm(
+                    last_center[logical_id]
+                    + last_velocity[logical_id] * max(int(missed[logical_id]) + 1, 1)
+                    - detections[int(column)]["center"]
+                )
+            )
+            / scale
+        )
         gate = 3.2 if int(missed[logical_id]) <= 3 else 5.0
         if float(cost[int(row), int(column)]) > gate or center_distance > gate:
             continue
@@ -557,7 +580,9 @@ def _ema_smooth_keypoints(values: np.ndarray, valid: np.ndarray, alpha: float = 
                 if not np.all(np.isfinite(current)):
                     continue
                 if np.all(np.isfinite(previous[track, point])):
-                    previous[track, point] = alpha * current + (1.0 - alpha) * previous[track, point]
+                    previous[track, point] = (
+                        alpha * current + (1.0 - alpha) * previous[track, point]
+                    )
                 else:
                     previous[track, point] = current
                 out[frame, track, point] = previous[track, point]
@@ -617,151 +642,25 @@ def _pose_deformation_energy(
     for frame in range(1, frames):
         common = pose_valid[frame] & pose_valid[frame - 1]
         for mouse in np.flatnonzero(np.sum(common, axis=1) >= 3):
-            delta = body_pose[frame, mouse, common[mouse]] - body_pose[frame - 1, mouse, common[mouse]]
+            delta = (
+                body_pose[frame, mouse, common[mouse]] - body_pose[frame - 1, mouse, common[mouse]]
+            )
             deformation[frame, mouse] = float(np.sqrt(np.mean(np.sum(delta * delta, axis=1))))
     deformation[~valid] = 0.0
     return deformation
 
 
-def _rolling_sum(
-    values: np.ndarray,
-    window: int,
-    active_mask: np.ndarray | None = None,
-) -> np.ndarray:
-    values = np.nan_to_num(np.asarray(values, dtype=float), nan=0.0)
-    window = max(int(window), 1)
-    was_1d = values.ndim == 1
-    if was_1d:
-        values = values[:, None]
-    if values.ndim != 2:
-        raise ValueError(f"_rolling_sum expects a 1D or 2D array, got shape={values.shape}")
-    if active_mask is None:
-        active_mask = np.ones_like(values, dtype=bool)
-    else:
-        active_mask = np.asarray(active_mask, dtype=bool)
-        if active_mask.ndim == 1 and was_1d:
-            active_mask = active_mask[:, None]
-        if active_mask.shape != values.shape:
-            raise ValueError(
-                "active_mask must have shape "
-                f"{values.shape}, got {active_mask.shape}"
-            )
-    if bool(np.all(active_mask)):
-        cumulative = np.concatenate([np.zeros((1, values.shape[1])), np.cumsum(values, axis=0)], axis=0)
-        index = np.arange(values.shape[0])
-        starts = np.maximum(index - window + 1, 0)
-        result = cumulative[index + 1] - cumulative[starts]
-        return result[:, 0] if was_1d else result
-
-    result = np.zeros_like(values, dtype=float)
-    buffer = np.zeros((window, values.shape[1]), dtype=float)
-    counts = np.zeros(values.shape[1], dtype=float)
-    for frame in range(values.shape[0]):
-        active_indices = np.flatnonzero(active_mask[frame])
-        inactive_indices = np.flatnonzero(~active_mask[frame])
-        if len(inactive_indices):
-            buffer[:, inactive_indices] = 0.0
-            counts[inactive_indices] = 0.0
-        if not len(active_indices):
-            continue
-        slot = frame % window
-        if frame >= window:
-            counts[active_indices] -= buffer[slot, active_indices]
-        current = values[frame, active_indices]
-        buffer[slot, active_indices] = current
-        counts[active_indices] += current
-        result[frame, active_indices] = counts[active_indices]
-    return result[:, 0] if was_1d else result
-
-
-def _rolling_corr(
-    velocity_a: np.ndarray,
-    velocity_b: np.ndarray,
-    valid: np.ndarray,
-    window: int,
-    active_mask: np.ndarray | None = None,
-) -> np.ndarray:
-    """Rolling Pearson correlation over flattened 2-D displacement vectors."""
-    frames, pairs, _ = velocity_a.shape
-    window = max(int(window), 4)
-    if active_mask is None:
-        active_mask = np.ones((frames, pairs), dtype=bool)
-    else:
-        active_mask = np.asarray(active_mask, dtype=bool)
-        if active_mask.shape != (frames, pairs):
-            raise ValueError(
-                "active_mask must have shape "
-                f"({frames}, {pairs}), got {active_mask.shape}"
-            )
-    result = np.zeros((frames, pairs), dtype=np.float32)
-    buffer_a = np.zeros((window, pairs, 2), dtype=float)
-    buffer_b = np.zeros((window, pairs, 2), dtype=float)
-    buffer_valid = np.zeros((window, pairs), dtype=bool)
-    sum_a = np.zeros(pairs, dtype=float)
-    sum_b = np.zeros(pairs, dtype=float)
-    sum_a2 = np.zeros(pairs, dtype=float)
-    sum_b2 = np.zeros(pairs, dtype=float)
-    sum_ab = np.zeros(pairs, dtype=float)
-    count = np.zeros(pairs, dtype=int)
-    for frame in range(frames):
-        active_indices = np.flatnonzero(active_mask[frame])
-        inactive_indices = np.flatnonzero(~active_mask[frame])
-        if len(inactive_indices):
-            buffer_a[:, inactive_indices] = 0.0
-            buffer_b[:, inactive_indices] = 0.0
-            buffer_valid[:, inactive_indices] = False
-            sum_a[inactive_indices] = 0.0
-            sum_b[inactive_indices] = 0.0
-            sum_a2[inactive_indices] = 0.0
-            sum_b2[inactive_indices] = 0.0
-            sum_ab[inactive_indices] = 0.0
-            count[inactive_indices] = 0
-        if not len(active_indices):
-            continue
-        slot = frame % window
-        if frame >= window:
-            old_valid = buffer_valid[slot, active_indices]
-            old_a = buffer_a[slot, active_indices]
-            old_b = buffer_b[slot, active_indices]
-            sum_a[active_indices] -= np.where(old_valid, old_a.sum(axis=1), 0.0)
-            sum_b[active_indices] -= np.where(old_valid, old_b.sum(axis=1), 0.0)
-            sum_a2[active_indices] -= np.where(old_valid, (old_a * old_a).sum(axis=1), 0.0)
-            sum_b2[active_indices] -= np.where(old_valid, (old_b * old_b).sum(axis=1), 0.0)
-            sum_ab[active_indices] -= np.where(old_valid, (old_a * old_b).sum(axis=1), 0.0)
-            count[active_indices] -= old_valid.astype(int)
-        current_valid = np.asarray(valid[frame, active_indices], dtype=bool)
-        current_a = np.nan_to_num(velocity_a[frame, active_indices], nan=0.0)
-        current_b = np.nan_to_num(velocity_b[frame, active_indices], nan=0.0)
-        buffer_a[slot, active_indices] = current_a
-        buffer_b[slot, active_indices] = current_b
-        buffer_valid[slot, active_indices] = current_valid
-        sum_a[active_indices] += np.where(current_valid, current_a.sum(axis=1), 0.0)
-        sum_b[active_indices] += np.where(current_valid, current_b.sum(axis=1), 0.0)
-        sum_a2[active_indices] += np.where(current_valid, (current_a * current_a).sum(axis=1), 0.0)
-        sum_b2[active_indices] += np.where(current_valid, (current_b * current_b).sum(axis=1), 0.0)
-        sum_ab[active_indices] += np.where(current_valid, (current_a * current_b).sum(axis=1), 0.0)
-        count[active_indices] += current_valid.astype(int)
-        n = 2.0 * count[active_indices].astype(float)
-        numerator = n * sum_ab[active_indices] - sum_a[active_indices] * sum_b[active_indices]
-        variance_a = np.maximum(n * sum_a2[active_indices] - sum_a[active_indices] * sum_a[active_indices], 0.0)
-        variance_b = np.maximum(n * sum_b2[active_indices] - sum_b[active_indices] * sum_b[active_indices], 0.0)
-        denominator = np.sqrt(variance_a * variance_b)
-        active_good = (count[active_indices] >= 4) & (denominator > 1e-9)
-        result[frame, active_indices[active_good]] = np.clip(
-            numerator[active_good] / denominator[active_good],
-            -1.0,
-            1.0,
-        )
-    return result
-
-
-def _kinematics(tracks: Mapping[str, np.ndarray], fps: float, body_length_cm: float = 8.0) -> dict[str, np.ndarray | float]:
+def _kinematics(
+    tracks: Mapping[str, np.ndarray], fps: float, body_length_cm: float = 8.0
+) -> dict[str, np.ndarray | float]:
     valid = np.asarray(tracks["valid"], dtype=bool)
     pose_quality = np.asarray(tracks["pose_quality"], dtype=float)
     raw_kp = np.asarray(tracks["keypoints_px"], dtype=float)
     raw_centers = np.asarray(tracks["centers_px"], dtype=float)
     body_values = np.asarray(tracks["body_lengths_px"], dtype=float)
-    body_values = body_values[np.isfinite(body_values) & (body_values >= 10.0) & (body_values <= 300.0)]
+    body_values = body_values[
+        np.isfinite(body_values) & (body_values >= 10.0) & (body_values <= 300.0)
+    ]
     reference_body_px = float(np.median(body_values)) if body_values.size else 60.0
     cm_per_pixel = float(body_length_cm / max(reference_body_px, 1e-6))
     smooth_kp = _ema_smooth_keypoints(raw_kp, valid, alpha=0.70)
@@ -797,17 +696,31 @@ def _kinematics(tracks: Mapping[str, np.ndarray], fps: float, body_length_cm: fl
             if not valid[frame, mouse]:
                 continue
             previous = int(last_valid[mouse])
-            if previous >= 0 and frame - previous <= 3 and np.all(np.isfinite(centers_cm[[previous, frame], mouse])):
+            if (
+                previous >= 0
+                and frame - previous <= 3
+                and np.all(np.isfinite(centers_cm[[previous, frame], mouse]))
+            ):
                 dt = max(frame - previous, 1) / fps
-                velocity[frame, mouse] = (centers_cm[frame, mouse] - centers_cm[previous, mouse]) / dt
+                velocity[frame, mouse] = (
+                    centers_cm[frame, mouse] - centers_cm[previous, mouse]
+                ) / dt
                 if np.all(np.isfinite(keypoints_cm[[previous, frame], mouse, KP_NOSE])):
-                    nose_velocity[frame, mouse] = (keypoints_cm[frame, mouse, KP_NOSE] - keypoints_cm[previous, mouse, KP_NOSE]) / dt
-                if previous > 0:
-                    acceleration[frame, mouse] = abs(
-                        np.linalg.norm(velocity[frame, mouse]) - np.linalg.norm(velocity[previous, mouse])
+                    nose_velocity[frame, mouse] = (
+                        keypoints_cm[frame, mouse, KP_NOSE] - keypoints_cm[previous, mouse, KP_NOSE]
                     ) / dt
+                if previous > 0:
+                    acceleration[frame, mouse] = (
+                        abs(
+                            np.linalg.norm(velocity[frame, mouse])
+                            - np.linalg.norm(velocity[previous, mouse])
+                        )
+                        / dt
+                    )
                 if np.all(np.isfinite(heading[[previous, frame], mouse])):
-                    angular_speed[frame, mouse] = float(_angle_deg(heading[frame, mouse], heading[previous, mouse])) / dt
+                    angular_speed[frame, mouse] = (
+                        float(_angle_deg(heading[frame, mouse], heading[previous, mouse])) / dt
+                    )
             last_valid[mouse] = frame
     speed = np.linalg.norm(velocity, axis=2)
     nose_speed = np.linalg.norm(nose_velocity, axis=2)
@@ -830,10 +743,9 @@ def _kinematics(tracks: Mapping[str, np.ndarray], fps: float, body_length_cm: fl
             )
             if np.any(valid_motion):
                 target_values = behavior_speed_raw[behavior_lookback:, mouse]
-                target_values[valid_motion] = (
-                    np.linalg.norm(current[valid_motion] - previous[valid_motion], axis=1)
-                    / (behavior_lookback / max(fps, 1e-9))
-                )
+                target_values[valid_motion] = np.linalg.norm(
+                    current[valid_motion] - previous[valid_motion], axis=1
+                ) / (behavior_lookback / max(fps, 1e-9))
     behavior_speed = np.zeros((frames, mice), dtype=float)
     behavior_window = max(int(round(fps * 0.30)), 3)
     for mouse in range(mice):
@@ -908,7 +820,8 @@ def _pair_dataframe(
     nose_tail_ba = np.asarray(metrics["nose_tail_ba"][:, pair_index], dtype=float)
     nose_head_ab = np.asarray(metrics["nose_head_ab"][:, pair_index], dtype=float)
     nose_head_ba = np.asarray(metrics["nose_head_ba"][:, pair_index], dtype=float)
-    repeated = np.asarray(metrics["repeated_contact"][:, pair_index], dtype=int)
+    behavior_speed = np.asarray(metrics["behavior_speed"], dtype=float)
+    distance_body_lengths = distance / 8.0
     score_ab = pursuit_ab + escape_ab + 0.15 * speed[:, i]
     score_ba = pursuit_ba + escape_ba + 0.15 * speed[:, j]
     tie = np.abs(score_ab - score_ba) <= 0.05
@@ -918,7 +831,6 @@ def _pair_dataframe(
     selected_nose_body = np.where(selected_ab, nose_body_ab, nose_body_ba)
     selected_turn = np.where(selected_ab, turn[:, j], turn[:, i])
     closing_speed = drop / max(0.30, 1.0 / fps)
-    behavior_speed = np.asarray(metrics["behavior_speed"], dtype=float)
     frame = np.arange(p, dtype=int)
     data: dict[str, Any] = {
         "frame": frame,
@@ -932,12 +844,12 @@ def _pair_dataframe(
         "mouse_b_track_state": "tracked",
         "valid_pair": valid,
         "center_distance_cm": distance,
-        "center_distance_body_lengths": distance / 8.0,
+        "center_distance_body_lengths": distance_body_lengths,
         "head_distance_cm": np.asarray(metrics["head_distance"][:, pair_index], dtype=float),
         "mouse_a_speed_cm_s": speed[:, i],
         "mouse_b_speed_cm_s": speed[:, j],
-        "mouse_a_behavior_speed_cm_s": np.asarray(metrics["behavior_speed"], dtype=float)[:, i],
-        "mouse_b_behavior_speed_cm_s": np.asarray(metrics["behavior_speed"], dtype=float)[:, j],
+        "mouse_a_behavior_speed_cm_s": behavior_speed[:, i],
+        "mouse_b_behavior_speed_cm_s": behavior_speed[:, j],
         "pose_pair_quality": np.asarray(metrics["pose_pair_quality"][:, pair_index], dtype=float),
         "identity_pair_quality": valid.astype(float),
         "pair_wall_jump_excluded": np.zeros(p, dtype=bool),
@@ -955,13 +867,13 @@ def _pair_dataframe(
         "selected_target_speed_cm_s": np.where(selected_ab, speed[:, j], speed[:, i]),
         "selected_actor_behavior_speed_cm_s": np.where(
             selected_ab,
-            np.asarray(metrics["behavior_speed"], dtype=float)[:, i],
-            np.asarray(metrics["behavior_speed"], dtype=float)[:, j],
+            behavior_speed[:, i],
+            behavior_speed[:, j],
         ),
         "selected_target_behavior_speed_cm_s": np.where(
             selected_ab,
-            np.asarray(metrics["behavior_speed"], dtype=float)[:, j],
-            np.asarray(metrics["behavior_speed"], dtype=float)[:, i],
+            behavior_speed[:, j],
+            behavior_speed[:, i],
         ),
         "selected_target_escape_alignment": np.where(selected_ab, escape_ab, escape_ba),
         "selected_actor_pursuit_alignment": np.where(selected_ab, pursuit_ab, pursuit_ba),
@@ -983,14 +895,53 @@ def _pair_dataframe(
         "cm_per_pixel": cm_per_pixel,
     }
     for level in ("weak", "strong"):
-        for provider in ("strict_chase", "window_chase", "near_recovery_chase", "close_follow_chase", "strict_attack", "impulse_attack", "grapple_attack", "occlusion_overlap_attack"):
+        for provider in (
+            "strict_chase",
+            "window_chase",
+            "near_recovery_chase",
+            "close_follow_chase",
+            "strict_attack",
+            "impulse_attack",
+            "grapple_attack",
+            "occlusion_overlap_attack",
+        ):
             data[f"{level}_{provider}"] = np.zeros(p, dtype=bool)
 
     direction_columns = {
-        "a_to_b": (i, j, pursuit_ab, escape_ab, behind_ab, turn[:, j], nose_body_ab, nose_tail_ab, nose_head_ab),
-        "b_to_a": (j, i, pursuit_ba, escape_ba, behind_ba, turn[:, i], nose_body_ba, nose_tail_ba, nose_head_ba),
+        "a_to_b": (
+            i,
+            j,
+            pursuit_ab,
+            escape_ab,
+            behind_ab,
+            turn[:, j],
+            nose_body_ab,
+            nose_tail_ab,
+            nose_head_ab,
+        ),
+        "b_to_a": (
+            j,
+            i,
+            pursuit_ba,
+            escape_ba,
+            behind_ba,
+            turn[:, i],
+            nose_body_ba,
+            nose_tail_ba,
+            nose_head_ba,
+        ),
     }
-    for prefix, (actor, target, pursuit, escape, behind, target_turn, nose_body, nose_tail, nose_head) in direction_columns.items():
+    for prefix, (
+        actor,
+        target,
+        pursuit,
+        escape,
+        behind,
+        target_turn,
+        nose_body,
+        nose_tail,
+        nose_head,
+    ) in direction_columns.items():
         actor_speed = speed[:, actor]
         target_speed = speed[:, target]
         actor_nose_speed = nose_speed[:, actor]
@@ -999,33 +950,37 @@ def _pair_dataframe(
         target_acceleration = acceleration[:, target]
         actor_angular = angular[:, actor]
         target_angular = angular[:, target]
-        data.update({
-            f"{prefix}_actor_speed_cm_s": actor_speed,
-            f"{prefix}_target_speed_cm_s": target_speed,
-            f"{prefix}_actor_behavior_speed_cm_s": np.asarray(metrics["behavior_speed"], dtype=float)[:, actor],
-            f"{prefix}_target_behavior_speed_cm_s": np.asarray(metrics["behavior_speed"], dtype=float)[:, target],
-            f"{prefix}_actor_acceleration_cm_s2": actor_acceleration,
-            f"{prefix}_target_acceleration_cm_s2": target_acceleration,
-            f"{prefix}_actor_nose_speed_cm_s": actor_nose_speed,
-            f"{prefix}_target_nose_speed_cm_s": target_nose_speed,
-            f"{prefix}_actor_head_relative_speed_cm_s": np.maximum(actor_nose_speed - actor_speed, 0.0),
-            f"{prefix}_actor_angular_speed_deg_s": actor_angular,
-            f"{prefix}_target_angular_speed_deg_s": target_angular,
-            f"{prefix}_direction_similarity": direction,
-            f"{prefix}_pursuit_alignment": pursuit,
-            f"{prefix}_target_escape_alignment": escape,
-            f"{prefix}_trajectory_correlation": corr,
-            f"{prefix}_closing_speed_cm_s": closing_speed,
-            f"{prefix}_center_distance_body_lengths": distance / 8.0,
-            f"{prefix}_actor_behind_target": behind,
-            f"{prefix}_behind_score": behind.astype(float),
-            f"{prefix}_target_turn_angle_deg": target_turn,
-            f"{prefix}_nose_body_distance_cm": nose_body,
-            f"{prefix}_nose_tail_distance_cm": nose_tail,
-            f"{prefix}_nose_head_distance_cm": nose_head,
-            f"{prefix}_actor_pose_deformation_energy": pose_deformation[:, actor],
-            f"{prefix}_target_pose_deformation_energy": pose_deformation[:, target],
-        })
+        data.update(
+            {
+                f"{prefix}_actor_speed_cm_s": actor_speed,
+                f"{prefix}_target_speed_cm_s": target_speed,
+                f"{prefix}_actor_behavior_speed_cm_s": behavior_speed[:, actor],
+                f"{prefix}_target_behavior_speed_cm_s": behavior_speed[:, target],
+                f"{prefix}_actor_acceleration_cm_s2": actor_acceleration,
+                f"{prefix}_target_acceleration_cm_s2": target_acceleration,
+                f"{prefix}_actor_nose_speed_cm_s": actor_nose_speed,
+                f"{prefix}_target_nose_speed_cm_s": target_nose_speed,
+                f"{prefix}_actor_head_relative_speed_cm_s": np.maximum(
+                    actor_nose_speed - actor_speed, 0.0
+                ),
+                f"{prefix}_actor_angular_speed_deg_s": actor_angular,
+                f"{prefix}_target_angular_speed_deg_s": target_angular,
+                f"{prefix}_direction_similarity": direction,
+                f"{prefix}_pursuit_alignment": pursuit,
+                f"{prefix}_target_escape_alignment": escape,
+                f"{prefix}_trajectory_correlation": corr,
+                f"{prefix}_closing_speed_cm_s": closing_speed,
+                f"{prefix}_center_distance_body_lengths": distance_body_lengths,
+                f"{prefix}_actor_behind_target": behind,
+                f"{prefix}_behind_score": behind.astype(float),
+                f"{prefix}_target_turn_angle_deg": target_turn,
+                f"{prefix}_nose_body_distance_cm": nose_body,
+                f"{prefix}_nose_tail_distance_cm": nose_tail,
+                f"{prefix}_nose_head_distance_cm": nose_head,
+                f"{prefix}_actor_pose_deformation_energy": pose_deformation[:, actor],
+                f"{prefix}_target_pose_deformation_energy": pose_deformation[:, target],
+            }
+        )
     return pd.DataFrame(data)
 
 
@@ -1052,9 +1007,6 @@ def _pair_metrics(
     velocity = np.asarray(kin["velocity"], dtype=float)
     valid = np.asarray(kin["valid"], dtype=bool)
     speed = np.asarray(kin["speed"], dtype=float)
-    nose_speed = np.asarray(kin["nose_speed"], dtype=float)
-    acceleration = np.asarray(kin["acceleration"], dtype=float)
-    angular_speed = np.asarray(kin["angular_speed"], dtype=float)
     frames, mice = valid.shape
     all_pair_i, all_pair_j = np.triu_indices(mice, k=1)
     if pair_indices is None:
@@ -1073,8 +1025,7 @@ def _pair_metrics(
         frame_mask = np.asarray(frame_mask, dtype=bool)
         if frame_mask.shape != (frames, pairs):
             raise ValueError(
-                "frame_mask must have shape "
-                f"({frames}, {pairs}), got {frame_mask.shape}"
+                f"frame_mask must have shape ({frames}, {pairs}), got {frame_mask.shape}"
             )
     valid_pair = raw_valid_pair & frame_mask
     delta = centers[:, pair_j] - centers[:, pair_i]
@@ -1142,8 +1093,7 @@ def _pair_metrics(
     distance_drop = np.zeros((frames, pairs), dtype=np.float32)
     if lookback < frames:
         distance_drop[lookback:] = (
-            distance_for_lookback[:-lookback]
-            - distance_for_lookback[lookback:]
+            distance_for_lookback[:-lookback] - distance_for_lookback[lookback:]
         )
     distance_drop[~valid_pair] = 0.0
     distance_drop_seconds = float(lookback / max(fps, 1e-9))
@@ -1153,7 +1103,11 @@ def _pair_metrics(
     turn[~valid] = 0.0
     velocity_a = velocity[:, pair_i]
     velocity_b = velocity[:, pair_j]
-    trajectory_valid = valid_pair & np.all(np.isfinite(velocity_a), axis=2) & np.all(np.isfinite(velocity_b), axis=2)
+    trajectory_valid = (
+        valid_pair
+        & np.all(np.isfinite(velocity_a), axis=2)
+        & np.all(np.isfinite(velocity_b), axis=2)
+    )
     trajectory_corr = _rolling_corr(
         velocity_a,
         velocity_b,
@@ -1161,16 +1115,22 @@ def _pair_metrics(
         max(int(round(fps * 2.5)), 4),
         active_mask=frame_mask,
     )
-    path_a = _rolling_sum(
-        speed[:, pair_i],
-        max(int(round(fps * 2.5)), 4),
-        active_mask=frame_mask,
-    ) / fps
-    path_b = _rolling_sum(
-        speed[:, pair_j],
-        max(int(round(fps * 2.5)), 4),
-        active_mask=frame_mask,
-    ) / fps
+    path_a = (
+        _rolling_sum(
+            speed[:, pair_i],
+            max(int(round(fps * 2.5)), 4),
+            active_mask=frame_mask,
+        )
+        / fps
+    )
+    path_b = (
+        _rolling_sum(
+            speed[:, pair_j],
+            max(int(round(fps * 2.5)), 4),
+            active_mask=frame_mask,
+        )
+        / fps
+    )
     contact = np.minimum(nose_body_ab, nose_body_ba) <= 4.0
     contact &= valid_pair
     repeated_contact = _rolling_sum(
@@ -1270,8 +1230,12 @@ def _event_rows_from_mask(
     min_frames = max(int(round(float(min_duration_seconds) * fps)), 1)
     gap_frames = max(int(round(float(fill_gap_seconds) * fps)), 0)
     score_values = np.asarray(score if score is not None else mask.astype(float), dtype=float)
-    actor_values = np.asarray(actor_id if actor_id is not None else np.full(mask.shape, -1), dtype=int)
-    target_values = np.asarray(target_id if target_id is not None else np.full(mask.shape, -1), dtype=int)
+    actor_values = np.asarray(
+        actor_id if actor_id is not None else np.full(mask.shape, -1), dtype=int
+    )
+    target_values = np.asarray(
+        target_id if target_id is not None else np.full(mask.shape, -1), dtype=int
+    )
     events: list[dict[str, Any]] = []
     coordinator = fsm_coordinator or ParallelBehaviorFSM()
     fsm_result = coordinator.run_boolean_region(
@@ -1312,7 +1276,8 @@ def _event_rows_from_mask(
                 "end_frame": source_end,
                 "start_time_s": source_start / max(float(fps * sample_stride), 1e-9),
                 "end_time_s": source_end / max(float(fps * sample_stride), 1e-9),
-                "duration_s": (source_end - source_start + 1) / max(float(fps * sample_stride), 1e-9),
+                "duration_s": (source_end - source_start + 1)
+                / max(float(fps * sample_stride), 1e-9),
                 "mean_score": float(np.nanmean(segment)) if finite_segment.size else 0.0,
                 "peak_score": float(np.nanmax(segment)) if finite_segment.size else 0.0,
                 "source_video": str(source_video),
@@ -1443,7 +1408,12 @@ def _extended_short_clip_pair_events(
     social = dict(cfg["social"])
     chase_cfg = dict(social.get("chase_fallback", {}))
     attack_cfg = dict(social.get("attack_fallback", {}))
-    valid = pair_df.get("valid_pair", pd.Series(True, index=pair_df.index)).fillna(False).astype(bool).to_numpy()
+    valid = (
+        pair_df.get("valid_pair", pd.Series(True, index=pair_df.index))
+        .fillna(False)
+        .astype(bool)
+        .to_numpy()
+    )
     n = len(pair_df)
     fsm_coordinator = fsm_coordinator or ParallelBehaviorFSM(
         dict(config.get("parallel_behavior_fsm", {}))
@@ -1454,24 +1424,32 @@ def _extended_short_clip_pair_events(
         return pd.to_numeric(values, errors="coerce").fillna(default).to_numpy(float)
 
     def engine_values(column: str, default: float = 0.0) -> np.ndarray:
-        values = enriched[column] if column in enriched else pd.Series(default, index=enriched.index)
+        values = (
+            enriched[column] if column in enriched else pd.Series(default, index=enriched.index)
+        )
         return pd.to_numeric(values, errors="coerce").fillna(default).to_numpy(float)
 
     distance = pair_values("center_distance_cm", np.inf)
     actor_speed = pair_values("selected_actor_behavior_speed_cm_s")
     target_speed = pair_values("selected_target_behavior_speed_cm_s")
     actor_raw_speed = pair_values("selected_actor_speed_cm_s")
-    target_raw_speed = pair_values("selected_target_speed_cm_s")
     pursuit = pair_values("selected_actor_pursuit_alignment")
     escape = pair_values("selected_target_escape_alignment")
-    selected_actor = pd.to_numeric(pair_df.get("selected_actor_id", -1), errors="coerce").fillna(-1).to_numpy(int)
-    selected_target = pd.to_numeric(pair_df.get("selected_target_id", -1), errors="coerce").fillna(-1).to_numpy(int)
+    selected_actor = (
+        pd.to_numeric(pair_df.get("selected_actor_id", -1), errors="coerce")
+        .fillna(-1)
+        .to_numpy(int)
+    )
+    selected_target = (
+        pd.to_numeric(pair_df.get("selected_target_id", -1), errors="coerce")
+        .fillna(-1)
+        .to_numpy(int)
+    )
     mouse_a = pd.to_numeric(pair_df.get("mouse_a_id", -2), errors="coerce").fillna(-2).to_numpy(int)
     mouse_b = pd.to_numeric(pair_df.get("mouse_b_id", -2), errors="coerce").fillna(-2).to_numpy(int)
     selected_ab = selected_actor == mouse_a
     selected_ba = selected_actor == mouse_b
     direction_known = selected_ab | selected_ba
-    distance_drop = pair_values("selected_distance_drop_cm")
     speed_gap = actor_speed - target_speed
     target_turn = np.where(
         selected_ab,
@@ -1507,8 +1485,14 @@ def _extended_short_clip_pair_events(
     )
     contact_cfg = dict(config.get("contact_detection", {}))
     contact = (
-        (nose_head <= float(contact_cfg.get("nose_head_distance_cm", contact_cfg.get("distance_cm", 3.0))))
-        | (nose_tail <= float(contact_cfg.get("nose_tail_distance_cm", contact_cfg.get("distance_cm", 3.0))))
+        (
+            nose_head
+            <= float(contact_cfg.get("nose_head_distance_cm", contact_cfg.get("distance_cm", 3.0)))
+        )
+        | (
+            nose_tail
+            <= float(contact_cfg.get("nose_tail_distance_cm", contact_cfg.get("distance_cm", 3.0)))
+        )
         | (nose_body <= float(contact_cfg.get("distance_cm", 3.0)))
     )
     dynamic_score = np.maximum(
@@ -1535,27 +1519,30 @@ def _extended_short_clip_pair_events(
         engine_values("weak_standard_reaction_score"),
         engine_values("strong_standard_reaction_score"),
     )
-    context_gate = (
-        (enriched.get("weak_standard_attack_context_gate", pd.Series(False, index=enriched.index)).fillna(False).astype(bool).to_numpy())
-        | (enriched.get("strong_standard_attack_context_gate", pd.Series(False, index=enriched.index)).fillna(False).astype(bool).to_numpy())
-    )
     analysis_fps = source_fps / max(sample_stride, 1)
     contact_pursuit = pair_values("selected_actor_pursuit_alignment")
     contact_mask = (
-        np.minimum(
-            pair_values("a_to_b_nose_head_distance_cm", np.inf),
-            pair_values("b_to_a_nose_head_distance_cm", np.inf),
-        ) <= float(contact_cfg.get("nose_head_distance_cm", contact_cfg.get("distance_cm", 3.0)))
-    ) | (
-        np.minimum(
-            pair_values("a_to_b_nose_tail_distance_cm", np.inf),
-            pair_values("b_to_a_nose_tail_distance_cm", np.inf),
-        ) <= float(contact_cfg.get("nose_tail_distance_cm", contact_cfg.get("distance_cm", 3.0)))
-    ) | (
-        np.minimum(
-            pair_values("a_to_b_nose_body_distance_cm", np.inf),
-            pair_values("b_to_a_nose_body_distance_cm", np.inf),
-        ) <= float(contact_cfg.get("distance_cm", 3.0))
+        (
+            np.minimum(
+                pair_values("a_to_b_nose_head_distance_cm", np.inf),
+                pair_values("b_to_a_nose_head_distance_cm", np.inf),
+            )
+            <= float(contact_cfg.get("nose_head_distance_cm", contact_cfg.get("distance_cm", 3.0)))
+        )
+        | (
+            np.minimum(
+                pair_values("a_to_b_nose_tail_distance_cm", np.inf),
+                pair_values("b_to_a_nose_tail_distance_cm", np.inf),
+            )
+            <= float(contact_cfg.get("nose_tail_distance_cm", contact_cfg.get("distance_cm", 3.0)))
+        )
+        | (
+            np.minimum(
+                pair_values("a_to_b_nose_body_distance_cm", np.inf),
+                pair_values("b_to_a_nose_body_distance_cm", np.inf),
+            )
+            <= float(contact_cfg.get("distance_cm", 3.0))
+        )
     )
     contact_direction_pursuit = contact_pursuit.copy()
     for index in range(n):
@@ -1619,7 +1606,9 @@ def _extended_short_clip_pair_events(
         # selected direction, because an impact can reverse the actor/target
         # velocity ordering in the next frame.
         post_window = max(
-            int(round(float(attack_cfg.get("rebound_distance_window_seconds", 0.10)) * analysis_fps)),
+            int(
+                round(float(attack_cfg.get("rebound_distance_window_seconds", 0.10)) * analysis_fps)
+            ),
             1,
         )
         post_distance_increase = np.zeros(n, dtype=float)
@@ -1647,7 +1636,10 @@ def _extended_short_clip_pair_events(
             & (escape <= float(attack_cfg.get("max_impact_target_escape_alignment", 0.10)))
             & (speed_gap >= float(attack_cfg.get("min_impact_behavior_speed_gap_cm_s", 1.5)))
             & (
-                (actor_acceleration >= float(attack_cfg.get("min_impact_actor_acceleration_cm_s2", 120.0)))
+                (
+                    actor_acceleration
+                    >= float(attack_cfg.get("min_impact_actor_acceleration_cm_s2", 120.0))
+                )
                 | (initiation >= float(attack_cfg.get("min_impact_initiation_score", 0.90)))
             )
         )
@@ -1660,9 +1652,18 @@ def _extended_short_clip_pair_events(
             & (actor_raw_speed >= float(attack_cfg.get("min_raw_actor_speed_cm_s", 8.0)))
             & (escape >= float(attack_cfg.get("min_rebound_target_escape_alignment", 0.55)))
             & (pursuit <= float(attack_cfg.get("max_rebound_pursuit_alignment", 0.20)))
-            & (contact_direction_pursuit >= float(attack_cfg.get("min_rebound_contact_pursuit_alignment", 0.55)))
-            & (post_distance_increase >= float(attack_cfg.get("min_rebound_post_distance_increase_cm", 0.50)))
-            & (immediate_post_distance_increase >= float(attack_cfg.get("min_rebound_immediate_distance_increase_cm", 0.25)))
+            & (
+                contact_direction_pursuit
+                >= float(attack_cfg.get("min_rebound_contact_pursuit_alignment", 0.55))
+            )
+            & (
+                post_distance_increase
+                >= float(attack_cfg.get("min_rebound_post_distance_increase_cm", 0.50))
+            )
+            & (
+                immediate_post_distance_increase
+                >= float(attack_cfg.get("min_rebound_immediate_distance_increase_cm", 0.25))
+            )
             & (
                 (reaction >= float(attack_cfg.get("min_rebound_reaction_score", 0.70)))
                 | (target_turn >= float(attack_cfg.get("min_target_turn_angle_deg", 25.0)))
@@ -1720,51 +1721,67 @@ def _extended_pair_events(
         dict(config.get("parallel_behavior_fsm", {}))
     )
     distance = pd.to_numeric(pair_df["center_distance_cm"], errors="coerce").to_numpy(float)
-    valid = pair_df.get("valid_pair", pd.Series(True, index=pair_df.index)).fillna(False).astype(bool).to_numpy()
-    actor_speed = pd.to_numeric(pair_df.get("selected_actor_behavior_speed_cm_s", 0.0), errors="coerce").fillna(0).to_numpy(float)
-    target_speed = pd.to_numeric(pair_df.get("selected_target_behavior_speed_cm_s", 0.0), errors="coerce").fillna(0).to_numpy(float)
+    valid = (
+        pair_df.get("valid_pair", pd.Series(True, index=pair_df.index))
+        .fillna(False)
+        .astype(bool)
+        .to_numpy()
+    )
+    actor_speed = (
+        pd.to_numeric(pair_df.get("selected_actor_behavior_speed_cm_s", 0.0), errors="coerce")
+        .fillna(0)
+        .to_numpy(float)
+    )
+    target_speed = (
+        pd.to_numeric(pair_df.get("selected_target_behavior_speed_cm_s", 0.0), errors="coerce")
+        .fillna(0)
+        .to_numpy(float)
+    )
     combined_speed = actor_speed + target_speed
-    drop = pd.to_numeric(pair_df.get("selected_distance_drop_cm", 0.0), errors="coerce").fillna(0).to_numpy(float)
-    closing = pd.to_numeric(pair_df.get("selected_closing_speed_cm_s", 0.0), errors="coerce").fillna(0).to_numpy(float)
+    drop = (
+        pd.to_numeric(pair_df.get("selected_distance_drop_cm", 0.0), errors="coerce")
+        .fillna(0)
+        .to_numpy(float)
+    )
+    closing = (
+        pd.to_numeric(pair_df.get("selected_closing_speed_cm_s", 0.0), errors="coerce")
+        .fillna(0)
+        .to_numpy(float)
+    )
     # The selected direction is the one used by the lightweight pair row.
-    selected_ab = pair_df.get("selected_actor_id", pd.Series(-1, index=pair_df.index)).to_numpy() == pair_df.get("mouse_a_id", pd.Series(-2, index=pair_df.index)).to_numpy()
+    selected_ab = (
+        pair_df.get("selected_actor_id", pd.Series(-1, index=pair_df.index)).to_numpy()
+        == pair_df.get("mouse_a_id", pd.Series(-2, index=pair_df.index)).to_numpy()
+    )
     selected_escape = np.where(
         selected_ab,
-        pd.to_numeric(pair_df.get("a_to_b_target_escape_alignment", 0.0), errors="coerce").fillna(0).to_numpy(float),
-        pd.to_numeric(pair_df.get("b_to_a_target_escape_alignment", 0.0), errors="coerce").fillna(0).to_numpy(float),
+        pd.to_numeric(pair_df.get("a_to_b_target_escape_alignment", 0.0), errors="coerce")
+        .fillna(0)
+        .to_numpy(float),
+        pd.to_numeric(pair_df.get("b_to_a_target_escape_alignment", 0.0), errors="coerce")
+        .fillna(0)
+        .to_numpy(float),
     )
     selected_actor_speed = actor_speed
     selected_target_speed = target_speed
-    selected_actor = pd.to_numeric(pair_df.get("selected_actor_id", -1), errors="coerce").fillna(-1).to_numpy(int)
-    selected_target = pd.to_numeric(pair_df.get("selected_target_id", -1), errors="coerce").fillna(-1).to_numpy(int)
+    selected_actor = (
+        pd.to_numeric(pair_df.get("selected_actor_id", -1), errors="coerce")
+        .fillna(-1)
+        .to_numpy(int)
+    )
+    selected_target = (
+        pd.to_numeric(pair_df.get("selected_target_id", -1), errors="coerce")
+        .fillna(-1)
+        .to_numpy(int)
+    )
 
     def pair_numeric(column: str, default: float) -> np.ndarray:
         values = pair_df[column] if column in pair_df else pd.Series(default, index=pair_df.index)
         return pd.to_numeric(values, errors="coerce").fillna(default).to_numpy(float)
 
-    # Nose contact and approach are close-range states, but they are not the
-    # same label.  Remove contact-geometry samples from approach so a nose
-    # touching a head/tail is emitted only by the independent contact stream.
-    contact_config = dict(config.get("contact_detection", {}))
-    nose_head_threshold = max(
-        float(contact_config.get("nose_head_distance_cm", contact_config.get("distance_cm", 3.0))),
-        0.0,
-    )
-    nose_tail_threshold = max(
-        float(contact_config.get("nose_tail_distance_cm", contact_config.get("distance_cm", 3.0))),
-        0.0,
-    )
-    contact_geometry = (
-        np.minimum(
-            pair_numeric("a_to_b_nose_head_distance_cm", np.inf),
-            pair_numeric("b_to_a_nose_head_distance_cm", np.inf),
-        ) <= nose_head_threshold
-    ) | (
-        np.minimum(
-            pair_numeric("a_to_b_nose_tail_distance_cm", np.inf),
-            pair_numeric("b_to_a_nose_tail_distance_cm", np.inf),
-        ) <= nose_tail_threshold
-    )
+    # Nose contact and approach remain independent event streams. Approach is
+    # not masked by contact geometry because doing so would change the existing
+    # scientific output contract without labeled-data acceptance evidence.
 
     # ``together`` is a low-motion, close pair state. It does not require a
     # contact threshold, so it can represent the labeled together examples.
@@ -1783,7 +1800,10 @@ def _extended_pair_events(
         & (selected_actor_speed >= float(social.get("approach_min_actor_speed_cm_s", 0.0)))
         & (selected_actor_speed <= float(social["approach_max_actor_speed_cm_s"]))
         & (selected_target_speed <= float(social["approach_max_target_speed_cm_s"]))
-        & ((selected_actor_speed - selected_target_speed) >= float(social["approach_min_speed_gap_cm_s"]))
+        & (
+            (selected_actor_speed - selected_target_speed)
+            >= float(social["approach_min_speed_gap_cm_s"])
+        )
     )
     # Keep the approach-to-together transition: the last approach samples can
     # be close and low-motion after the speed difference collapses.  Contact
@@ -1845,7 +1865,10 @@ def _extended_pair_events(
     if bool(social.get("avoidance_require_pursuit_context", True)):
         avoidance &= prior_close & (
             prior_pursuit
-            | (pursuit_alignment_context >= float(social.get("avoidance_min_pursuit_alignment", 0.35)))
+            | (
+                pursuit_alignment_context
+                >= float(social.get("avoidance_min_pursuit_alignment", 0.35))
+            )
             | (prior_drop >= float(social.get("avoidance_min_prior_distance_drop_cm", 0.50)))
         )
 
@@ -1865,7 +1888,12 @@ def _extended_pair_events(
             fps=source_fps / max(sample_stride, 1),
             source_video=source_video,
             sample_stride=sample_stride,
-            score=np.where(together, 1.0 - np.clip(distance / max(float(social["together_max_distance_cm"]), 1e-6), 0, 1), 0.0),
+            score=np.where(
+                together,
+                1.0
+                - np.clip(distance / max(float(social["together_max_distance_cm"]), 1e-6), 0, 1),
+                0.0,
+            ),
             actor_id=np.full(n, -1),
             target_id=np.full(n, -1),
             pair_key=str(pair_df["pair_key"].iloc[0]),
@@ -1882,7 +1910,11 @@ def _extended_pair_events(
             fps=source_fps / max(sample_stride, 1),
             source_video=source_video,
             sample_stride=sample_stride,
-            score=np.where(approach, np.clip(drop / max(float(social["approach_min_distance_drop_cm"]), 1e-6), 0, 1), 0.0),
+            score=np.where(
+                approach,
+                np.clip(drop / max(float(social["approach_min_distance_drop_cm"]), 1e-6), 0, 1),
+                0.0,
+            ),
             actor_id=selected_actor,
             target_id=selected_target,
             pair_key=str(pair_df["pair_key"].iloc[0]),
@@ -1899,7 +1931,16 @@ def _extended_pair_events(
             fps=source_fps / max(sample_stride, 1),
             source_video=source_video,
             sample_stride=sample_stride,
-            score=np.where(avoidance, np.clip(distance_increase / max(float(social["avoidance_min_distance_increase_cm"]), 1e-6), 0, 1), 0.0),
+            score=np.where(
+                avoidance,
+                np.clip(
+                    distance_increase
+                    / max(float(social["avoidance_min_distance_increase_cm"]), 1e-6),
+                    0,
+                    1,
+                ),
+                0.0,
+            ),
             actor_id=selected_actor,
             target_id=selected_target,
             pair_key=str(pair_df["pair_key"].iloc[0]),
@@ -1933,22 +1974,49 @@ def _extended_individual_and_group_events(
     frames, mice = valid.shape
     analysis_fps = source_fps / max(sample_stride, 1)
     events: list[dict[str, Any]] = []
-    fsm_coordinator = ParallelBehaviorFSM(
-        dict(config.get("parallel_behavior_fsm", {}))
-    )
+    fsm_coordinator = ParallelBehaviorFSM(dict(config.get("parallel_behavior_fsm", {})))
 
-    stationary = valid & (speed <= float(individual_cfg["stationary_max_speed_cm_s"])) & (
-        pose_quality >= float(individual_cfg["min_pose_quality"])
+    stationary = (
+        valid
+        & (speed <= float(individual_cfg["stationary_max_speed_cm_s"]))
+        & (pose_quality >= float(individual_cfg["min_pose_quality"]))
     )
-    walking = valid & (speed > float(individual_cfg["stationary_max_speed_cm_s"])) & (
-        speed < float(individual_cfg["running_min_speed_cm_s"])
+    walking = (
+        valid
+        & (speed > float(individual_cfg["stationary_max_speed_cm_s"]))
+        & (speed < float(individual_cfg["running_min_speed_cm_s"]))
     )
     running = valid & (speed >= float(individual_cfg["running_min_speed_cm_s"]))
     for mouse in range(mice):
         for behavior, mask, score in (
-            ("stationary", stationary[:, mouse], np.maximum(0.0, 1.0 - speed[:, mouse] / max(float(individual_cfg["stationary_max_speed_cm_s"]), 1e-6))),
-            ("walking", walking[:, mouse], np.clip(speed[:, mouse] / max(float(individual_cfg["walking_max_speed_cm_s"]), 1e-6), 0.0, 1.0)),
-            ("running", running[:, mouse], np.clip(speed[:, mouse] / max(float(individual_cfg["running_min_speed_cm_s"]), 1e-6), 0.0, 1.0)),
+            (
+                "stationary",
+                stationary[:, mouse],
+                np.maximum(
+                    0.0,
+                    1.0
+                    - speed[:, mouse]
+                    / max(float(individual_cfg["stationary_max_speed_cm_s"]), 1e-6),
+                ),
+            ),
+            (
+                "walking",
+                walking[:, mouse],
+                np.clip(
+                    speed[:, mouse] / max(float(individual_cfg["walking_max_speed_cm_s"]), 1e-6),
+                    0.0,
+                    1.0,
+                ),
+            ),
+            (
+                "running",
+                running[:, mouse],
+                np.clip(
+                    speed[:, mouse] / max(float(individual_cfg["running_min_speed_cm_s"]), 1e-6),
+                    0.0,
+                    1.0,
+                ),
+            ),
         ):
             events.extend(
                 _event_rows_from_mask(
@@ -1989,7 +2057,9 @@ def _extended_individual_and_group_events(
         np.fill_diagonal(distances, np.inf)
         nearest = np.min(distances, axis=1)
         close_fraction[frame] = float(np.mean(nearest <= float(group_cfg["huddle_distance_cm"])))
-        isolated_fraction[frame] = float(np.mean(nearest >= float(group_cfg["isolation_distance_cm"])))
+        isolated_fraction[frame] = float(
+            np.mean(nearest >= float(group_cfg["isolation_distance_cm"]))
+        )
 
         # A multi-mouse cage can contain a local huddle while other visible
         # mice remain spread out.  Use connected components of the complete
@@ -2022,23 +2092,22 @@ def _extended_individual_and_group_events(
             possible_edges = len(largest) * (len(largest) - 1) // 2
             largest_cluster_density[frame] = edge_count / max(possible_edges, 1)
 
-    huddle = (
-        (group_size >= 2)
-        & (
-            (close_fraction >= float(group_cfg["huddle_fraction"]))
-            | (
-                (largest_cluster_size >= int(group_cfg.get("huddle_min_cluster_size", 3)))
-                & (largest_cluster_fraction >= float(group_cfg.get("huddle_min_cluster_fraction", 0.30)))
-                & (largest_cluster_density >= float(group_cfg.get("huddle_min_cluster_density", 0.50)))
+    huddle = (group_size >= 2) & (
+        (close_fraction >= float(group_cfg["huddle_fraction"]))
+        | (
+            (largest_cluster_size >= int(group_cfg.get("huddle_min_cluster_size", 3)))
+            & (
+                largest_cluster_fraction
+                >= float(group_cfg.get("huddle_min_cluster_fraction", 0.30))
             )
+            & (largest_cluster_density >= float(group_cfg.get("huddle_min_cluster_density", 0.50)))
         )
     )
     # Isolation is a group-level state only if a substantial fraction of the
     # visible mice have no close neighbour; it is not emitted for an empty or
     # one-mouse frame.
-    isolation = (
-        (group_size >= 3)
-        & (isolated_fraction >= float(group_cfg["isolation_neighbor_fraction"]))
+    isolation = (group_size >= 3) & (
+        isolated_fraction >= float(group_cfg["isolation_neighbor_fraction"])
     )
     for behavior, mask, score in (
         (
@@ -2174,30 +2243,78 @@ def _extract_contact_events(
         0.0,
     )
 
-    frame_values = pd.to_numeric(
-        pair_df.get("frame", pd.Series(range(len(pair_df)))),
-        errors="coerce",
-    ).fillna(-1).astype(int).to_numpy()
-    states: list[dict[str, Any] | None] = []
-    direction_specs = (
-        ("a_to_b", "mouse_a_id", "mouse_b_id"),
-        ("b_to_a", "mouse_b_id", "mouse_a_id"),
+    frame_values = (
+        pd.to_numeric(
+            pair_df.get("frame", pd.Series(range(len(pair_df)))),
+            errors="coerce",
+        )
+        .fillna(-1)
+        .astype(int)
+        .to_numpy()
     )
+    row_count = len(pair_df)
 
-    for row in pair_df.to_dict("records"):
-        valid_pair = row.get("valid_pair", True)
-        try:
-            valid_pair = bool(valid_pair) and not bool(pd.isna(valid_pair))
-        except (TypeError, ValueError):
-            valid_pair = False
-        if not valid_pair:
-            states.append(None)
-            continue
+    def numeric_column(column: str, default: float) -> np.ndarray:
+        values = pair_df[column] if column in pair_df else pd.Series(default, index=pair_df.index)
+        result = pd.to_numeric(values, errors="coerce").to_numpy(
+            dtype=float,
+            copy=True,
+        )
+        result[~np.isfinite(result)] = default
+        return result
 
+    def id_column(column: str) -> tuple[np.ndarray, np.ndarray]:
+        values = pair_df[column] if column in pair_df else pd.Series(-1, index=pair_df.index)
+        numeric = pd.to_numeric(values, errors="coerce").to_numpy(
+            dtype=float,
+            copy=True,
+        )
+        convertible = np.isfinite(numeric)
+        numeric[~convertible] = -1
+        return numeric.astype(int), convertible
+
+    valid_values = (
+        pair_df["valid_pair"] if "valid_pair" in pair_df else pd.Series(True, index=pair_df.index)
+    )
+    valid_pair = valid_values.fillna(False).astype(bool).to_numpy()
+    mouse_a_ids, mouse_a_id_valid = id_column("mouse_a_id")
+    mouse_b_ids, mouse_b_id_valid = id_column("mouse_b_id")
+    head_ab = numeric_column("a_to_b_nose_head_distance_cm", float("inf"))
+    tail_ab = numeric_column("a_to_b_nose_tail_distance_cm", float("inf"))
+    head_ba = numeric_column("b_to_a_nose_head_distance_cm", float("inf"))
+    tail_ba = numeric_column("b_to_a_nose_tail_distance_cm", float("inf"))
+    contact_ab = (head_ab <= nose_head_threshold) | (tail_ab <= nose_tail_threshold)
+    contact_ba = (head_ba <= nose_head_threshold) | (tail_ba <= nose_tail_threshold)
+
+    states: list[dict[str, Any] | None] = [None] * row_count
+    contact_indices = np.flatnonzero(valid_pair & (contact_ab | contact_ba))
+    for index in contact_indices:
+        if mouse_a_id_valid[index] and mouse_b_id_valid[index]:
+            mouse_a_id = int(mouse_a_ids[index])
+            mouse_b_id = int(mouse_b_ids[index])
+        else:
+            # Preserve the historical record-loop contract: conversion of
+            # either endpoint failing makes both contact roles unknown.
+            mouse_a_id = -1
+            mouse_b_id = -1
         direction_hits: list[dict[str, Any]] = []
-        for direction, actor_column, target_column in direction_specs:
-            head_distance = _contact_distance(row.get(f"{direction}_nose_head_distance_cm"))
-            tail_distance = _contact_distance(row.get(f"{direction}_nose_tail_distance_cm"))
+        direction_specs = (
+            (
+                "a_to_b",
+                mouse_a_id,
+                mouse_b_id,
+                float(head_ab[index]),
+                float(tail_ab[index]),
+            ),
+            (
+                "b_to_a",
+                mouse_b_id,
+                mouse_a_id,
+                float(head_ba[index]),
+                float(tail_ba[index]),
+            ),
+        )
+        for direction, actor_id, target_id, head_distance, tail_distance in direction_specs:
             components = _contact_components(
                 head_distance,
                 tail_distance,
@@ -2206,11 +2323,6 @@ def _extract_contact_events(
             )
             if not components:
                 continue
-            try:
-                actor_id = int(row.get(actor_column, -1))
-                target_id = int(row.get(target_column, -1))
-            except (TypeError, ValueError):
-                actor_id, target_id = -1, -1
             direction_hits.append(
                 {
                     "direction": direction,
@@ -2231,11 +2343,7 @@ def _extract_contact_events(
             for name in ("nose_head", "nose_tail")
             if any(name in hit["components"] for hit in direction_hits)
         )
-        contact_type = (
-            "nose_head_and_nose_tail"
-            if len(components) == 2
-            else components[0]
-        )
+        contact_type = "nose_head_and_nose_tail" if len(components) == 2 else components[0]
         directions = tuple(hit["direction"] for hit in direction_hits)
         if len(directions) == 1:
             contact_direction = directions[0]
@@ -2249,19 +2357,17 @@ def _extract_contact_events(
         head_distances = [hit["head_distance"] for hit in direction_hits]
         tail_distances = [hit["tail_distance"] for hit in direction_hits]
         contact_distances = [min(head_distances), min(tail_distances)]
-        states.append(
-            {
-                "contact_type": contact_type,
-                "contact_type_components": ";".join(components),
-                "contact_direction": contact_direction,
-                "contact_actor_id": contact_actor_id,
-                "contact_target_id": contact_target_id,
-                "role_ambiguous": bool(contact_actor_id < 0 or contact_target_id < 0),
-                "contact_distance_cm": min(contact_distances),
-                "nose_head_distance_cm": min(head_distances),
-                "nose_tail_distance_cm": min(tail_distances),
-            }
-        )
+        states[int(index)] = {
+            "contact_type": contact_type,
+            "contact_type_components": ";".join(components),
+            "contact_direction": contact_direction,
+            "contact_actor_id": contact_actor_id,
+            "contact_target_id": contact_target_id,
+            "role_ambiguous": bool(contact_actor_id < 0 or contact_target_id < 0),
+            "contact_distance_cm": min(contact_distances),
+            "nose_head_distance_cm": min(head_distances),
+            "nose_tail_distance_cm": min(tail_distances),
+        }
 
     def state_key(state: Mapping[str, Any] | None) -> tuple[Any, ...] | None:
         if state is None:
@@ -2375,9 +2481,7 @@ def render_behavior_video(
         arena_polygon=arena_polygon,
     )
 
-    event_frame_map: list[list[dict[str, Any]]] = [
-        [] for _ in range(total_cache_frames)
-    ]
+    event_frame_map: list[list[dict[str, Any]]] = [[] for _ in range(total_cache_frames)]
     if not events_path.exists():
         raise FileNotFoundError(f"行为事件 CSV 不存在: {events_path}")
     events_df = pd.read_csv(events_path)
@@ -2443,7 +2547,9 @@ def render_behavior_video(
                     str(event.get("pair_key", "")),
                 )
                 previous = best_by_key.get(key)
-                if previous is None or float(event.get("peak_score", 0.0)) > float(previous.get("peak_score", 0.0)):
+                if previous is None or float(event.get("peak_score", 0.0)) > float(
+                    previous.get("peak_score", 0.0)
+                ):
                     best_by_key[key] = event
             display_events = sorted(
                 best_by_key.values(),
@@ -2601,7 +2707,7 @@ def render_behavior_video(
     LOGGER.info(
         "[render] completed: %s (%.2f GB)",
         output_path,
-        output_path.stat().st_size / (1024 ** 3),
+        output_path.stat().st_size / (1024**3),
     )
     return output_path
 
@@ -2744,8 +2850,10 @@ def extract_four_class_clips(
         )
         per_class_counts[label_id] = len(selected)
         for clip_index, (start, end) in enumerate(selected, start=1):
-            path = output_dir / class_name / (
-                f"{class_name}_{clip_index:04d}_{start / fps:.2f}s_{end / fps:.2f}s.mp4"
+            path = (
+                output_dir
+                / class_name
+                / (f"{class_name}_{clip_index:04d}_{start / fps:.2f}s_{end / fps:.2f}s.mp4")
             )
             intervals.append(
                 {
@@ -2895,11 +3003,7 @@ def extract_behavior_clips(
         if str(value).strip()
     }
     if behavior_names is None:
-        selected_behaviors = [
-            behavior
-            for behavior in EXTENDED_BEHAVIORS
-            if behavior in available
-        ]
+        selected_behaviors = [behavior for behavior in EXTENDED_BEHAVIORS if behavior in available]
         selected_behaviors.extend(sorted(available.difference(selected_behaviors)))
     else:
         selected_behaviors = []
@@ -3050,8 +3154,7 @@ def extract_behavior_clips(
         "max_clips_per_behavior": int(max_clips_per_behavior),
         "source_event_rows": source_event_rows,
         "source_event_level_counts": {
-            behavior: dict(level_counts[behavior])
-            for behavior in selected_behaviors
+            behavior: dict(level_counts[behavior]) for behavior in selected_behaviors
         },
         "clip_counts": clip_counts,
         "total_clips": int(len(intervals)),
@@ -3109,9 +3212,7 @@ def _pair_prefilter(
         max(float(configured.get("close_distance_cm", 10.0)), 0.0),
         radius,
     )
-    min_heading_cosine = float(
-        np.clip(float(configured.get("min_heading_cosine", 0.0)), -1.0, 1.0)
-    )
+    min_heading_cosine = float(np.clip(float(configured.get("min_heading_cosine", 0.0)), -1.0, 1.0))
 
     centers = np.asarray(kin["centers_cm"], dtype=float)
     heading = np.asarray(kin["heading"], dtype=float)
@@ -3127,17 +3228,14 @@ def _pair_prefilter(
     heading_to_partner_b = _cosine(heading[:, pair_j], -delta)
     heading_values_a = heading[:, pair_i]
     heading_values_b = heading[:, pair_j]
-    heading_valid_a = (
-        np.all(np.isfinite(heading_values_a), axis=2)
-        & (np.linalg.norm(heading_values_a, axis=2) > 1e-9)
+    heading_valid_a = np.all(np.isfinite(heading_values_a), axis=2) & (
+        np.linalg.norm(heading_values_a, axis=2) > 1e-9
     )
-    heading_valid_b = (
-        np.all(np.isfinite(heading_values_b), axis=2)
-        & (np.linalg.norm(heading_values_b, axis=2) > 1e-9)
+    heading_valid_b = np.all(np.isfinite(heading_values_b), axis=2) & (
+        np.linalg.norm(heading_values_b, axis=2) > 1e-9
     )
-    heading_relevant = (
-        (heading_valid_a & (heading_to_partner_a >= min_heading_cosine))
-        | (heading_valid_b & (heading_to_partner_b >= min_heading_cosine))
+    heading_relevant = (heading_valid_a & (heading_to_partner_a >= min_heading_cosine)) | (
+        heading_valid_b & (heading_to_partner_b >= min_heading_cosine)
     )
     close_fallback = distance <= close_distance
     valuable_frame = within_radius & (close_fallback | heading_relevant)
@@ -3150,18 +3248,22 @@ def _pair_prefilter(
         valuable_frame = within_radius
         candidate_pair_mask = np.any(within_radius, axis=0)
 
-    return {
-        "valid_pair": valid_pair,
-        "distance": distance,
-        "heading_to_partner_a": heading_to_partner_a,
-        "heading_to_partner_b": heading_to_partner_b,
-        "valuable_frame": valuable_frame,
-        "candidate_pair_mask": candidate_pair_mask,
-        "enabled": enabled,
-        "close_distance_cm": close_distance,
-        "min_heading_cosine": min_heading_cosine,
-        "frames": int(frames),
-    }, pair_i, pair_j
+    return (
+        {
+            "valid_pair": valid_pair,
+            "distance": distance,
+            "heading_to_partner_a": heading_to_partner_a,
+            "heading_to_partner_b": heading_to_partner_b,
+            "valuable_frame": valuable_frame,
+            "candidate_pair_mask": candidate_pair_mask,
+            "enabled": enabled,
+            "close_distance_cm": close_distance,
+            "min_heading_cosine": min_heading_cosine,
+            "frames": int(frames),
+        },
+        pair_i,
+        pair_j,
+    )
 
 
 def _pair_window_mask(
@@ -3179,9 +3281,7 @@ def _pair_window_mask(
     """
     valuable_frame = np.asarray(valuable_frame, dtype=bool)
     if valuable_frame.ndim != 2:
-        raise ValueError(
-            f"valuable_frame must be a 2D array, got shape={valuable_frame.shape}"
-        )
+        raise ValueError(f"valuable_frame must be a 2D array, got shape={valuable_frame.shape}")
     lightweight_cfg = dict(config.get("lightweight_behavior_inference", {}))
     prefilter_cfg = dict(lightweight_cfg.get("pair_prefilter", {}))
     window_cfg = dict(prefilter_cfg.get("window", {}))
@@ -3223,87 +3323,47 @@ def _pair_window_mask(
     }
 
 
-def analyze(
-    video_path: Path,
-    cache_dir: Path,
-    config_path: Path,
-    output_dir: Path,
-    expected_mice: int = 20,
-    max_frames: int | None = None,
-    sample_stride: int = 1,
-    fps_override: float | None = None,
-) -> Path:
-    started = time.perf_counter()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    config = load_config(config_path)
-    configured_fps = config.pop("_fps_override", 29.329)
-    source_fps = float(configured_fps if fps_override is None else fps_override)
-    if not np.isfinite(source_fps) or source_fps <= 0.0:
-        raise ValueError(f"视频 FPS 必须是正数，实际为：{source_fps}")
-    sample_stride = max(int(sample_stride), 1)
-    total_frames = _cache_total_frames(cache_dir)
-    if max_frames is not None:
-        total_frames = min(total_frames, max(int(max_frames), 1))
-    video_cap = cv2.VideoCapture(str(video_path))
-    if not video_cap.isOpened():
-        raise RuntimeError(f"无法打开源视频: {video_path}")
-    width = int(video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    video_frame_count = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    video_fps = float(video_cap.get(cv2.CAP_PROP_FPS))
-    video_cap.release()
-    if width <= 0 or height <= 0:
-        raise RuntimeError(f"无法读取源视频尺寸: {video_path}")
-    arena_result, _arena_heatmap = _prepare_video_arena_boundary(
-        video_path,
-        cache_dir,
-        output_dir,
-        config_path,
-        config,
-        width,
-        height,
-        max_frames=total_frames,
-    )
-    arena_polygon = (
-        np.asarray(arena_result.polygon, dtype=np.float64)
-        if arena_result is not None
-        else None
-    )
-    arena_tolerance = float(
-        dict(config.get("adaptive_arena", {})).get("hard_gate_tolerance_px", 2.0)
-    )
-    tracks, tracking_stats = _track_cache(
-        cache_dir,
-        total_frames,
-        expected_mice,
-        arena_polygon=arena_polygon,
-        arena_tolerance_px=arena_tolerance,
-    )
-    # Preserve full-resolution source-frame tracks for the annotation website.
-    # Behavior analysis may sample this array below; the export contract may not.
-    source_tracks = tracks
-    if sample_stride > 1:
-        tracks = {
-            key: (value[::sample_stride] if isinstance(value, np.ndarray) and value.ndim > 0 else value)
-            for key, value in tracks.items()
-        }
-    analysis_frames = int(tracks["valid"].shape[0])
-    fps = source_fps / sample_stride
-    kin = _kinematics(tracks, fps=fps)
-    events: list[dict[str, Any]] = []
-    contact_events: list[dict[str, Any]] = []
-    extended_events: list[dict[str, Any]] = []
-    pair_summaries: list[dict[str, Any]] = []
-    top_evidence: list[dict[str, Any]] = []
+@dataclass(frozen=True)
+class _PairWorkset:
+    """All-pair prefilter state and candidate-only metric arrays for one run."""
+
+    interaction_radius: float
+    prefilter: Mapping[str, Any]
+    all_pair_i: np.ndarray
+    all_pair_j: np.ndarray
+    candidate_pair_indices: tuple[int, ...]
+    candidate_metric_index: Mapping[int, int]
+    candidate_frame_mask: np.ndarray
+    pair_window_stats: Mapping[str, Any]
+    metrics: Mapping[str, Any]
+    pair_i: np.ndarray
+    pair_j: np.ndarray
+
+
+def _prepare_pair_workset(
+    kin: Mapping[str, Any],
+    fps: float,
+    config: Mapping[str, Any],
+    *,
+    stage_timings: dict[str, float] | None = None,
+) -> _PairWorkset:
+    """Prepare vectorized all-pair gates and candidate-only heavy metrics."""
+
+    pair_filter_timer = Timer(
+        "pair_filter_and_windows",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
     interaction_radius = _interaction_radius(config)
     prefilter, all_pair_i, all_pair_j = _pair_prefilter(
         kin,
         config,
         interaction_radius,
     )
-    candidate_pair_indices = np.flatnonzero(
-        np.asarray(prefilter["candidate_pair_mask"], dtype=bool)
-    ).astype(int).tolist()
+    candidate_pair_indices = tuple(
+        int(index)
+        for index in np.flatnonzero(np.asarray(prefilter["candidate_pair_mask"], dtype=bool))
+    )
     candidate_pair_indices_array = np.asarray(candidate_pair_indices, dtype=int)
     pair_window_mask, pair_window_stats = _pair_window_mask(
         np.asarray(prefilter["valuable_frame"], dtype=bool),
@@ -3311,12 +3371,20 @@ def analyze(
         config,
     )
     candidate_frame_mask = pair_window_mask[:, candidate_pair_indices_array]
+    pair_filter_timer.stop()
+
+    pair_metrics_timer = Timer(
+        "pair_metrics",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
     metrics, pair_i, pair_j = _pair_metrics(
         kin,
         fps,
         pair_indices=candidate_pair_indices_array,
         frame_mask=candidate_frame_mask,
     )
+    pair_metrics_timer.stop()
     candidate_metric_index = {
         int(original_index): int(metric_index)
         for metric_index, original_index in enumerate(candidate_pair_indices)
@@ -3335,24 +3403,77 @@ def analyze(
         float(pair_window_stats["padding_seconds"]),
         float(pair_window_stats["fill_gap_seconds"]),
     )
-    candidate_ordinal = 0
-    pair_fsm_coordinator = ParallelBehaviorFSM(
-        dict(config.get("parallel_behavior_fsm", {}))
+    return _PairWorkset(
+        interaction_radius=float(interaction_radius),
+        prefilter=prefilter,
+        all_pair_i=all_pair_i,
+        all_pair_j=all_pair_j,
+        candidate_pair_indices=candidate_pair_indices,
+        candidate_metric_index=candidate_metric_index,
+        candidate_frame_mask=candidate_frame_mask,
+        pair_window_stats=pair_window_stats,
+        metrics=metrics,
+        pair_i=pair_i,
+        pair_j=pair_j,
     )
-    for pair_index, (mouse_a, mouse_b) in enumerate(zip(all_pair_i, all_pair_j)):
-        metric_index = candidate_metric_index.get(pair_index)
+
+
+@dataclass
+class _PairAnalysisResult:
+    """In-memory outputs produced by the candidate-pair analysis stage."""
+
+    events: list[dict[str, Any]]
+    contact_events: list[dict[str, Any]]
+    extended_events: list[dict[str, Any]]
+    pair_summaries: list[dict[str, Any]]
+    top_evidence: list[dict[str, Any]]
+    fsm_coordinator: ParallelBehaviorFSM
+
+
+def _analyze_candidate_pairs(
+    workset: _PairWorkset,
+    kin: Mapping[str, Any],
+    *,
+    fps: float,
+    source_fps: float,
+    sample_stride: int,
+    video_path: Path,
+    config: Mapping[str, Any],
+    stage_timings: dict[str, float] | None = None,
+) -> _PairAnalysisResult:
+    """Analyze retained pairs while preserving the complete pair timeline."""
+
+    events: list[dict[str, Any]] = []
+    contact_events: list[dict[str, Any]] = []
+    extended_events: list[dict[str, Any]] = []
+    pair_summaries: list[dict[str, Any]] = []
+    top_evidence: list[dict[str, Any]] = []
+    pair_analysis_timer = Timer(
+        "candidate_pair_analysis",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
+    pair_fsm_coordinator = ParallelBehaviorFSM(dict(config.get("parallel_behavior_fsm", {})))
+    candidate_ordinal = 0
+    for pair_index, (mouse_a, mouse_b) in enumerate(zip(workset.all_pair_i, workset.all_pair_j)):
+        metric_index = workset.candidate_metric_index.get(pair_index)
         base_summary: dict[str, Any] = {
             "pair_key": f"{int(mouse_a)}_{int(mouse_b)}",
             "mouse_a_id": int(mouse_a),
             "mouse_b_id": int(mouse_b),
-            "valid_frames": int(np.asarray(prefilter["valid_pair"][:, pair_index], dtype=bool).sum()),
-            "min_distance_cm": float(np.nanmin(prefilter["distance"][:, pair_index]))
-            if np.isfinite(prefilter["distance"][:, pair_index]).any()
+            "valid_frames": int(
+                np.asarray(
+                    workset.prefilter["valid_pair"][:, pair_index],
+                    dtype=bool,
+                ).sum()
+            ),
+            "min_distance_cm": float(np.nanmin(workset.prefilter["distance"][:, pair_index]))
+            if np.isfinite(workset.prefilter["distance"][:, pair_index]).any()
             else float("nan"),
             "max_speed_cm_s": float(
                 max(
-                    float(np.asarray(metrics["speed"][:, int(mouse_a)]).max(initial=0.0)),
-                    float(np.asarray(metrics["speed"][:, int(mouse_b)]).max(initial=0.0)),
+                    float(np.asarray(workset.metrics["speed"][:, int(mouse_a)]).max(initial=0.0)),
+                    float(np.asarray(workset.metrics["speed"][:, int(mouse_b)]).max(initial=0.0)),
                 )
             ),
             "engine_evaluated": metric_index is not None,
@@ -3372,22 +3493,23 @@ def analyze(
                     base_summary[f"{level}_{behavior}_role_known_rate"] = None
             pair_summaries.append(base_summary)
             continue
+
         candidate_ordinal += 1
-        if pair_index == 0 or pair_index % 20 == 0 or pair_index == len(all_pair_i) - 1:
+        if pair_index == 0 or pair_index % 20 == 0 or pair_index == len(workset.all_pair_i) - 1:
             LOGGER.info(
                 "[pair analysis] pair %d/%d (%d/%d candidates)",
                 pair_index + 1,
-                len(all_pair_i),
+                len(workset.all_pair_i),
                 candidate_ordinal,
-                len(candidate_pair_indices),
+                len(workset.candidate_pair_indices),
             )
         pair_df = _pair_dataframe(
-            metrics,
+            workset.metrics,
             metric_index,
             int(mouse_a),
             int(mouse_b),
-            pair_i,
-            pair_j,
+            workset.pair_i,
+            workset.pair_j,
             fps,
             float(kin["cm_per_pixel"]),
         )
@@ -3401,11 +3523,16 @@ def analyze(
             fsm_coordinator=pair_fsm_coordinator,
         )
         contact_events.extend(pair_contact_events)
-        enriched = behavior_engine.apply_standard_behavior_engine(pair_df, fps, config)
+        enriched = behavior_engine.apply_standard_behavior_engine(
+            pair_df,
+            fps,
+            config,
+            copy_input=False,
+        )
         extended_events.extend(
             _extended_pair_events(
                 pair_df,
-                metrics=metrics,
+                metrics=workset.metrics,
                 pair_index=metric_index,
                 enriched=enriched,
                 source_video=video_path,
@@ -3427,10 +3554,14 @@ def analyze(
             )
         )
         summary = base_summary
-        fsm_compute = enriched.get(
-            "standard_behavior_compute_row",
-            pair_df.get("valid_pair", pd.Series(True, index=pair_df.index)),
-        ).fillna(False).astype(bool)
+        fsm_compute = (
+            enriched.get(
+                "standard_behavior_compute_row",
+                pair_df.get("valid_pair", pd.Series(True, index=pair_df.index)),
+            )
+            .fillna(False)
+            .astype(bool)
+        )
         summary["fsm_evaluated_frames"] = int(fsm_compute.sum())
         summary["fsm_skipped_frames"] = int(len(fsm_compute) - fsm_compute.sum())
         summary["fsm_evaluated_fraction"] = float(fsm_compute.mean()) if len(fsm_compute) else 0.0
@@ -3447,7 +3578,10 @@ def analyze(
             )
         )
         summary["combined_nose_head_nose_tail_event_count"] = int(
-            sum(event.get("contact_type") == "nose_head_and_nose_tail" for event in pair_contact_events)
+            sum(
+                event.get("contact_type") == "nose_head_and_nose_tail"
+                for event in pair_contact_events
+            )
         )
         summary["contact_sample_count"] = int(
             sum(int(event.get("sample_count", 0)) for event in pair_contact_events)
@@ -3458,32 +3592,45 @@ def analyze(
                 score_col = f"{level}_standard_{behavior}_score"
                 actor_col = f"{level}_standard_{behavior}_actor_id"
                 target_col = f"{level}_standard_{behavior}_target_id"
-                active = enriched[mask_col].fillna(False).astype(bool) if mask_col in enriched else pd.Series(False, index=enriched.index)
+                active = (
+                    enriched[mask_col].fillna(False).astype(bool)
+                    if mask_col in enriched
+                    else pd.Series(False, index=enriched.index)
+                )
                 summary[f"{level}_{behavior}_frames"] = int(active.sum())
-                summary[f"{level}_{behavior}_max_score"] = float(enriched[score_col].max()) if score_col in enriched else 0.0
+                summary[f"{level}_{behavior}_max_score"] = (
+                    float(enriched[score_col].max()) if score_col in enriched else 0.0
+                )
                 if active.any() and actor_col in enriched and target_col in enriched:
-                    known = (pd.to_numeric(enriched.loc[active, actor_col], errors="coerce") >= 0) & (pd.to_numeric(enriched.loc[active, target_col], errors="coerce") >= 0)
+                    known = (
+                        pd.to_numeric(enriched.loc[active, actor_col], errors="coerce") >= 0
+                    ) & (pd.to_numeric(enriched.loc[active, target_col], errors="coerce") >= 0)
                     summary[f"{level}_{behavior}_role_known_rate"] = float(known.mean())
                 else:
                     summary[f"{level}_{behavior}_role_known_rate"] = None
             for event in behavior_engine.extract_standard_behavior_events(
-                enriched, fps, level, pair_key=f"{int(mouse_a)}_{int(mouse_b)}"
+                enriched,
+                fps,
+                level,
+                pair_key=f"{int(mouse_a)}_{int(mouse_b)}",
             ):
-                    event = dict(event)
-                    event["source_video"] = str(video_path)
-                    event["analysis_mode"] = "lightweight_cache_tracking"
-                    event["analysis_start_frame"] = int(event.get("start_frame", 0))
-                    event["analysis_peak_frame"] = int(event.get("peak_frame", 0))
-                    event["analysis_end_frame"] = int(event.get("end_frame", 0))
-                    event["start_frame"] = int(event.get("start_frame", 0)) * sample_stride
-                    event["peak_frame"] = int(event.get("peak_frame", 0)) * sample_stride
-                    event["end_frame"] = int(event.get("end_frame", 0)) * sample_stride
-                    events.append(event)
+                event = dict(event)
+                event["source_video"] = str(video_path)
+                event["analysis_mode"] = "lightweight_cache_tracking"
+                event["analysis_start_frame"] = int(event.get("start_frame", 0))
+                event["analysis_peak_frame"] = int(event.get("peak_frame", 0))
+                event["analysis_end_frame"] = int(event.get("end_frame", 0))
+                event["start_frame"] = int(event.get("start_frame", 0)) * sample_stride
+                event["peak_frame"] = int(event.get("peak_frame", 0)) * sample_stride
+                event["end_frame"] = int(event.get("end_frame", 0)) * sample_stride
+                events.append(event)
         for behavior in ("chase", "attack"):
             score_column = f"strong_standard_{behavior}_score"
             if score_column not in enriched:
                 continue
-            candidate = enriched[["frame", "time_s", "pair_key", "center_distance_cm", score_column]].copy()
+            candidate = enriched[
+                ["frame", "time_s", "pair_key", "center_distance_cm", score_column]
+            ].copy()
             candidate["behavior"] = behavior
             candidate["level"] = "strong"
             candidate = candidate.rename(columns={score_column: "score"})
@@ -3494,23 +3641,35 @@ def analyze(
                 row["source_time_s"] = float(row["frame"]) * sample_stride / source_fps
             top_evidence.extend(evidence_rows)
         pair_summaries.append(summary)
+    pair_analysis_timer.stop()
+    return _PairAnalysisResult(
+        events=events,
+        contact_events=contact_events,
+        extended_events=extended_events,
+        pair_summaries=pair_summaries,
+        top_evidence=top_evidence,
+        fsm_coordinator=pair_fsm_coordinator,
+    )
 
-    if bool(_extended_behavior_config(config).get("enabled", True)):
-        extended_events.extend(
-            _extended_individual_and_group_events(
-                kin,
-                pair_metrics=metrics,
-                pair_i=pair_i,
-                pair_j=pair_j,
-                source_video=video_path,
-                source_fps=source_fps,
-                sample_stride=sample_stride,
-                config=config,
-            )
-        )
-    events.extend(extended_events)
 
-    for index, event in enumerate(sorted(events, key=lambda item: (int(item.get("start_frame", 0)), str(item.get("pair_key", "")), str(item.get("level", "")))), start=1):
+def _finalize_event_records_in_place(
+    events: list[dict[str, Any]],
+    contact_events: list[dict[str, Any]],
+    source_fps: float,
+) -> None:
+    """Assign stable IDs and source-time fields without changing event order."""
+
+    for index, event in enumerate(
+        sorted(
+            events,
+            key=lambda item: (
+                int(item.get("start_frame", 0)),
+                str(item.get("pair_key", "")),
+                str(item.get("level", "")),
+            ),
+        ),
+        start=1,
+    ):
         event["light_event_id"] = f"LWE{index:05d}"
         event["start_time_s"] = float(event.get("start_frame", 0)) / source_fps
         event["end_time_s"] = float(event.get("end_frame", 0)) / source_fps
@@ -3531,15 +3690,171 @@ def analyze(
     ):
         event["contact_event_id"] = f"LCE{index:05d}"
 
+
+def analyze(
+    video_path: Path,
+    cache_dir: Path,
+    config_path: Path,
+    output_dir: Path,
+    expected_mice: int = 20,
+    max_frames: int | None = None,
+    sample_stride: int = 1,
+    fps_override: float | None = None,
+) -> Path:
+    started = time.perf_counter()
+    stage_timings: dict[str, float] = {}
+    setup_timer = Timer(
+        "setup_and_video_probe",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config = load_config(config_path)
+    configured_fps = config.pop("_fps_override", 29.329)
+    source_fps = float(configured_fps if fps_override is None else fps_override)
+    if not np.isfinite(source_fps) or source_fps <= 0.0:
+        raise ValueError(f"视频 FPS 必须是正数，实际为：{source_fps}")
+    sample_stride = max(int(sample_stride), 1)
+    total_frames = _cache_total_frames(cache_dir)
+    if max_frames is not None:
+        total_frames = min(total_frames, max(int(max_frames), 1))
+    video_cap = cv2.VideoCapture(str(video_path))
+    if not video_cap.isOpened():
+        raise RuntimeError(f"无法打开源视频: {video_path}")
+    width = int(video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    video_frame_count = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    video_fps = float(video_cap.get(cv2.CAP_PROP_FPS))
+    video_cap.release()
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"无法读取源视频尺寸: {video_path}")
+    setup_timer.stop()
+
+    arena_timer = Timer(
+        "arena_boundary",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
+    arena_result, _arena_heatmap = _prepare_video_arena_boundary(
+        video_path,
+        cache_dir,
+        output_dir,
+        config_path,
+        config,
+        width,
+        height,
+        max_frames=total_frames,
+    )
+    arena_polygon = (
+        np.asarray(arena_result.polygon, dtype=np.float64) if arena_result is not None else None
+    )
+    arena_tolerance = float(
+        dict(config.get("adaptive_arena", {})).get("hard_gate_tolerance_px", 2.0)
+    )
+    arena_timer.stop()
+
+    track_timer = Timer(
+        "track_cache",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
+    tracks, tracking_stats = _track_cache(
+        cache_dir,
+        total_frames,
+        expected_mice,
+        arena_polygon=arena_polygon,
+        arena_tolerance_px=arena_tolerance,
+    )
+    # Preserve full-resolution source-frame tracks for the annotation website.
+    # Behavior analysis may sample this array below; the export contract may not.
+    source_tracks = tracks
+    track_timer.stop()
+
+    kinematics_timer = Timer(
+        "kinematics",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
+    if sample_stride > 1:
+        tracks = {
+            key: (
+                value[::sample_stride]
+                if isinstance(value, np.ndarray) and value.ndim > 0
+                else value
+            )
+            for key, value in tracks.items()
+        }
+    analysis_frames = int(tracks["valid"].shape[0])
+    fps = source_fps / sample_stride
+    kin = _kinematics(tracks, fps=fps)
+    kinematics_timer.stop()
+    pair_workset = _prepare_pair_workset(
+        kin,
+        fps,
+        config,
+        stage_timings=stage_timings,
+    )
+    pair_analysis = _analyze_candidate_pairs(
+        pair_workset,
+        kin,
+        fps=fps,
+        source_fps=source_fps,
+        sample_stride=sample_stride,
+        video_path=video_path,
+        config=config,
+        stage_timings=stage_timings,
+    )
+    events = pair_analysis.events
+    contact_events = pair_analysis.contact_events
+    extended_events = pair_analysis.extended_events
+    pair_summaries = pair_analysis.pair_summaries
+    top_evidence = pair_analysis.top_evidence
+    pair_fsm_coordinator = pair_analysis.fsm_coordinator
+
+    interaction_radius = pair_workset.interaction_radius
+    prefilter = pair_workset.prefilter
+    all_pair_i = pair_workset.all_pair_i
+    candidate_pair_indices = pair_workset.candidate_pair_indices
+    candidate_frame_mask = pair_workset.candidate_frame_mask
+    pair_window_stats = pair_workset.pair_window_stats
+    metrics = pair_workset.metrics
+    pair_i = pair_workset.pair_i
+    pair_j = pair_workset.pair_j
+
+    global_events_timer = Timer(
+        "global_events_and_finalization",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
+    if bool(_extended_behavior_config(config).get("enabled", True)):
+        extended_events.extend(
+            _extended_individual_and_group_events(
+                kin,
+                pair_metrics=metrics,
+                pair_i=pair_i,
+                pair_j=pair_j,
+                source_video=video_path,
+                source_fps=source_fps,
+                sample_stride=sample_stride,
+                config=config,
+            )
+        )
+    events.extend(extended_events)
+    _finalize_event_records_in_place(events, contact_events, source_fps)
+    global_events_timer.stop()
+
     website_frame_count = (
         int(video_frame_count) if int(video_frame_count) > 0 else max(int(total_frames), 1)
     )
     website_fps = (
-        float(video_fps)
-        if np.isfinite(video_fps) and float(video_fps) > 0.0
-        else float(source_fps)
+        float(video_fps) if np.isfinite(video_fps) and float(video_fps) > 0.0 else float(source_fps)
     )
     extended_cfg = _extended_behavior_config(config)
+    website_timer = Timer(
+        "website_export",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
     website_export = export_complete_video_package(
         source_video=video_path,
         output_dir=output_dir,
@@ -3564,7 +3879,13 @@ def analyze(
             "full_pipeline_not_run": True,
         },
     )
+    website_timer.stop()
 
+    csv_timer = Timer(
+        "csv_output",
+        logger=LOGGER,
+        sink=stage_timings,
+    ).start()
     _write_csv(output_dir / "lightweight_behavior_events.csv", events)
     _write_csv(
         output_dir / "lightweight_contact_events.csv",
@@ -3581,6 +3902,7 @@ def analyze(
         fsm_candidate_timeline_frames - fsm_evaluated_pair_frames,
         0,
     )
+    csv_timer.stop()
     metadata = {
         "source_video": str(video_path),
         "yolo_cache": str(cache_dir),
@@ -3598,18 +3920,13 @@ def analyze(
         "cm_per_pixel": float(kin["cm_per_pixel"]),
         "reference_body_px": float(kin["reference_body_px"]),
         "tracking": tracking_stats,
-        "arena_boundary": (
-            asdict(arena_result)
-            if arena_result is not None
-            else None
-        ),
+        "arena_boundary": (asdict(arena_result) if arena_result is not None else None),
         "event_counts": {
             f"{level}_{behavior}": int(
                 sum(
                     1
                     for event in events
-                    if event.get("candidate_level") == level
-                    and event.get("behavior") == behavior
+                    if event.get("candidate_level") == level and event.get("behavior") == behavior
                 )
             )
             for level in ("weak", "strong")
@@ -3647,9 +3964,7 @@ def analyze(
         "total_pair_count": int(len(all_pair_i)),
         "standard_behavior_engine": {
             "skip_inactive_rows": bool(
-                dict(config.get("standard_behavior_engine", {})).get(
-                    "skip_inactive_rows", True
-                )
+                dict(config.get("standard_behavior_engine", {})).get("skip_inactive_rows", True)
             ),
             "evaluated_pair_frame_count": fsm_evaluated_pair_frames,
             "skipped_pair_frame_count": fsm_skipped_pair_frames,
@@ -3661,17 +3976,14 @@ def analyze(
             else 0.0,
         },
         "parallel_behavior_fsm": {
-            "enabled": bool(
-                dict(config.get("parallel_behavior_fsm", {})).get("enabled", True)
-            ),
-            "mode": str(
-                dict(config.get("parallel_behavior_fsm", {})).get("mode", "active")
-            ),
+            "enabled": bool(pair_fsm_coordinator.enabled),
+            "mode": str(pair_fsm_coordinator.mode),
             "version": ParallelBehaviorFSM.VERSION,
-            "collect_diagnostics": bool(
-                dict(config.get("parallel_behavior_fsm", {})).get(
-                    "collect_diagnostics", False
-                )
+            "collect_diagnostics": bool(pair_fsm_coordinator.collect_diagnostics),
+            "execution_semantics": (
+                "active_temporal_regions"
+                if pair_fsm_coordinator.enabled
+                else "disabled_no_parallel_events"
             ),
             "regions": {
                 "individual": "stationary|walking|running per mouse",
@@ -3698,6 +4010,7 @@ def analyze(
             if candidate_frame_mask.size
             else 0.0,
         },
+        "stage_timings_s": stage_timings,
         "elapsed_s": float(time.perf_counter() - started),
     }
     with (output_dir / "lightweight_analysis_metadata.json").open("w", encoding="utf-8") as handle:
@@ -3855,7 +4168,9 @@ def main() -> int:
         return 0
 
     if args.config is None or args.fps is None:
-        parser.error("普通分析模式需要同时提供 --config 和 --fps；渲染已有结果请使用 --render-only。")
+        parser.error(
+            "普通分析模式需要同时提供 --config 和 --fps；渲染已有结果请使用 --render-only。"
+        )
     # Keep the function signature self-contained while passing the video FPS.
     config = load_config(args.config)
     config["_fps_override"] = float(args.fps)

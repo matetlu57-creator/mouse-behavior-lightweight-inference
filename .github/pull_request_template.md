@@ -14,9 +14,8 @@
 <!-- Paste the commands and relevant result. -->
 
 ```text
-python -m pytest -q
-python -m compileall -q src scripts tests
-python tools/check_repository.py
+python scripts/validate_repository.py
+python scripts/run_quality.py --ci
 ```
 
 ## Reproducibility and data

@@ -16,6 +16,7 @@ Example::
       --dataset none=D:\\data\\threshold_calibration_social6 \
       --output-dir D:\\reports\\threshold_calibration
 """
+
 from __future__ import annotations
 
 import argparse
@@ -81,8 +82,10 @@ def _binary_metrics(truth: Iterable[bool], prediction: Iterable[bool]) -> dict[s
     tn = int(np.sum(~y_true & ~y_pred))
     precision = _safe_metric(tp, tp + fp)
     recall = _safe_metric(tp, tp + fn)
-    f1 = None if precision is None or recall is None or precision + recall == 0 else float(
-        2.0 * precision * recall / (precision + recall)
+    f1 = (
+        None
+        if precision is None or recall is None or precision + recall == 0
+        else float(2.0 * precision * recall / (precision + recall))
     )
     return {
         "n_videos": int(len(y_true)),
@@ -104,7 +107,9 @@ def _pair_csvs(result_root: Path) -> list[Path]:
     )
 
 
-def _apply_per_pair(df: pd.DataFrame, config: dict[str, Any], fps: float) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+def _apply_per_pair(
+    df: pd.DataFrame, config: dict[str, Any], fps: float
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     if "pair_key" not in df.columns:
         df = df.copy()
         df["pair_key"] = "__single_pair__"
@@ -157,11 +162,16 @@ def _video_result(
                 active = pd.Series(False, index=enriched.index)
             else:
                 active = enriched[mask_col].fillna(False).astype(bool)
-            predicted_frames = int(enriched.loc[active, "frame"].nunique()) if "frame" in enriched else 0
+            predicted_frames = (
+                int(enriched.loc[active, "frame"].nunique()) if "frame" in enriched else 0
+            )
             row[f"{level}_{behavior}_pred"] = bool(predicted_frames > 0)
             row[f"{level}_{behavior}_frames"] = predicted_frames
             row[f"{level}_{behavior}_event_count"] = int(
-                sum(event.get("behavior") == behavior and event.get("level") == level for event in events)
+                sum(
+                    event.get("behavior") == behavior and event.get("level") == level
+                    for event in events
+                )
             )
             if score_col in enriched:
                 row[f"{level}_{behavior}_max_score"] = float(enriched[score_col].max())
@@ -169,9 +179,17 @@ def _video_result(
                 row[f"{level}_{behavior}_max_score"] = 0.0
             if active.any() and actor_col in enriched and target_col in enriched:
                 known = (
-                    pd.to_numeric(enriched.loc[active, actor_col], errors="coerce").fillna(-1).astype(int).to_numpy() >= 0
+                    pd.to_numeric(enriched.loc[active, actor_col], errors="coerce")
+                    .fillna(-1)
+                    .astype(int)
+                    .to_numpy()
+                    >= 0
                 ) & (
-                    pd.to_numeric(enriched.loc[active, target_col], errors="coerce").fillna(-1).astype(int).to_numpy() >= 0
+                    pd.to_numeric(enriched.loc[active, target_col], errors="coerce")
+                    .fillna(-1)
+                    .astype(int)
+                    .to_numpy()
+                    >= 0
                 )
                 row[f"{level}_{behavior}_role_known_rate"] = float(np.mean(known))
             else:

@@ -9,7 +9,7 @@ from _bootstrap import ensure_importable
 
 ensure_importable()
 
-from mouse_behavior.lightweight_behavior_inference import main
+from mouse_behavior.lightweight_behavior_inference import main  # noqa: E402
 
 
 if __name__ == "__main__":

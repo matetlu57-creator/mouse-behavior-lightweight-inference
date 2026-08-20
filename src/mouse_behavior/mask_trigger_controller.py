@@ -6,6 +6,7 @@ uploaded optimization bundle does not contain that project-side source file.
 It can therefore be overlaid without shadowing/replacing the user's existing
 mask_cluster_reid implementation.
 """
+
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -29,7 +30,9 @@ class MaskTriggerController:
         self.enabled = bool(cfg.get("enabled", True))
         self.result_preserving_only = bool(cfg.get("result_preserving_only", True))
         self.overlap_iou_threshold = float(cfg.get("overlap_iou_threshold", 0.02))
-        self.force_refresh_interval_frames = max(0, int(cfg.get("force_refresh_interval_frames", 15)))
+        self.force_refresh_interval_frames = max(
+            0, int(cfg.get("force_refresh_interval_frames", 15))
+        )
         self.instance_identity_weight = float(instance_mask_cfg.get("identity_cost_weight", 0.0))
         self.cluster_mask_weight = float(cluster_reid_cfg.get("mask_weight", 0.0))
         self.run_count = 0
@@ -40,7 +43,12 @@ class MaskTriggerController:
     def _bbox_iou(a: np.ndarray, b: np.ndarray) -> float:
         aa = np.asarray(a, dtype=np.float64).reshape(-1)
         bb = np.asarray(b, dtype=np.float64).reshape(-1)
-        if aa.size < 4 or bb.size < 4 or not np.all(np.isfinite(aa[:4])) or not np.all(np.isfinite(bb[:4])):
+        if (
+            aa.size < 4
+            or bb.size < 4
+            or not np.all(np.isfinite(aa[:4]))
+            or not np.all(np.isfinite(bb[:4]))
+        ):
             return 0.0
         x1, y1 = max(aa[0], bb[0]), max(aa[1], bb[1])
         x2, y2 = min(aa[2], bb[2]), min(aa[3], bb[3])
@@ -80,20 +88,29 @@ class MaskTriggerController:
         if recovery_regions:
             return self._finish(True, "recovery_requested")
         for region in (cluster_context or {}).get("regions", []):
-            if any(bool(region.get(k, False)) for k in ("deficit", "merged_like", "recovery_requested", "attack_hint")):
+            if any(
+                bool(region.get(k, False))
+                for k in ("deficit", "merged_like", "recovery_requested", "attack_hint")
+            ):
                 return self._finish(True, "occlusion_cluster_risk")
 
         dets = list(detections)
         for i in range(len(dets)):
             for j in range(i + 1, len(dets)):
-                if self._bbox_iou(dets[i].bbox_xyxy, dets[j].bbox_xyxy) > self.overlap_iou_threshold:
+                if (
+                    self._bbox_iou(dets[i].bbox_xyxy, dets[j].bbox_xyxy)
+                    > self.overlap_iou_threshold
+                ):
                     return self._finish(True, "bbox_overlap")
 
         frame_stats = dict(getattr(identity, "frame_stats", {}) or {})
         if int(frame_stats.get("suspicious", 0)) > 0 or int(frame_stats.get("lost", 0)) > 0:
             return self._finish(True, "identity_uncertainty")
 
-        if self.force_refresh_interval_frames > 0 and int(frame_idx) % self.force_refresh_interval_frames == 0:
+        if (
+            self.force_refresh_interval_frames > 0
+            and int(frame_idx) % self.force_refresh_interval_frames == 0
+        ):
             return self._finish(True, "periodic_refresh")
         return self._finish(False, "low_risk")
 

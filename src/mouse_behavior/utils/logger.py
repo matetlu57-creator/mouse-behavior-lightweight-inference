@@ -1,4 +1,5 @@
 """Public logging facade."""
+
 from __future__ import annotations
 
 import logging
