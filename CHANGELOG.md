@@ -6,6 +6,10 @@ source of truth for historical versions.
 
 ## [Unreleased]
 
+- Split the lightweight inference, standard behavior and cage-boundary
+  implementations into reusable preprocessing, tracking, behavior, I/O and
+  visualization modules while preserving compatibility facades and output
+  contracts.
 - Standardize the repository around `src/mouse_behavior`, `scripts`,
   `configs`, `tests`, `docs`, and `examples`.
 - Refresh the GitHub-facing Markdown navigation so the repository homepage,
