@@ -1,12 +1,18 @@
 # Tracking boundary
 
-The current lightweight tracker is still implemented inside
-`mouse_behavior.lightweight_behavior_inference` because its position,
-keypoint and cache-window operations share the same analysis arrays. This
-directory is the stable boundary for the next extraction: association, motion,
-occlusion and identity management will move here one component at a time,
-with regression tests before each move.
+Tracking/cache responsibilities are implemented in
+`mouse_behavior.tracking.cache`:
 
-Do not add a second `tracker_v2.py` or copy the current tracker into this
-directory. Use a feature branch and preserve the old import facade while the
-split is validated.
+- cache record iteration and frame-count discovery;
+- detection payload normalization and duplicate suppression;
+- arena-membership checks;
+- position/keypoint assignment and lightweight track-cache construction.
+
+`mouse_behavior.lightweight_behavior_inference` remains the compatibility
+orchestrator. It re-exports the historical private helper names, while new
+code should import tracking helpers from `tracking.cache` only when it needs
+that lower-level boundary.
+
+Do not add a second `tracker_v2.py` or copy the tracker into another directory.
+Future identity/occlusion changes should be made behind this boundary and
+protected by regression tests before changing the public facade.

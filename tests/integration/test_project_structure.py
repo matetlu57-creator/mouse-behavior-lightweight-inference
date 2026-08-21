@@ -19,6 +19,29 @@ def test_reusable_modules_live_in_package_and_legacy_imports_still_work():
     assert (ROOT / "src" / "mouse_behavior" / "lightweight_behavior_inference.py").is_file()
     assert (ROOT / "src" / "mouse_behavior" / "pose_cache.py").is_file()
     assert (ROOT / "scripts" / "build_lightweight_pose_cache.py").is_file()
+    for relative in (
+        "src/mouse_behavior/behavior/standard_evidence.py",
+        "src/mouse_behavior/behavior/standard_fsm.py",
+        "src/mouse_behavior/behavior/ethogram.py",
+        "src/mouse_behavior/behavior/pair_analysis.py",
+        "src/mouse_behavior/preprocessing/geometry.py",
+        "src/mouse_behavior/preprocessing/kinematics.py",
+        "src/mouse_behavior/preprocessing/pair_features.py",
+        "src/mouse_behavior/preprocessing/arena_learning.py",
+        "src/mouse_behavior/tracking/cache.py",
+        "src/mouse_behavior/io/arena_boundary.py",
+        "src/mouse_behavior/visualization/rendering.py",
+    ):
+        assert (ROOT / relative).is_file(), relative
+
+    lightweight = importlib.import_module("mouse_behavior.lightweight_behavior_inference")
+    for name in (
+        "_pair_prefilter",
+        "_pair_metrics",
+        "_extended_individual_and_group_events",
+        "extract_behavior_clips",
+    ):
+        assert hasattr(lightweight, name), name
 
 
 def test_cli_and_library_boundaries_are_explicit():

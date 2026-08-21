@@ -93,7 +93,9 @@ left hip  -> tail
 right hip -> tail
 ```
 
-这组边定义位于 `lightweight_behavior_inference.py` 的 `SKELETON_EDGES` 常量中。渲染函数如后续启用，也使用同一组连接关系，不会另行使用旧的骨架拓扑。
+这组边定义位于 `src/mouse_behavior/preprocessing/constants.py` 的
+`SKELETON_EDGES` 常量中。渲染函数如后续启用，也使用同一组连接关系，
+不会另行使用旧的骨架拓扑。
 
 ## 4. 仓库结构
 
@@ -106,16 +108,26 @@ right hip -> tail
 │  ├─ core/                                 # 流程编排和 Pipeline facade
 │  ├─ models/                               # Pose/cache 模型接口
 │  ├─ behavior/                             # 行为引擎稳定导出接口
+│  │  ├─ standard_evidence.py                # 连续证据和角色特征
+│  │  ├─ standard_fsm.py                    # 追逐/攻击 FSM 转移
+│  │  ├─ ethogram.py                        # 接触和扩展行为事件
+│  │  └─ pair_analysis.py                   # 候选鼠对编排
 │  ├─ data/                                 # 事件 CSV schema 和数据契约
 │  ├─ io/                                   # 运行目录和输出路径
 │  ├─ utils/                                # logging 和计时器
 │  ├─ tracking/                             # 追踪职责边界
-│  ├─ preprocessing/                        # 预处理职责边界
+│  │  └─ cache.py                            # 缓存规范化和轻量匹配
+│  ├─ preprocessing/                        # 预处理和特征构建
+│  │  ├─ geometry.py                         # 几何原语
+│  │  ├─ kinematics.py                       # 个体运动学
+│  │  ├─ pair_features.py                    # 鼠对筛选和特征
+│  │  └─ arena_learning.py                   # 笼子范围学习
 │  ├─ postprocessing/                       # 后处理职责边界
 │  ├─ visualization/                        # 可视化职责边界
+│  │  └─ rendering.py                        # 渲染视频和行为片段
 │  ├─ evaluation/                           # 评估职责边界
 │  ├─ reports/                              # 报告职责边界
-│  ├─ adaptive_arena_boundary.py            # 自适应笼界学习
+│  ├─ adaptive_arena_boundary.py            # 笼界兼容门面
 │  ├─ annotation_website_export.py          # 标注网站输出适配器
 │  ├─ pose_cache.py                          # Pose cache 写入模块
 │  ├─ mask_trigger_controller.py            # Mask 触发决策
@@ -171,7 +183,10 @@ right hip -> tail
 入口而继续扩大根目录。历史根目录兼容文件仍只为完整旧管线和旧导入路径保留，
 后续新增功能不得再放入根目录。
 
-其中，`src/mouse_behavior/` 中的职责目录是稳定的模块边界；当前部分历史实现仍集中在轻量分析模块中，后续拆分必须以 pytest 回归测试为前提，不能通过复制 `v2`、`final2` 等目录维护多个版本。
+其中，`src/mouse_behavior/` 中的职责目录是稳定的模块边界。轻量分析、标准
+行为引擎和笼界学习已经拆成可复用模块；兼容门面只负责保持旧导入路径、
+命令参数和输出契约。后续修改必须以 pytest 回归测试为前提，不能通过复制
+`v2`、`final2` 等目录维护多个版本。
 
 根目录的同名 Python 文件只为旧命令、旧 notebook 和完整管线保留兼容路径；新代码应从 `mouse_behavior` 包导入，新的命令行入口应放到 `scripts/`。这个分层参考了 [SOAR-PKU/mTrack](https://github.com/SOAR-PKU/mTrack) 中 `mtrack/` 与 `scripts/` 的职责分离方式。
 
