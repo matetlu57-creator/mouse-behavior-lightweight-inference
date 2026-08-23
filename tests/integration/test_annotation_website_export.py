@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from annotation_website_export import (
+from mouse_behavior.annotation_website_export import (
     KEYPOINT_NAMES,
     build_annotations,
     export_complete_video_package,

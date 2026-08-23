@@ -6,6 +6,13 @@ source of truth for historical versions.
 
 ## [Unreleased]
 
+- Move the complete detector/identity pipeline into
+  `mouse_behavior.full_pipeline`, add maintained script/module/console entry
+  points, and remove every repository-root Python compatibility file.
+- Replace full-pipeline startup `print()` calls with logging and add pytest
+  `caplog` coverage for logging configuration and stage timing.
+- Document and exercise an external Git worktree workflow so parallel branches
+  do not become copied version directories inside the repository.
 - Split the lightweight inference, standard behavior and cage-boundary
   implementations into reusable preprocessing, tracking, behavior, I/O and
   visualization modules while preserving compatibility facades and output

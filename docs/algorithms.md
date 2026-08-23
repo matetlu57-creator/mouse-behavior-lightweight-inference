@@ -17,8 +17,8 @@ regression comparison against frozen event outputs.
 
 ## Maintained module boundaries
 
-The compatibility entry points are intentionally thin facades. The reusable
-implementation is organized as follows:
+Stable package facades and focused implementation modules are organized as
+follows:
 
 | Responsibility | Maintained module |
 | --- | --- |
@@ -32,10 +32,12 @@ implementation is organized as follows:
 | cage-boundary learning | `src/mouse_behavior/preprocessing/arena_learning.py` |
 | cage-boundary persistence and audit images | `src/mouse_behavior/io/arena_boundary.py` |
 | rendered videos and behavior clips | `src/mouse_behavior/visualization/rendering.py` |
+| full detector/identity/video pipeline | `src/mouse_behavior/full_pipeline/` |
 
-No threshold, schema, CLI argument or output filename is moved to a new public
-API by this refactor. The old module paths continue to re-export the moved
-names for existing scripts and notebooks.
+No threshold, schema, CLI argument or output filename changes as part of the
+root-entry migration. Repository-root imports are intentionally retired;
+scripts and notebooks must import from `mouse_behavior` or use the maintained
+CLI entry points documented in ADR-0002.
 
 `parallel_behavior_fsm.enabled` is an execution switch. With the default
 `true`, individual, extended pair, contact and group regions use the temporal

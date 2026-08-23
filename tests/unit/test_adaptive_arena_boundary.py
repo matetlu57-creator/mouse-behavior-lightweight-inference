@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
-import adaptive_arena_boundary as arena
+from mouse_behavior import adaptive_arena_boundary as arena
 
 
 def _record(frame: int, x: float, y: float) -> dict:

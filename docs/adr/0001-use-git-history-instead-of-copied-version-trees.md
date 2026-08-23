@@ -12,8 +12,9 @@ They made the repository root harder to understand and encouraged file-copy
 version management instead of branches, tags, and reproducible tests.
 
 Two original source files are still required by the deterministic performance
-regression suite. The current full-pipeline root modules also remain supported
-compatibility entry points.
+regression suite. At the time of this decision, the full-pipeline root modules
+remained supported compatibility entry points. ADR-0002 completes their package
+migration.
 
 ## Decision
 
@@ -22,8 +23,8 @@ compatibility entry points.
 - Remove copied historical report/source trees from the maintained branch.
 - Retain only the two executable baseline files required by regression tests,
   under `tests/regression/fixtures/legacy_v138`.
-- Keep current root compatibility entry points until a separately tested
-  migration removes their downstream usage.
+- Keep root compatibility entry points only until a separately tested migration
+  removes their downstream usage; ADR-0002 records that completed migration.
 - Keep scientific validation evidence under `docs/validation`.
 
 ## Consequences

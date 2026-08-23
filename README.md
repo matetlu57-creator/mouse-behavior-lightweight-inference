@@ -14,7 +14,7 @@
 4. [configs/profiles/balanced.yaml](configs/profiles/balanced.yaml)：普通轻量分析的推荐配置；
 5. [CONTRIBUTING.md](CONTRIBUTING.md)：Git 分支、worktree、pytest、logging 和 AI 协作约定。
 
-GitHub 上的源码入口是 `src/mouse_behavior/`，可执行入口是 `scripts/`，配置入口是 `configs/`。根目录同名 Python 文件只作为旧命令和旧 notebook 的兼容层保留。
+GitHub 上的源码入口是 `src/mouse_behavior/`，可执行入口是 `scripts/`，配置入口是 `configs/`。仓库根目录不保留 Python 兼容入口；旧命令和 notebook 请按 [ADR-0002](docs/adr/0002-package-full-pipeline-and-remove-root-entrypoints.md) 迁移。
 
 ## 1. 当前版本和工作边界
 
@@ -41,9 +41,9 @@ Pair 级运动学与接触特征
 项目重命名范围如下：
 
 - 项目/仓库标识从旧的版本化目录名统一为 `mouse-behavior-lightweight-inference`。
-- 轻量分析实现的正式文件名为 `lightweight_behavior_inference.py`。
-- `lightweight_cache_behavior_analysis.py` 保留为兼容入口，旧脚本、旧笔记本和旧命令仍可通过它调用新实现。
-- `mouse_chase_attack_high_recall.py`、`mouse_chase_attack_extractor_base.py` 等历史文件名暂时保留，因为测试、旧配置和完整管线仍引用这些名字；这不是重复实现，而是为了避免升级时破坏现有调用关系。
+- 轻量分析的正式模块为 `mouse_behavior.lightweight_behavior_inference`；旧名称仅作为包内别名 `mouse_behavior.lightweight_cache_behavior_analysis` 保留。
+- 完整管线迁入 `mouse_behavior.full_pipeline`，通过 `scripts/run_full_behavior_pipeline.py`、`python -m mouse_behavior.full_pipeline` 或 `mouse-behavior-full` 启动。
+- 仓库根目录不再包含 Python 入口文件；历史版本由 Git branch/tag 保存，旧 notebook 应迁移到正式包导入路径。
 
 ## 2. 行为标签和接触输出
 
@@ -103,8 +103,13 @@ right hip -> tail
 .
 ├─ src/mouse_behavior/                      # 可复用 Python 模块
 │  ├─ lightweight_behavior_inference.py     # 轻量单视频分析实现
+│  ├─ lightweight_cache_behavior_analysis.py # 旧轻量名称的包内迁移别名
 │  ├─ standard_behavior_engine.py           # 标准追逐/攻击行为引擎
 │  ├─ parallel_behavior_fsm.py              # 个体/鼠对/接触/群体并行FSM
+│  ├─ full_pipeline/                         # 完整多阶段管线包
+│  │  ├─ extractor_base.py                   # 检测、身份和基础特征
+│  │  ├─ high_recall.py                      # 完整高召回流程
+│  │  └─ __main__.py                         # python -m 入口
 │  ├─ core/                                 # 流程编排和 Pipeline facade
 │  ├─ models/                               # Pose/cache 模型接口
 │  ├─ behavior/                             # 行为引擎稳定导出接口
@@ -136,6 +141,7 @@ right hip -> tail
 ├─ scripts/                                 # CLI、批处理和评估入口
 │  ├─ build_lightweight_pose_cache.py       # 只用 Pose 权重生成逐视频缓存
 │  ├─ run_lightweight_behavior_inference.py  # 轻量分析 CLI
+│  ├─ run_full_behavior_pipeline.py         # 完整管线 CLI
 │  ├─ validate_beiyi_extended_ethogram.py   # 北医示例集验证
 │  ├─ calibrate_standard_behavior.py        # 离线阈值校准
 │  ├─ sweep_standard_behavior.py            # 阈值扫描
@@ -143,16 +149,7 @@ right hip -> tail
 │  ├─ compare_parallel_fsm_validation.py    # 并行FSM前后事件级A/B比较
 │  ├─ run_lightweight_behavior_inference.ps1
 │  └─ run_stage1_stage2.ps1
-├─ lightweight_behavior_inference.py       # 根目录兼容 CLI
-├─ lightweight_cache_behavior_analysis.py  # 旧模块名兼容层
-├─ standard_behavior_engine.py              # 根目录兼容导入层
-├─ adaptive_arena_boundary.py               # 根目录兼容导入层
-├─ annotation_website_export.py             # 根目录兼容导入层
-├─ mask_trigger_controller.py               # 根目录兼容导入层
-├─ nvenc_video_writer.py                    # 根目录兼容导入层
 ├─ mouse_chase_attack_config.yaml           # 行为阈值和运行开关
-├─ mouse_chase_attack_high_recall.py       # 完整管线兼容入口/集成入口
-├─ mouse_chase_attack_extractor_base.py    # 原有提取器基础代码
 ├─ tests/                                   # 分层自动化测试
 │  ├─ unit/                                 # 纯函数和模块级测试
 │  ├─ integration/                          # 跨模块和输出契约测试
@@ -177,18 +174,19 @@ right hip -> tail
 └─ requirements-dev.txt                     # 测试依赖
 ```
 
-根目录不再保留 Pose 缓存构建、阈值校准、阈值扫描、北医验证和缓存重跑的
-兼容 CLI 文件；这些命令的唯一维护入口是 `scripts/` 下的同名脚本。这样可以
-保证可复用代码在 `src/mouse_behavior/`、运行入口在 `scripts/`，不会因为旧命令
-入口而继续扩大根目录。历史根目录兼容文件仍只为完整旧管线和旧导入路径保留，
-后续新增功能不得再放入根目录。
+根目录不再保留任何 Python 入口。可复用代码统一位于 `src/mouse_behavior/`，
+命令行、批处理和验证入口统一位于 `scripts/`；仓库检查器会拒绝以后新增的
+根目录 `.py` 文件。完整旧管线不是删除，而是作为 `full_pipeline` 包继续维护。
 
 其中，`src/mouse_behavior/` 中的职责目录是稳定的模块边界。轻量分析、标准
-行为引擎和笼界学习已经拆成可复用模块；兼容门面只负责保持旧导入路径、
+行为引擎和笼界学习已经拆成可复用模块；包内门面负责保持稳定 API、
 命令参数和输出契约。后续修改必须以 pytest 回归测试为前提，不能通过复制
 `v2`、`final2` 等目录维护多个版本。
 
-根目录的同名 Python 文件只为旧命令、旧 notebook 和完整管线保留兼容路径；新代码应从 `mouse_behavior` 包导入，新的命令行入口应放到 `scripts/`。这个分层参考了 [SOAR-PKU/mTrack](https://github.com/SOAR-PKU/mTrack) 中 `mtrack/` 与 `scripts/` 的职责分离方式。
+旧脚本和 notebook 需要从 `mouse_behavior` 包导入；新的命令行入口应放到
+`scripts/`。迁移理由和命令对照见 [ADR-0002](docs/adr/0002-package-full-pipeline-and-remove-root-entrypoints.md)。
+这个分层参考了 [SOAR-PKU/mTrack](https://github.com/SOAR-PKU/mTrack) 中
+`mtrack/` 与 `scripts/` 的职责分离方式。
 
 历史版本由 Git commit/tag 保存，不再复制到根目录。回归测试确实需要的两份 v1.38 旧实现已缩减为 `tests/regression/fixtures/legacy_v138/` 夹具；清理决策见 [ADR-0001](docs/adr/0001-use-git-history-instead-of-copied-version-trees.md)。视频、缓存、权重和生成结果由 `.gitignore` 排除；如果确认拥有发布权，模型权重再作为单独的 GitHub Release 附件发布。
 
@@ -292,6 +290,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 当前脚本默认只做行为和接触分析，不触发四类裁剪，也不会触发渲染。若需要兼容旧流程的四类原始片段，显式增加 `-ExtractFourClassClips`。
 
+### 6.4 完整多阶段管线
+
+完整管线已经从根目录脚本迁入正式包。其额外扩展模块
+`disk_sequence_guard`、`pose_quality_recovery` 和 `mask_cluster_reid` 仍需由
+运行环境提供；缺失扩展不会阻止查看 `--help`，但在对应完整管线功能首次使用时
+会给出明确错误。入口和原有参数保持一致：
+
+```powershell
+python .\scripts\run_full_behavior_pipeline.py `
+  --video "D:\data\part_001.mp4" `
+  --model ".\weights\best.pt" `
+  --config ".\mouse_chase_attack_config.yaml" `
+  --output ".\outputs\full_pipeline" `
+  --stage stage1
+```
+
+安装 package 后也可以使用：
+
+```powershell
+mouse-behavior-full --video ... --model ... --config ... --output ...
+```
+
 ## 7. 兼容性的四类原始视频裁剪
 
 如果事件 CSV 已经存在，可以只执行裁剪：
@@ -336,7 +356,7 @@ outputs/part_001/
 
 ## 9. 配置开关
 
-`configs/profiles/balanced.yaml` 是当前轻量路径的推荐默认 profile；它继承 `configs/default.yaml`，再由 default 继承根目录兼容配置。实验只需要在 `configs/experiments/` 或独立实验文件中覆盖差异：
+`configs/profiles/balanced.yaml` 是当前轻量路径的推荐默认 profile；它继承 `configs/default.yaml`，再由 default 继承仓库的完整配置。实验只需要在 `configs/experiments/` 或独立实验文件中覆盖差异：
 
 ```yaml
 lightweight_behavior_inference:

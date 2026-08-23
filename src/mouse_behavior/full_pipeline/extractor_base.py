@@ -46,15 +46,30 @@ import pandas as pd
 import yaml
 from tqdm import tqdm
 
-from disk_sequence_guard import (
-    DiskSequenceIdentityGuard,
-    choose_adaptive_thread_count,
-)
+from .dependencies import missing_dependency_callable
+
+try:
+    from disk_sequence_guard import (
+        DiskSequenceIdentityGuard,
+        choose_adaptive_thread_count,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "disk_sequence_guard":
+        raise
+    DiskSequenceIdentityGuard = missing_dependency_callable(
+        "disk_sequence_guard", "disk-sequence identity protection", exc
+    )
+    choose_adaptive_thread_count = missing_dependency_callable(
+        "disk_sequence_guard", "adaptive identity worker selection", exc
+    )
 
 try:
     from scipy.optimize import linear_sum_assignment
 except Exception:  # scipy不可用时使用贪心匹配回退
     linear_sum_assignment = None
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 # 模型关键点的严格索引顺序。名称按用户数据集中的显示名称保存。
@@ -7935,7 +7950,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path(__file__).with_name("behavior_config.yaml"),
+        default=PROJECT_ROOT / "behavior_config.yaml",
         help="YAML配置文件",
     )
     parser.add_argument("--device", default=None, help="覆盖配置中的设备，例如0、1或cpu")

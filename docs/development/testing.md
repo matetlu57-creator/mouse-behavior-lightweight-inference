@@ -18,6 +18,8 @@ Test responsibilities:
 - `tests/integration/`: cross-module pipeline tests;
 - `tests/regression/`: frozen-result and version comparison tests;
 - `tests/e2e/`: package and script CLI smoke tests;
+- logging tests use `caplog` to assert level and diagnostic context rather than
+  capturing production `print()` output;
 - fixture directories contain small synthetic or source-only frozen inputs,
   never videos, pose caches or model files.
 
