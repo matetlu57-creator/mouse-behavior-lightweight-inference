@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 mouse-behavior-lightweight = "mouse_behavior.lightweight_behavior_inference:main"
+mouse-behavior-full = "mouse_behavior.full_pipeline.high_recall:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -36,6 +37,10 @@ target-version = "py310"
 line-length = 100
 extend-exclude = [
     "tests/regression/fixtures/legacy_v138",
+    # The packaged full pipeline is a mechanically relocated, regression-tested
+    # legacy implementation.  Formatting it is a separate behavior-risking task.
+    "src/mouse_behavior/full_pipeline/extractor_base.py",
+    "src/mouse_behavior/full_pipeline/high_recall.py",
 ]
 
 [tool.ruff.lint]

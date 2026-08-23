@@ -1,9 +1,8 @@
-"""Helpers used by the temporary root-level compatibility modules.
+"""Private helper for package-local compatibility aliases.
 
-The project historically exposed its modules from the repository root.  The
-new source layout keeps those import paths working while the implementation
-lives under ``src/mouse_behavior``.  This file is intentionally private and
-is not part of the public analysis API.
+Repository-root Python shims are no longer supported.  This helper is retained
+only for aliases that live inside :mod:`mouse_behavior`, where traceback and
+packaging behavior remain predictable.
 """
 
 from __future__ import annotations

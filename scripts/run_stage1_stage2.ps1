@@ -13,7 +13,7 @@ if ([string]::IsNullOrWhiteSpace($Output)) { $Output = Join-Path $ProjectDir "ou
 if ([string]::IsNullOrWhiteSpace($Video)) { throw "Pass -Video with the input video path." }
 if (-not (Get-Command $Python -ErrorAction SilentlyContinue)) { throw "Python was not found: $Python" }
 
-$Script = Join-Path $ProjectDir "mouse_chase_attack_high_recall.py"
+$Script = Join-Path $ProjectDir "scripts\run_full_behavior_pipeline.py"
 $Model = Join-Path $ProjectDir "weights\best.pt"
 $Config = Join-Path $ProjectDir "mouse_chase_attack_config.yaml"
 

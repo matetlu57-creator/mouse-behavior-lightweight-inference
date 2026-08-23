@@ -18,11 +18,10 @@ tools/                    仓库检查和维护工具
 weights/、outputs/        本地模型和结果，不提交到 Git
 ```
 
-完整旧管线的 `mouse_chase_attack_high_recall.py` 和底层提取器暂时保留在根目录，是因为它们仍然承担旧安装器/回归测试的兼容入口，并且依赖仓库外的模块。新轻量路径的可复用部分已经放入 `src/mouse_behavior/`；根目录同名 `.py` 文件只是兼容导出层。
-
-Pose 缓存构建、北医验证、缓存重跑、阈值校准和阈值扫描的旧根目录 CLI 包装器
-已经移除；请始终从 `scripts/` 调用对应入口。根目录剩余 Python 文件只服务于
-完整旧管线或仍被旧导入路径依赖的兼容层，不是新功能的开发位置。
+完整旧管线位于 `src/mouse_behavior/full_pipeline/`，轻量路径和共享算法也统一
+位于 `src/mouse_behavior/`。所有命令从 `scripts/`、`python -m` 或安装后的
+console entry point 启动；仓库根目录禁止 Python 入口文件。历史顶层导入名称
+需要迁移到 `mouse_behavior.*` 包路径，具体映射见 ADR-0002。
 
 ## 本地开发命令
 
@@ -74,7 +73,17 @@ git commit -m "refactor: separate reusable modules and scripts"
 git push -u origin feat/short-description
 ```
 
-如果需要同时试验两个互不影响的方向，可以使用 `git worktree` 建立第二个工作目录；不要把第二个版本复制进当前仓库根目录。提交前先确认 `git status`，不要把本地视频、缓存、模型和分析结果加入提交。
+如果需要同时试验两个互不影响的方向，使用仓库外 worktree；不要把第二个
+版本复制进当前仓库根目录：
+
+```powershell
+git fetch origin main
+git worktree add -b feat/another-direction `
+  ..\mouse_behavior_another_direction origin/main
+```
+
+完成并合并后，先确认 worktree 没有未提交文件，再执行
+`git worktree remove <path>`。提交前不要把本地视频、缓存、模型和分析结果加入提交。
 
 ## 给 Codex/AI 的可维护代码提示词
 

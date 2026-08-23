@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import io
 from dataclasses import asdict
@@ -16,8 +17,6 @@ import pandas as pd
 
 __test__ = False
 ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 ORIGINAL = Path(__file__).resolve().parent / "fixtures" / "legacy_v138"
 
 
@@ -75,11 +74,15 @@ def load_modules():
     old_base = load_module(
         "base_original_for_test", ORIGINAL / "mouse_chase_attack_extractor_base.py"
     )
-    new_base = load_module("base_optimized_for_test", ROOT / "mouse_chase_attack_extractor_base.py")
     sys.modules["mouse_chase_attack_extractor_base"] = old_base
     old_main = load_module("main_original_for_test", ORIGINAL / "mouse_chase_attack_high_recall.py")
-    sys.modules["mouse_chase_attack_extractor_base"] = new_base
-    new_main = load_module("main_optimized_for_test", ROOT / "mouse_chase_attack_high_recall.py")
+    # Other tests may have imported the package before these controlled stubs
+    # were installed. Reload both modules so this regression is independent of
+    # pytest collection/execution order and always exercises the same fixtures.
+    new_base = importlib.reload(
+        importlib.import_module("mouse_behavior.full_pipeline.extractor_base")
+    )
+    new_main = importlib.reload(importlib.import_module("mouse_behavior.full_pipeline.high_recall"))
     return old_base, new_base, old_main, new_main
 
 

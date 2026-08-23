@@ -30,6 +30,8 @@ input video + completed Pose cache
 - `io/` defines canonical run-directory naming, CSV writing and arena-boundary
   persistence.
 - `scripts/` contains thin command-line and validation entry points.
+- `full_pipeline/` contains the packaged detector/identity/full-video pipeline;
+  importing `mouse_behavior.full_pipeline` does not load heavy dependencies.
 - `tools/` contains repository and development checks.
 - `tests/regression/fixtures/` contains only the minimal frozen legacy code
   required by a regression; all other historical versions live in Git.
@@ -45,5 +47,8 @@ transitions live in `behavior/standard_evidence.py` and
 
 The cage-boundary facade follows the same rule: learning is in
 `preprocessing/arena_learning.py`, and JSON/PNG/video audit output is in
-`io/arena_boundary.py`. The maintained CLI wrappers live under `scripts`;
-remaining root files are compatibility or full-pipeline entry points only.
+`io/arena_boundary.py`. Maintained CLI wrappers live under `scripts`; the
+repository root contains no Python modules or entry points. The full pipeline
+is invoked through `scripts/run_full_behavior_pipeline.py`,
+`python -m mouse_behavior.full_pipeline`, or the installed
+`mouse-behavior-full` command.

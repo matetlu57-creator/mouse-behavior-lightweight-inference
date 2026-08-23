@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$ProjectDir = "",
+    [string]$Python = "python",
+    [switch]$Editable,
     [switch]$InstallBundledConfig
 )
 
@@ -8,39 +10,24 @@ $ErrorActionPreference = "Stop"
 $PackageDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($ProjectDir)) { $ProjectDir = $PackageDir }
 $ProjectDir = (Resolve-Path $ProjectDir).Path
-$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$BackupDir = Join-Path $ProjectDir "backup_before_v1.43_$Timestamp"
-New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
+if (-not (Get-Command $Python -ErrorAction SilentlyContinue)) { throw "Python was not found: $Python" }
+if (-not (Test-Path -LiteralPath (Join-Path $ProjectDir "pyproject.toml"))) {
+    throw "Not a package source tree: $ProjectDir"
+}
 
-$Files = @(
-    "mouse_chase_attack_high_recall.py",
-    "mouse_chase_attack_extractor_base.py",
-    "mask_trigger_controller.py",
-    "nvenc_video_writer.py",
-    "standard_behavior_engine.py"
-)
+$InstallArgs = @("-m", "pip", "install")
+if ($Editable) { $InstallArgs += "-e" }
+$InstallArgs += $ProjectDir
+& $Python @InstallArgs
+if ($LASTEXITCODE -ne 0) { throw "Package installation failed with exit code $LASTEXITCODE" }
+
+& $Python -c "import mouse_behavior; import mouse_behavior.full_pipeline"
+if ($LASTEXITCODE -ne 0) { throw "Installed package import verification failed" }
+
 if ($InstallBundledConfig) {
-    $Files += "mouse_chase_attack_config.yaml"
+    Write-Warning "Configuration is no longer copied into another source tree; use configs/ or pass --config explicitly."
 }
 
-foreach ($Name in $Files) {
-    $Source = Join-Path $PackageDir $Name
-    $Target = Join-Path $ProjectDir $Name
-    if (-not (Test-Path -LiteralPath $Source)) { throw "Package file is missing: $Source" }
-    if (Test-Path -LiteralPath $Target) { Copy-Item -LiteralPath $Target -Destination (Join-Path $BackupDir $Name) -Force }
-    Copy-Item -LiteralPath $Source -Destination $Target -Force
-}
-
-$CompileFiles = @(
-    (Join-Path $ProjectDir "mouse_chase_attack_high_recall.py"),
-    (Join-Path $ProjectDir "mouse_chase_attack_extractor_base.py"),
-    (Join-Path $ProjectDir "mask_trigger_controller.py"),
-    (Join-Path $ProjectDir "nvenc_video_writer.py"),
-    (Join-Path $ProjectDir "standard_behavior_engine.py")
-)
-& python -m py_compile @CompileFiles
-if ($LASTEXITCODE -ne 0) { throw "Python syntax validation failed; backup: $BackupDir" }
-
-Write-Host ("v1.43 Standard Behavior Engine installation completed. Backup: " + $BackupDir)
-Write-Host "The existing project YAML is preserved by default."
-Write-Host "Use -InstallBundledConfig to also install the bundled YAML configuration."
+Write-Host "Mouse behavior package installation completed."
+Write-Host "Lightweight CLI: mouse-behavior-lightweight"
+Write-Host "Full pipeline CLI: mouse-behavior-full"

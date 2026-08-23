@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import copy
+import importlib
 from pathlib import Path
-import importlib.util
-import sys
 
 import numpy as np
 import pandas as pd
@@ -13,13 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def load_engine():
-    path = ROOT / "standard_behavior_engine.py"
-    spec = importlib.util.spec_from_file_location("standard_behavior_engine_test", path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("mouse_behavior.standard_behavior_engine")
 
 
 def config():

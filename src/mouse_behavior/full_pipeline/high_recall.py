@@ -69,13 +69,28 @@ try:
 except Exception:
     _hungarian_assignment = None
 
-import mouse_chase_attack_extractor_base as base
-import pose_quality_recovery as pose_recovery
-import mask_cluster_reid as mask_reid
-import adaptive_arena_boundary as arena_boundary
-import mask_trigger_controller
-import nvenc_video_writer
-import standard_behavior_engine
+from . import extractor_base as base
+from .dependencies import MissingDependencyModule
+from .. import adaptive_arena_boundary as arena_boundary
+from .. import mask_trigger_controller, nvenc_video_writer, standard_behavior_engine
+
+try:
+    import pose_quality_recovery as pose_recovery
+except ModuleNotFoundError as exc:
+    if exc.name != "pose_quality_recovery":
+        raise
+    pose_recovery = MissingDependencyModule(
+        "pose_quality_recovery", "pose recovery and temporal keypoint repair", exc
+    )
+
+try:
+    import mask_cluster_reid as mask_reid
+except ModuleNotFoundError as exc:
+    if exc.name != "mask_cluster_reid":
+        raise
+    mask_reid = MissingDependencyModule(
+        "mask_cluster_reid", "instance-mask extraction and cluster ReID", exc
+    )
 
 
 _REQUIRED_BASE_API = (
@@ -90,7 +105,7 @@ _REQUIRED_BASE_API = (
 _missing_base_api = [name for name in _REQUIRED_BASE_API if not hasattr(base, name)]
 if _missing_base_api:
     raise RuntimeError(
-        "主程序与 mouse_chase_attack_extractor_base.py 版本不一致，缺少接口："
+        "主程序与 mouse_behavior.full_pipeline.extractor_base 版本不一致，缺少接口："
         + ", ".join(_missing_base_api)
         + f"。当前加载的底层文件：{getattr(base, '__file__', 'unknown')}。"
         + "请同时替换完整代码包中的主程序和底层模块。"
@@ -108,7 +123,7 @@ PROGRAM_VERSION = "1.43.0-standard-behavior-engine"
 # Server layout: code is uploaded to /NVme1/zhaojun/projects and data lives
 # beside it in datasets/, outputs/ and checkpoints/.  The environment variable
 # keeps the package relocatable while retaining the requested data-disk default.
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parents[3]
 DATA_ROOT = Path(os.environ.get("MOUSE_BEHAVIOR_DATA_ROOT", "/NVme1/zhaojun"))
 DEFAULT_CONFIG = PROJECT_DIR / "mouse_chase_attack_config.yaml"
 DEFAULT_MODEL = Path(
@@ -8132,7 +8147,7 @@ def _resolve_local_resource(value: Any) -> Path:
     path = Path(str(value))
     if path.is_absolute():
         return path
-    return Path(__file__).resolve().parent / path
+    return PROJECT_DIR / path
 
 
 def _bbox_area(box: np.ndarray) -> float:
@@ -9440,7 +9455,7 @@ def process_video(
         if reuse_value:
             reuse_path = Path(reuse_value)
             if not reuse_path.is_absolute():
-                reuse_path = Path(__file__).resolve().parent / reuse_path
+                reuse_path = PROJECT_DIR / reuse_path
             adaptive_arena_result = arena_boundary.load_boundary_json(
                 reuse_path,
                 width=width,
@@ -9843,7 +9858,7 @@ def process_video(
     tracker_value = str(model_cfg.get("tracker", "bytetrack_mouse20.yaml"))
     tracker_candidate = Path(tracker_value)
     if not tracker_candidate.is_absolute():
-        local_tracker = Path(__file__).resolve().parent / tracker_candidate
+        local_tracker = PROJECT_DIR / tracker_candidate
         tracker_path = str(local_tracker if local_tracker.exists() else tracker_value)
     else:
         tracker_path = str(tracker_candidate)
@@ -12057,7 +12072,7 @@ def run_lightweight_behavior_inference(
     pipeline.  This entry point simply does not construct or call those
     components while ``lightweight_behavior_inference.enabled`` is true.
     """
-    import lightweight_behavior_inference as lightweight_behavior
+    from .. import lightweight_behavior_inference as lightweight_behavior
 
     video_path = Path(video_path).resolve()
     model_path = Path(model_path).resolve()
@@ -12487,13 +12502,17 @@ def main(forced_stage: Optional[str] = None) -> int:
     if forced_stage is not None:
         args.stage = str(forced_stage)
     base.setup_logging(args.verbose)
-    print(f"程序版本：{PROGRAM_VERSION}")
-    print(f"底层模块：{getattr(base, 'BASE_MODULE_VERSION', 'unknown')} | {Path(base.__file__).resolve()}")
-    print("关键点顺序：" + " -> ".join(KEYPOINT_NAMES))
-    print(f"使用模型：{args.model}")
-    print(f"输入视频：{args.video}")
-    print(f"输出目录：{args.output}")
-    print(f"运行阶段：{args.stage}")
+    logging.info("程序版本：%s", PROGRAM_VERSION)
+    logging.info(
+        "底层模块：%s | %s",
+        getattr(base, "BASE_MODULE_VERSION", "unknown"),
+        Path(base.__file__).resolve(),
+    )
+    logging.info("关键点顺序：%s", " -> ".join(KEYPOINT_NAMES))
+    logging.info("使用模型：%s", args.model)
+    logging.info("输入视频：%s", args.video)
+    logging.info("输出目录：%s", args.output)
+    logging.info("运行阶段：%s", args.stage)
     try:
         config_path = resolve_runtime_path(args.config)
         config = load_yaml(config_path)

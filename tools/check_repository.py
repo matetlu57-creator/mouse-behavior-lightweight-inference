@@ -44,7 +44,9 @@ REQUIRED_PATHS = (
     "src/mouse_behavior",
     "scripts",
     "scripts/run_quality.py",
+    "scripts/run_full_behavior_pipeline.py",
     "scripts/validate_repository.py",
+    "src/mouse_behavior/full_pipeline",
     "tests",
     "tests/unit",
     "tests/integration",
@@ -73,17 +75,7 @@ OBSOLETE_ROOT_FILES = {
     "V1.43_STANDARD_BEHAVIOR_ENGINE.md",
     "fast_video_analysis_v124.yaml",
 }
-ALLOWED_ROOT_PYTHON = {
-    "adaptive_arena_boundary.py",
-    "annotation_website_export.py",
-    "lightweight_behavior_inference.py",
-    "lightweight_cache_behavior_analysis.py",
-    "mask_trigger_controller.py",
-    "mouse_chase_attack_extractor_base.py",
-    "mouse_chase_attack_high_recall.py",
-    "nvenc_video_writer.py",
-    "standard_behavior_engine.py",
-}
+ALLOWED_ROOT_PYTHON: set[str] = set()
 PRIVATE_KEY_PATTERN = re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 TOKEN_PATTERNS = (
     re.compile(rb"\bgh[opusr]_[A-Za-z0-9]{20,}\b"),

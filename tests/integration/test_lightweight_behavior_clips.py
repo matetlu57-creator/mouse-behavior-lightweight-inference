@@ -1,26 +1,15 @@
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import json
-import sys
-from pathlib import Path
 
 import cv2
 import numpy as np
 import pandas as pd
 
 
-ROOT = Path(__file__).resolve().parents[2]
-
-
 def load_lightweight():
-    path = ROOT / "lightweight_behavior_inference.py"
-    spec = importlib.util.spec_from_file_location("lightweight_behavior_clip_test", path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("mouse_behavior.lightweight_behavior_inference")
 
 
 def test_behavior_clip_extractor_writes_one_directory_per_behavior(tmp_path):
