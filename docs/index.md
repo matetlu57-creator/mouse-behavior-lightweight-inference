@@ -9,10 +9,11 @@ docs/ 负责安装、配置、架构、算法、输出格式和开发流程。
 2. [安装与环境](installation.md)
 3. [配置说明](configuration.md)
 4. [仓库架构](architecture.md)
-5. [算法说明](algorithms.md)
-6. [输出格式](data_format.md)
-7. [测试与开发](development/testing.md)
-8. [代码审查与性能基线](code_review.md)
+5. [完整仓库结构说明](repository_structure.md)
+6. [算法说明](algorithms.md)
+7. [输出格式](data_format.md)
+8. [测试与开发](development/testing.md)
+9. [代码审查与性能基线](code_review.md)
 
 ## 目录职责
 
