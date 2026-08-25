@@ -30,6 +30,7 @@ def test_reusable_modules_live_in_package():
         "src/mouse_behavior/preprocessing/arena_learning.py",
         "src/mouse_behavior/tracking/cache.py",
         "src/mouse_behavior/io/arena_boundary.py",
+        "src/mouse_behavior/visualization/overlay.py",
         "src/mouse_behavior/visualization/rendering.py",
         "src/mouse_behavior/full_pipeline/extractor_base.py",
         "src/mouse_behavior/full_pipeline/high_recall.py",
