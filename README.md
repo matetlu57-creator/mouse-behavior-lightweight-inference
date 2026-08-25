@@ -17,10 +17,11 @@ Pose 逐帧缓存为输入，完成小鼠匹配、笼界范围、关键点几何
 1. [快速开始](docs/quickstart.md)
 2. [安装与环境](docs/installation.md)
 3. [仓库架构](docs/architecture.md)
-4. [算法说明](docs/algorithms.md)
-5. [输出格式](docs/data_format.md)
-6. [测试与开发](docs/development/testing.md)
-7. [贡献规范](CONTRIBUTING.md)
+4. [完整仓库结构说明](docs/repository_structure.md)
+5. [算法说明](docs/algorithms.md)
+6. [输出格式](docs/data_format.md)
+7. [测试与开发](docs/development/testing.md)
+8. [贡献规范](CONTRIBUTING.md)
 
 源码入口在 src/mouse_behavior/，命令行和批处理入口在 scripts/，配置在
 configs/。根目录不放新的 Python 模块或临时脚本；历史版本通过 Git branch、
