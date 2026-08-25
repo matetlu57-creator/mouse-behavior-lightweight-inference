@@ -1,45 +1,50 @@
 # 文档总索引
 
-这里是 GitHub 仓库的工程文档入口。根目录的 [README.md](../README.md) 负责
-五分钟项目概览；本目录负责可维护的安装、架构、配置、算法和开发流程。
+这里是项目的长期维护文档入口。根目录的 README.md 负责项目概览和最短运行路径；
+docs/ 负责安装、配置、架构、算法、输出格式和开发流程。
 
-## 第一次阅读
+## 推荐阅读顺序
 
-1. [安装与环境](installation.md)
-2. [快速运行](quickstart.md)
-3. [仓库架构](architecture.md)
-4. [配置继承和 profile](configuration.md)
-5. [数据、输出和隐私边界](data_format.md)
-6. [算法说明](algorithms.md)
+1. [快速开始](quickstart.md)
+2. [安装与环境](installation.md)
+3. [配置说明](configuration.md)
+4. [仓库架构](architecture.md)
+5. [算法说明](algorithms.md)
+6. [输出格式](data_format.md)
 7. [测试与开发](development/testing.md)
 8. [代码审查与性能基线](code_review.md)
 
-## GitHub 仓库结构
+## 目录职责
 
-```text
+~~~text
 src/mouse_behavior/   可复用 Python 模块和稳定接口
 scripts/              CLI、批处理、验证和校准入口
-configs/              default、profiles、experiments
-tests/                unit、integration、regression、e2e 和小型 fixtures
+configs/              default、profiles 和 experiments
+tests/                unit、integration、regression、e2e
 docs/                 用户文档和开发文档
-examples/             最小可运行 API/配置示例
-tools/                仓库边界检查和维护工具
+examples/             最小可运行 API 与配置示例
+tools/                仓库检查、构建检查和结果比较
 .github/              CI、Issue 模板和 PR 模板
-```
+~~~
 
-仓库根目录不包含 Python 模块或 CLI 包装器；正式实现统一在
-`src/mouse_behavior/`，仓库运行入口统一在 `scripts/`。历史源码和验证记录由
-Git commit/tag 管理；并行开发使用仓库外 worktree，不复制 `v2`、`final2`
-目录。仅回归测试所需的旧实现放在测试 fixture 中，迁移决策见
-[ADR-0002](adr/0002-package-full-pipeline-and-remove-root-entrypoints.md)。
+根目录不包含新的 Python 模块或命令行包装器。历史版本由 Git commit、branch 和
+tag 管理，并行开发使用仓库外 worktree；不要复制 v2、final2 或其他版本目录。
+只有回归测试必需的旧实现才保留在 tests/regression/fixtures/。
 
-## 开发入口
+## 常用入口
 
-- [CONTRIBUTING.md](../CONTRIBUTING.md)：Git workflow、logging、pytest 和 AI
-  协作提示词；
-- [配置目录说明](../configs/README.md)：profile 和实验配置规则；
-- [统一质量入口](../scripts/run_quality.py)：从 `.quality-gate.toml` 执行与 CI
-  一致的格式、lint、类型、测试、覆盖率和构建检查；
-- [仓库检查工具](../tools/check_repository.py)：拒绝把视频、权重、缓存、
-  大文件、凭据风险和结果文件加入 tracked 文件；
-- [GitHub Actions](../.github/workflows/test.yml)：每次 push/PR 执行完整 CI profile。
+- [贡献规范](../CONTRIBUTING.md)：branch、worktree、模块化、logging、pytest 和
+  AI 协作约定；
+- [配置说明](configuration.md)：默认配置、profile 和实验配置；
+- [统一质量门](../scripts/run_quality.py)：格式、lint、类型、测试、覆盖率和构建
+  检查的统一入口；
+- [仓库检查器](../scripts/validate_repository.py)：检查目录边界、敏感文件和大文件；
+- [GitHub Actions](../.github/workflows/test.yml)：push 和 pull request 的 CI。
+
+## 设计原则
+
+- 可复用逻辑进入 src/，脚本只负责入口编排；
+- 行为证据、显示上下文和网站导出边界明确区分；
+- 日志使用 Python logging，不在可复用模块中使用 print()；
+- 每次算法变更都要有 pytest 回归和真实样例验证记录；
+- 视频、缓存、模型权重和私人标注不进入普通 Git 历史。

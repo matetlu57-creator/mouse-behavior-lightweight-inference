@@ -1,48 +1,76 @@
-# Algorithms
+# 算法说明
 
-The lightweight path is a cache-based analysis path rather than a replacement
-for the full occlusion/ReID pipeline.
+轻量路径是基于缓存的行为分析路径，不是完整遮挡恢复和 ReID 管线的替代实现。
 
-1. Completed YOLO Pose detections are matched into lightweight tracks.
-2. Center, body, heading and pair kinematics are computed only for candidates
-   selected by distance/heading prefiltering and padded valuable-frame windows.
-3. Contact geometry is emitted independently from behavior labels.
-4. Standard chase/attack causal evidence is processed by the standard FSM.
-5. Individual, pair, contact and group channels run as parallel FSM regions.
-6. Events are exported with frame/time boundaries and provenance metadata.
+## 处理阶段
 
-The parallel FSM deliberately preserves the previous minimum-duration and
-short-gap semantics. Any change to thresholds or temporal gates requires a
-regression comparison against frozen event outputs.
+1. 读取已经完成的 YOLO Pose 缓存，并规范化帧、关键点、框和有效检测；
+2. 学习当前视频的小鼠笼子范围和像素到厘米的尺度；
+3. 使用距离、朝向和有效性预筛选有价值的候选鼠对；
+4. 只对候选时间窗计算 Pair 运动学、鼻体几何和 rolling features；
+5. 独立生成鼻头、鼻尾接触事件；
+6. 使用标准证据和标准 FSM 判断追逐、攻击；
+7. 使用并行 FSM 处理个体、社交、接触和群体行为；
+8. 对满足窄门槛的短攻击或短回避候选执行恢复；
+9. 输出事件 CSV、网站导入包、统计报告和渲染视频。
 
-## Maintained module boundaries
+## 行为判定边界
 
-Stable package facades and focused implementation modules are organized as
-follows:
+### 追逐和攻击
 
-| Responsibility | Maintained module |
-| --- | --- |
-| cache normalization and lightweight tracking | `src/mouse_behavior/tracking/cache.py` |
-| geometry and individual kinematics | `src/mouse_behavior/preprocessing/geometry.py`, `kinematics.py` |
-| candidate-pair filtering and pair metrics | `src/mouse_behavior/preprocessing/pair_features.py` |
-| standard continuous evidence | `src/mouse_behavior/behavior/standard_evidence.py` |
-| standard chase/attack transitions | `src/mouse_behavior/behavior/standard_fsm.py` |
-| contact and extended ethogram | `src/mouse_behavior/behavior/ethogram.py` |
-| candidate-pair orchestration | `src/mouse_behavior/behavior/pair_analysis.py` |
-| cage-boundary learning | `src/mouse_behavior/preprocessing/arena_learning.py` |
-| cage-boundary persistence and audit images | `src/mouse_behavior/io/arena_boundary.py` |
-| rendered videos and behavior clips | `src/mouse_behavior/visualization/rendering.py` |
-| full detector/identity/video pipeline | `src/mouse_behavior/full_pipeline/` |
+标准行为引擎只把 chase 和 attack 作为基础因果行为类别：
 
-No threshold, schema, CLI argument or output filename changes as part of the
-root-entry migration. Repository-root imports are intentionally retired;
-scripts and notebooks must import from `mouse_behavior` or use the maintained
-CLI entry points documented in ADR-0002.
+- 追逐需要持续的距离、速度、朝向和追随关系；
+- 攻击需要发起、接触、角色和目标反应等证据；
+- 攻击恢复分支还需要高分、接触几何、原始速度和冲击或反弹方向；
+- 普通鼻头或鼻尾接触不会自动升级为攻击。
 
-`parallel_behavior_fsm.enabled` is an execution switch. With the default
-`true`, individual, extended pair, contact and group regions use the temporal
-FSM exactly as described above. With `false`, those parallel-region events are
-not emitted; standard-engine chase/attack remain available because they own a
-separate causal FSM. The only currently supported mode is `active`. Unknown
-mode values fail during coordinator construction instead of being silently
-reported in metadata without affecting execution.
+渲染器根据 actor_id 和 target_id 分别显示主动方和被动方，不用整帧统一标签。
+
+### 个体、社交和群体行为
+
+- 个体行为使用每只小鼠的稳健速度和连续时间窗识别 running、walking、
+  stationary；
+- 社交行为使用鼠对距离变化、速度、追随和逃逸方向识别 together、approach、
+  avoidance；
+- 群体行为使用当前帧有效小鼠的邻域和局部连通分量识别 huddle、isolation；
+- 群体事件记录 member_ids 和 member_ids_at_peak，渲染和网站导出只使用真实
+  参与者。
+
+这些通道并行运行。一个小鼠可以在同一帧参与群体行为，而另一只小鼠显示个体
+行为；不能用一个全局群体标签覆盖所有 ID。
+
+## 短事件恢复
+
+普通 FSM 仍然保留最小持续时间和短间隙规则。对于北医示例中只有一到两帧但证据
+完整的行为，独立恢复分支可以输出短事件：
+
+- 短攻击：要求接触、攻击分数、动态证据、角色可信度、原始攻击者速度，以及
+  发起冲击或目标反应的一组方向条件；
+- 短回避：要求接近后的距离增加、目标逃逸方向、目标和攻击者速度，以及前置接近
+  证据；
+- 通过 event_recovery 区分普通 FSM 事件和恢复事件；
+- analysis_* 和 core_* 保存实际证据，start_frame 与 end_frame 只增加有限前后文
+  供渲染和切片使用。
+
+恢复规则只看轨迹和特征，不读取视频文件名或文件夹名。
+
+## 并行 FSM
+
+parallel_behavior_fsm.enabled 默认开启。个体、扩展鼠对、接触和群体行为各自
+使用独立区域，互不因为另一个区域已经触发而全局隐藏。标准追逐/攻击 FSM 具有
+独立的因果状态机，不受普通接触事件直接触发。
+
+当前唯一支持的执行模式是 active。关闭并行 FSM 时，标准追逐/攻击仍可用，但
+个体、扩展鼠对、接触和群体区域事件不会输出。
+
+## 验证边界
+
+北医样例验证目前是视频或文件夹级覆盖检查。覆盖率为 1.0 说明示例视频出现了
+期望标签，不代表逐帧 Precision、Recall、F1 或 actor/target 准确率。阈值变更后，
+必须同时运行：
+
+1. 相关单元测试和集成测试；
+2. 冻结输出或回归夹具比较；
+3. 北医示例覆盖验证；
+4. 有帧级标注时的 Precision、Recall、F1 和角色准确率评估。

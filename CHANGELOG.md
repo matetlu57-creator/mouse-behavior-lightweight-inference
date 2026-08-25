@@ -6,6 +6,13 @@ source of truth for historical versions.
 
 ## [Unreleased]
 
+- Refresh the GitHub-facing README and core documentation with one consistent
+  project overview, quick-start path, architecture guide, algorithm boundary,
+  output contract and troubleshooting flow. Process diagrams now use explicit
+  downward arrows instead of ambiguous horizontal dash pipelines.
+- Document short-event evidence and display-context fields, participant-aware
+  group labels, and the distinction between video-level Beiyi coverage and
+  frame-level accuracy metrics.
 - Move the complete detector/identity pipeline into
   `mouse_behavior.full_pipeline`, add maintained script/module/console entry
   points, and remove every repository-root Python compatibility file.
