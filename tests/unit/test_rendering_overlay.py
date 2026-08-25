@@ -6,6 +6,8 @@ from mouse_behavior.visualization.overlay import (
     build_mouse_overlays,
     build_panel_lines,
     draw_behavior_sidebar,
+    focus_behavior_name_zh,
+    normalize_focus_behavior,
     normalize_contact_events,
     sidebar_width_for_frame,
     select_display_events,
@@ -153,3 +155,30 @@ def test_sidebar_is_appended_without_changing_source_frame_dimensions() -> None:
     )
 
     assert rendered.shape == (1080, 2044 + sidebar_width_for_frame(2044, 1080), 3)
+
+
+def test_render_focus_is_external_display_context_and_persistent_heading() -> None:
+    assert normalize_focus_behavior("追逐-被追逐") == "chase"
+    assert normalize_focus_behavior("追逐/被追逐") == "chase"
+    assert normalize_focus_behavior("attack") == "attack"
+    assert focus_behavior_name_zh("avoidance") == "回避/被回避"
+
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    selected, layer = select_display_events([])
+    overlays = build_mouse_overlays(selected, layer, [0])
+    rendered = draw_behavior_sidebar(
+        frame,
+        frame_index=0,
+        total_frames=10,
+        fps=30.0,
+        active_event_count=0,
+        display_events=selected,
+        display_layer=layer,
+        mouse_overlays=overlays,
+        valid_ids=[0],
+        focus_behavior="attack",
+        focus_active=False,
+    )
+
+    assert rendered.shape[0] == 120
+    assert rendered.shape[1] > frame.shape[1]

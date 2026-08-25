@@ -73,6 +73,75 @@ def _confirmed_mask(
     return confirmed
 
 
+def _require_temporal_support(
+    candidate: np.ndarray,
+    support: np.ndarray,
+    *,
+    min_support_frames: int,
+    support_window_frames: int,
+) -> np.ndarray:
+    """Keep candidate frames only when nearby evidence supports the bout.
+
+    A single high score can be caused by a pose glitch or a contact geometry
+    spike.  This helper is intentionally local to one candidate pair and does
+    not invent positive frames: it only rejects isolated candidates.  The
+    caller may still use the normal FSM gap policy to join two supported
+    samples into one public event.
+    """
+
+    candidate_mask = np.asarray(candidate, dtype=bool)
+    support_mask = np.asarray(support, dtype=bool)
+    if candidate_mask.shape != support_mask.shape:
+        raise ValueError(
+            "candidate and support masks must have the same shape, "
+            f"got {candidate_mask.shape} and {support_mask.shape}"
+        )
+    minimum = max(int(min_support_frames), 1)
+    if minimum <= 1 or not candidate_mask.any():
+        return candidate_mask.copy()
+    radius = max(int(support_window_frames), 0)
+    cumulative = np.concatenate(([0], np.cumsum(support_mask.astype(np.int16))))
+    positions = np.arange(len(support_mask))
+    left = np.maximum(positions - radius, 0)
+    right = np.minimum(positions + radius + 1, len(support_mask))
+    counts = cumulative[right] - cumulative[left]
+    return candidate_mask & (counts >= minimum)
+
+
+def _expand_with_temporal_support(
+    candidate: np.ndarray,
+    support: np.ndarray,
+    *,
+    min_support_frames: int,
+    support_window_frames: int,
+) -> np.ndarray:
+    """Return a short supported bout without promoting isolated evidence.
+
+    ``candidate`` carries the causal signature.  ``support`` may contain
+    adjacent high-dynamic frames whose attack score is slightly below the
+    causal threshold.  Once a candidate has at least the required number of
+    support frames, those nearby support frames become the event's compact
+    core.  This recovers a two-frame attack bout while still rejecting a lone
+    spike and never reaching outside the same pair timeline.
+    """
+
+    candidate_mask = np.asarray(candidate, dtype=bool)
+    support_mask = np.asarray(support, dtype=bool)
+    reliable = _require_temporal_support(
+        candidate_mask,
+        support_mask,
+        min_support_frames=min_support_frames,
+        support_window_frames=support_window_frames,
+    )
+    expanded = np.zeros(candidate_mask.shape, dtype=bool)
+    radius = max(int(support_window_frames), 0)
+    for index in np.flatnonzero(reliable):
+        left = max(int(index) - radius, 0)
+        right = min(int(index) + radius + 1, len(expanded))
+        expanded[left:right] |= support_mask[left:right]
+    return expanded
+
+
 def _event_rows_from_mask(
     mask: np.ndarray,
     *,
@@ -251,6 +320,11 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
                 "min_target_turn_angle_deg": 25.0,
                 "min_target_nose_speed_cm_s": 12.0,
                 "min_role_confidence": 0.04,
+                # A confirmed attack must have at least two analyzed samples.
+                # A one-sample spike is retained only as diagnostic evidence,
+                # never as an attack event.
+                "min_confirmed_frames": 2,
+                "support_window_seconds": 0.20,
                 "min_duration_seconds": 0.033,
                 "fill_gap_seconds": 0.10,
                 "short_event_padding_seconds": 0.15,
@@ -262,6 +336,11 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
                     "min_raw_actor_speed_cm_s": 8.0,
                     "min_attack_evidence": 2,
                     "min_role_confidence": 0.04,
+                    "min_support_frames": 2,
+                    "support_window_seconds": 0.20,
+                    "min_support_attack_score": 0.70,
+                    "min_support_dynamic_score": 0.65,
+                    "min_support_raw_actor_speed_cm_s": 6.0,
                     "min_escape_alignment": 0.65,
                     "min_pursuit_alignment": 0.60,
                     "min_initiation_score": 0.85,
@@ -609,7 +688,24 @@ def _extended_short_clip_pair_events(
             )
         )
         attack_mask = impact_attack | rebound_attack
-        attack_min_duration_seconds = float(attack_cfg.get("min_duration_seconds", 0.08))
+        attack_min_confirmed_frames = max(
+            int(attack_cfg.get("min_confirmed_frames", 2)),
+            2,
+        )
+        attack_support_window_frames = max(
+            int(round(float(attack_cfg.get("support_window_seconds", 0.20)) * analysis_fps / 2.0)),
+            1,
+        )
+        attack_mask = _require_temporal_support(
+            attack_mask,
+            attack_mask,
+            min_support_frames=attack_min_confirmed_frames,
+            support_window_frames=attack_support_window_frames,
+        )
+        attack_min_duration_seconds = max(
+            float(attack_cfg.get("min_duration_seconds", 0.08)),
+            attack_min_confirmed_frames / max(analysis_fps, 1e-9),
+        )
         events.extend(
             _event_rows_from_mask(
                 attack_mask,
@@ -655,6 +751,35 @@ def _extended_short_clip_pair_events(
                 & (role_confidence >= float(short_cfg.get("min_role_confidence", 0.04)))
                 & (actor_raw_speed >= float(short_cfg.get("min_raw_actor_speed_cm_s", 8.0)))
             )
+            # A neighboring frame may have the same contact and dynamic
+            # evidence while its attack score is just below the causal gate.
+            # It can support a short bout, but it cannot open the bout by
+            # itself.  This is deliberately narrower than ordinary contact.
+            short_support_attack_score = float(short_cfg.get("min_support_attack_score", 0.70))
+            short_support_dynamic_score = float(
+                short_cfg.get(
+                    "min_support_dynamic_score",
+                    attack_cfg.get("min_dynamic_score", 0.78),
+                )
+            )
+            short_support_raw_actor_speed = float(
+                short_cfg.get(
+                    "min_support_raw_actor_speed_cm_s",
+                    max(float(short_cfg.get("min_raw_actor_speed_cm_s", 8.0)) - 2.0, 0.0),
+                )
+            )
+            short_attack_support = (
+                valid
+                & direction_known
+                & np.isfinite(distance)
+                & (distance <= float(short_cfg.get("max_distance_cm", 9.0)))
+                & contact
+                & (attack_score >= short_support_attack_score)
+                & (dynamic_score >= short_support_dynamic_score)
+                & (evidence_count >= float(short_cfg.get("min_attack_evidence", 3)))
+                & (role_confidence >= float(short_cfg.get("min_role_confidence", 0.04)))
+                & (actor_raw_speed >= short_support_raw_actor_speed)
+            )
             short_impact = (
                 (pursuit >= float(short_cfg.get("min_pursuit_alignment", 0.60)))
                 & (escape >= float(short_cfg.get("min_escape_alignment", 0.65)))
@@ -666,6 +791,36 @@ def _extended_short_clip_pair_events(
                 & (reaction >= float(short_cfg.get("min_reaction_score", 0.70)))
             )
             short_attack = short_attack_common & (short_impact | short_rebound)
+            short_min_support_frames = max(
+                int(
+                    short_cfg.get(
+                        "min_support_frames",
+                        attack_cfg.get("min_confirmed_frames", 2),
+                    )
+                ),
+                2,
+            )
+            short_support_window_frames = max(
+                int(
+                    round(
+                        float(
+                            short_cfg.get(
+                                "support_window_seconds",
+                                attack_cfg.get("support_window_seconds", 0.20),
+                            )
+                        )
+                        * analysis_fps
+                        / 2.0
+                    )
+                ),
+                1,
+            )
+            short_attack = _expand_with_temporal_support(
+                short_attack,
+                short_attack_support,
+                min_support_frames=short_min_support_frames,
+                support_window_frames=short_support_window_frames,
+            )
             confirmed_attack = _confirmed_mask(
                 attack_mask,
                 scope="pair",
@@ -691,7 +846,10 @@ def _extended_short_clip_pair_events(
                     actor_id=selected_actor,
                     target_id=selected_target,
                     pair_key=pair_key,
-                    min_duration_seconds=float(short_cfg.get("min_duration_seconds", 0.033)),
+                    min_duration_seconds=max(
+                        float(short_cfg.get("min_duration_seconds", 0.033)),
+                        short_min_support_frames / max(analysis_fps, 1e-9),
+                    ),
                     fill_gap_seconds=0.0,
                     short_event_padding_seconds=float(
                         attack_cfg.get("short_event_padding_seconds", 0.15)

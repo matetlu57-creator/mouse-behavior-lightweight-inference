@@ -1525,6 +1525,10 @@ extended_behavior:
       min_dynamic_score: 0.78
       min_context_frames: 1
       min_attack_evidence: 3
+      # A single analyzed frame is not a reliable attack event.  It may remain
+      # visible in diagnostics, but it cannot enter the behavior CSV or render.
+      min_confirmed_frames: 2
+      support_window_seconds: 0.20
       min_raw_actor_speed_cm_s: 8.0
       min_impact_pursuit_alignment: 0.55
       max_impact_target_escape_alignment: 0.10
@@ -1554,6 +1558,11 @@ extended_behavior:
         min_raw_actor_speed_cm_s: 8.0
         min_attack_evidence: 2
         min_role_confidence: 0.04
+        min_support_frames: 2
+        support_window_seconds: 0.20
+        min_support_attack_score: 0.70
+        min_support_dynamic_score: 0.65
+        min_support_raw_actor_speed_cm_s: 6.0
         min_escape_alignment: 0.65
         min_pursuit_alignment: 0.60
         min_initiation_score: 0.85

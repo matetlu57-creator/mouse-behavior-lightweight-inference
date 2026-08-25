@@ -32,6 +32,8 @@ from .overlay import (
     format_mouse_id,
     load_font,
     normalize_contact_events,
+    canonical_behavior,
+    normalize_focus_behavior,
     sidebar_width_for_frame,
     select_display_events,
 )
@@ -48,6 +50,7 @@ def render_behavior_video(
     max_frames: int | None = None,
     contact_events_path: Path | None = None,
     font_path: Path | None = None,
+    focus_behavior: str | None = None,
 ) -> Path:
     """Render exactly one annotated MP4 for one source video.
 
@@ -96,6 +99,7 @@ def render_behavior_video(
     if missing:
         raise ValueError(f"行为事件 CSV 缺少字段: {missing}")
     event_rows: list[dict[str, Any]] = events_df.to_dict("records")
+    normalized_focus = normalize_focus_behavior(focus_behavior)
     contact_path = contact_events_path or (events_path.parent / "lightweight_contact_events.csv")
     if contact_path.exists():
         contact_df = pd.read_csv(contact_path)
@@ -137,12 +141,22 @@ def render_behavior_video(
     sidebar_small_font = load_font(font_path, max(overlay_size - 1, 12))
 
     frame_index = 0
+    focus_evidence_frames = 0
     try:
         while frame_index < frame_limit:
             ok, frame = cap.read()
             if not ok:
                 break
             active_events = event_frame_map[frame_index]
+            focus_active = bool(
+                normalized_focus
+                and any(
+                    canonical_behavior(event.get("behavior")) == normalized_focus
+                    for event in active_events
+                )
+            )
+            if focus_active:
+                focus_evidence_frames += 1
             display_events, display_layer = select_display_events(active_events)
             valid_ids = [
                 logical_id
@@ -218,6 +232,8 @@ def render_behavior_video(
                 header_font=sidebar_header_font,
                 small_font=sidebar_small_font,
                 panel_width=sidebar_width,
+                focus_behavior=normalized_focus,
+                focus_active=focus_active,
             )
             writer.write(frame)
             frame_index += 1
@@ -240,6 +256,12 @@ def render_behavior_video(
         width + sidebar_width,
         height,
     )
+    if normalized_focus:
+        LOGGER.info(
+            "[render] focus=%s persistent_display_coverage=1.000 evidence_coverage=%.3f",
+            normalized_focus,
+            focus_evidence_frames / max(frame_index, 1),
+        )
     return output_path
 
 

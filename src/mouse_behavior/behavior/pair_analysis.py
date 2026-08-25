@@ -262,7 +262,32 @@ def _finalize_event_records_in_place(
     contact_events: list[dict[str, Any]],
     source_fps: float,
 ) -> None:
-    """Assign stable IDs and source-time fields without changing event order."""
+    """Finalize event records and reject unsupported one-frame attacks.
+
+    A one-frame attack can still be useful while debugging the feature matrix,
+    but it is not a reliable behavior event for a rendered video or an export.
+    The attack-specific temporal gate normally removes it earlier.  This final
+    safety net also covers legacy standard-FSM rows, which are produced by a
+    separate extractor and therefore cannot share the extended ethogram gate.
+    """
+
+    reliable_events: list[dict[str, Any]] = []
+    suppressed_single_frame_attacks = 0
+    for event in events:
+        behavior = str(event.get("behavior", "")).strip().lower()
+        if behavior == "attack":
+            start = int(event.get("analysis_start_frame", event.get("start_frame", 0)) or 0)
+            end = int(event.get("analysis_end_frame", event.get("end_frame", start)) or start)
+            if end <= start:
+                suppressed_single_frame_attacks += 1
+                continue
+        reliable_events.append(event)
+    events[:] = reliable_events
+    if suppressed_single_frame_attacks:
+        LOGGER.info(
+            "[behavior] suppressed %d unsupported one-frame attack event(s)",
+            suppressed_single_frame_attacks,
+        )
 
     for index, event in enumerate(
         sorted(

@@ -640,6 +640,14 @@ def main() -> int:
         help="render-only 的唯一 MP4 输出路径。",
     )
     parser.add_argument(
+        "--focus-behavior",
+        default=None,
+        help=(
+            "渲染复核时持续显示的重点行为，例如 chase、avoidance 或 attack；"
+            "只影响显示，不参与推理判定。"
+        ),
+    )
+    parser.add_argument(
         "--font-path",
         type=Path,
         default=None,
@@ -730,6 +738,7 @@ def main() -> int:
             expected_mice=max(int(args.expected_mice), 2),
             max_frames=args.max_frames,
             font_path=args.font_path,
+            focus_behavior=args.focus_behavior,
         )
         LOGGER.info("render_output=%s", render_output)
         return 0

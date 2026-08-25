@@ -40,6 +40,13 @@ DISPLAY_NAMES_ZH = {
     "nose_tail_contact": "鼻尾接触",
 }
 
+FOCUS_BEHAVIORS = frozenset({"chase", "avoidance", "attack"})
+FOCUS_NAMES_ZH = {
+    "chase": "追逐/被追逐",
+    "avoidance": "回避/被回避",
+    "attack": "攻击/被攻击",
+}
+
 ROLE_NAMES_ZH = {
     "approach": {"actor": "主动接近", "target": "被接近", "pair": "接近"},
     "chase": {"actor": "追逐", "target": "被追逐", "pair": "追逐"},
@@ -128,6 +135,36 @@ def canonical_behavior(value: Any) -> str:
 
     behavior = str(value or "").strip().lower()
     return CONTACT_ALIASES.get(behavior, behavior)
+
+
+def normalize_focus_behavior(value: Any) -> str | None:
+    """Normalize an externally supplied render focus without changing inference.
+
+    The Beiyi validation manifest may provide the expected folder label to the
+    renderer.  This value controls only the persistent review heading; event
+    CSVs and behavior decisions never read it.
+    """
+
+    aliases = {
+        "追逐": "chase",
+        "追逐/被追逐": "chase",
+        "追逐-被追逐": "chase",
+        "回避": "avoidance",
+        "回避/被回避": "avoidance",
+        "回避-被回避": "avoidance",
+        "攻击": "attack",
+        "攻击行为": "attack",
+    }
+    raw = str(value or "").strip().lower()
+    behavior = aliases.get(raw, canonical_behavior(raw))
+    return behavior if behavior in FOCUS_BEHAVIORS else None
+
+
+def focus_behavior_name_zh(value: Any) -> str:
+    """Return the stable Chinese display name for a render focus."""
+
+    behavior = normalize_focus_behavior(value)
+    return FOCUS_NAMES_ZH.get(behavior or "", str(value or "重点行为"))
 
 
 def event_category(event: Mapping[str, Any]) -> str | None:
@@ -541,6 +578,8 @@ def draw_behavior_sidebar(
     header_font: Any | None = None,
     small_font: Any | None = None,
     panel_width: int | None = None,
+    focus_behavior: str | None = None,
+    focus_active: bool = False,
 ) -> np.ndarray:
     """Append a separate ID-to-behavior panel to the right of ``frame``.
 
@@ -562,9 +601,13 @@ def draw_behavior_sidebar(
     draw = ImageDraw.Draw(panel)
     padding = max(12, int(round(sidebar_width * 0.035)))
 
+    normalized_focus = normalize_focus_behavior(focus_behavior)
+    title = "小鼠 ID 与当前行为"
+    if normalized_focus:
+        title = f"{title}｜重点：{focus_behavior_name_zh(normalized_focus)}"
     draw.text(
         (padding, 14),
-        "小鼠 ID 与当前行为",
+        _truncate(title, 31),
         font=title_font,
         fill=(245, 245, 245),
     )
@@ -579,8 +622,19 @@ def draw_behavior_sidebar(
         font=detail_font,
         fill=(220, 220, 220),
     )
+    focus_status_height = 0
+    if normalized_focus:
+        focus_status = "当前证据" if bool(focus_active) else "当前帧无证据，保留重点关注"
+        focus_y = 14 + title_size + detail_size + 11
+        draw.text(
+            (padding, focus_y),
+            _truncate(f"重点行为状态：{focus_status}", 27),
+            font=detail_font,
+            fill=(255, 190, 80) if not focus_active else (100, 235, 145),
+        )
+        focus_status_height = detail_size + 5
     summary_lines = build_panel_lines(display_events, display_layer)
-    summary_y = 14 + title_size + detail_size + 15
+    summary_y = 14 + title_size + detail_size + 15 + focus_status_height
     for index, line in enumerate(summary_lines[:2]):
         draw.text(
             (padding, summary_y + index * (detail_size + 4)),
@@ -648,9 +702,11 @@ __all__ = [
     "draw_text_overlay",
     "event_category",
     "event_summary",
+    "focus_behavior_name_zh",
     "font_size_for_frame",
     "format_mouse_id",
     "load_font",
+    "normalize_focus_behavior",
     "normalize_contact_events",
     "pair_ids",
     "sidebar_width_for_frame",

@@ -90,6 +90,15 @@ YOLO Pose 缓存时，应先使用上游缓存生成脚本完成预推理。
 恢复分支只接受距离、朝向、速度、接触几何、角色和事件分数共同满足条件的
 短候选，不使用视频名称判断行为。
 
+攻击事件还有一个跨帧可靠性门：至少需要两个分析样本在短时间窗口内共同支持，
+单帧攻击候选不会进入行为 CSV，也不会在渲染框上显示为攻击。单帧候选仍可在
+调试特征中定位原因。
+
+北医样例渲染可以额外指定重点行为。例如 `--focus-behavior attack` 会在右侧面板
+持续显示“攻击/被攻击”重点，便于检查整段视频；这个重点标签是渲染上下文，不能
+替代实际事件证据。渲染日志分别报告 `persistent_display_coverage` 和
+`evidence_coverage`，前者在指定重点时为整段视频，后者仍由真实事件区间计算。
+
 ## 安装
 
 项目要求 Python 3.10 或更高版本。建议使用项目自己的虚拟环境：
@@ -129,7 +138,15 @@ python .\scripts\run_lightweight_behavior_inference.py --video "D:\data\part_001
 ~~~
 
 渲染视频会显示小鼠框、ID、七点骨架、当前行为和右侧行为面板。中文字体可自动
-查找，也可以使用 --font-path 指定字体。
+查找，也可以使用 --font-path 指定字体。北医三类重点样例可以在渲染时追加：
+
+~~~powershell
+python .\scripts\run_lightweight_behavior_inference.py --video "D:\data\attack.mp4" --yolo-cache "D:\cache\attack\yolo_precompute" --output-dir ".\outputs\attack" --render-only --events ".\outputs\attack\lightweight_behavior_events.csv" --render-output ".\outputs\attack\攻击重点渲染.mp4" --focus-behavior attack
+~~~
+
+`focus-behavior` 只控制渲染复核的持续重点，不会根据视频名或目录名生成行为。
+批量北医渲染脚本会把验证清单中的期望行为传给渲染器，因此重点标题会和样例
+文件夹保持一致，但推理 CSV 仍然只来自轨迹、几何和时序证据。
 
 ### 运行完整管线
 
