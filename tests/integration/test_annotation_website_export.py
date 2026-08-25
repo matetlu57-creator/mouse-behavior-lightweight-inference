@@ -61,6 +61,7 @@ def test_website_names_ranges_and_mouse_cardinality():
             "pair_key": "group",
             "actor_id": -1,
             "target_id": -1,
+            "member_ids": "[0, 2, 3]",
             "start_frame": 0,
             "end_frame": 5,
             "candidate_level": "extended",
@@ -103,7 +104,7 @@ def test_website_names_ranges_and_mouse_cardinality():
     assert by_behavior["攻击行为"]["start_time"] == 0.5
     assert by_behavior["攻击行为"]["end_time"] == 1.5
     assert by_behavior["静止"]["mouse_ids"] == [3]
-    assert len(by_behavior["扎堆行为"]["mouse_ids"]) >= 2
+    assert by_behavior["扎堆行为"]["mouse_ids"] == [0, 2, 3]
     assert by_behavior["孤立行为"]["mouse_ids"] == [3]
     assert by_behavior["鼻头接触"]["mouse_ids"] == [0, 1]
     assert by_behavior["鼻尾接触"]["mouse_ids"] == [0, 1]

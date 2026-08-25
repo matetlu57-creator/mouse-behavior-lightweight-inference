@@ -1501,6 +1501,10 @@ extended_behavior:
     approach_min_actor_speed_cm_s: 3.0
     approach_allow_together_transition: true
     approach_min_duration_seconds: 0.10
+    # Short-event context extends only the public display/export interval;
+    # analysis_start/end remain the evidence frames.
+    approach_short_event_padding_seconds: 0.10
+    approach_short_event_max_duration_seconds: 0.35
     chase_fallback:
       enabled: true
       max_distance_cm: 12.0
@@ -1513,6 +1517,8 @@ extended_behavior:
       min_role_confidence: 0.04
       min_duration_seconds: 0.25
       fill_gap_seconds: 0.15
+      short_event_padding_seconds: 0.10
+      short_event_max_duration_seconds: 0.60
     attack_fallback:
       enabled: true
       max_distance_cm: 7.6
@@ -1537,6 +1543,23 @@ extended_behavior:
       min_role_confidence: 0.04
       min_duration_seconds: 0.033
       fill_gap_seconds: 0.10
+      short_event_padding_seconds: 0.15
+      short_event_max_duration_seconds: 0.40
+      # Narrow recovery for a high-evidence attack that is shorter than the
+      # causal FSM confirmation window.
+      short_recovery:
+        enabled: true
+        min_attack_score: 0.80
+        max_distance_cm: 9.0
+        min_raw_actor_speed_cm_s: 8.0
+        min_attack_evidence: 2
+        min_role_confidence: 0.04
+        min_escape_alignment: 0.65
+        min_pursuit_alignment: 0.60
+        min_initiation_score: 0.85
+        max_rebound_pursuit_alignment: 0.10
+        min_reaction_score: 0.70
+        min_duration_seconds: 0.033
     avoidance_min_target_escape_alignment: 0.45
     avoidance_min_target_speed_cm_s: 1.5
     avoidance_min_distance_increase_cm: 1.0
@@ -1548,6 +1571,18 @@ extended_behavior:
     avoidance_min_pursuit_alignment: 0.35
     avoidance_min_prior_distance_drop_cm: 0.50
     avoidance_min_duration_seconds: 0.10
+    avoidance_short_event_padding_seconds: 0.10
+    avoidance_short_event_max_duration_seconds: 0.35
+    # A one-frame escape is accepted only with close context and clear
+    # target-escape geometry; arbitrary separation remains rejected.
+    avoidance_short_recovery:
+      enabled: true
+      max_distance_cm: 10.0
+      min_target_escape_alignment: 0.70
+      min_target_speed_cm_s: 2.0
+      min_actor_speed_cm_s: 2.0
+      min_distance_increase_cm: 1.0
+      min_duration_seconds: 0.033
     pair_fill_gap_seconds: 0.15
   group:
     huddle_distance_cm: 9.0
