@@ -90,6 +90,41 @@ def _pair_ids(pair_key: Any) -> list[int]:
     return sorted({int(match.group(1)), int(match.group(2))})
 
 
+def _member_ids(value: Any) -> list[int]:
+    """Parse event-level group members from native or CSV round-trip values."""
+
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if parsed is not None and parsed != value:
+            return _member_ids(parsed)
+        values: Any = re.findall(r"-?\d+", text)
+    elif isinstance(value, (list, tuple, set)):
+        values = value
+    elif hasattr(value, "tolist"):
+        values = value.tolist()
+        if not isinstance(values, (list, tuple, set)):
+            values = [values]
+    else:
+        values = [value]
+    result: set[int] = set()
+    for item in values:
+        try:
+            member_id = int(item)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if member_id >= 0:
+            result.add(member_id)
+    return sorted(result)
+
+
 def _valid_track_ids(
     tracks: Mapping[str, np.ndarray], start_frame: int, end_frame: int
 ) -> set[int]:
@@ -210,12 +245,21 @@ def _event_mouse_ids(
     end = _json_int(event.get("end_frame"), default=start)
     visible = _valid_track_ids(tracks, start, end)
     if behavior == "huddle":
+        explicit_members = sorted(
+            set(_member_ids(event.get("member_ids")))
+            | set(_member_ids(event.get("member_ids_at_peak")))
+        )
+        if len(explicit_members) >= 2:
+            return [track_id for track_id in explicit_members if track_id in visible]
         return [
             track_id
             for track_id in _huddle_ids(tracks, start, end, huddle_distance_cm, cm_per_pixel)
             if track_id in visible
         ]
     if behavior == "isolation":
+        peak_members = _member_ids(event.get("member_ids_at_peak"))
+        if len(peak_members) == 1 and peak_members[0] in visible:
+            return peak_members
         return [
             track_id
             for track_id in _isolation_id(tracks, start, end, cm_per_pixel)

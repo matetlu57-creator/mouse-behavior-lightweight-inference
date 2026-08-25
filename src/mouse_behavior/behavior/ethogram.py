@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,63 @@ from ..preprocessing.constants import BEHAVIOR_NAMES_ZH
 from ..utils.rolling import rolling_sum as _rolling_sum
 
 LOGGER = logging.getLogger("mouse_behavior.lightweight_behavior_inference")
+
+
+def _frame_member_ids(
+    member_ids_by_frame: Sequence[Iterable[int]] | Mapping[int, Iterable[int]] | None,
+    frame: int,
+) -> tuple[int, ...]:
+    """Read stable group participants from a frame-indexed membership source."""
+
+    if member_ids_by_frame is None:
+        return ()
+    if isinstance(member_ids_by_frame, Mapping):
+        values = member_ids_by_frame.get(int(frame), ())
+    elif 0 <= int(frame) < len(member_ids_by_frame):
+        values = member_ids_by_frame[int(frame)]
+    else:
+        values = ()
+    result: set[int] = set()
+    iterable = () if values is None else values
+    for value in iterable:
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if number >= 0:
+            result.add(number)
+    return tuple(sorted(result))
+
+
+def _confirmed_mask(
+    mask: np.ndarray,
+    *,
+    scope: str,
+    region_id: str,
+    behavior: str,
+    min_duration_frames: int,
+    max_gap_frames: int,
+    fsm_coordinator: ParallelBehaviorFSM,
+) -> np.ndarray:
+    """Return the frames that the regular FSM would have emitted.
+
+    Short-recovery channels need to distinguish a one-frame candidate from a
+    normal confirmed event.  Reusing the same coordinator keeps the recovery
+    path subject to the global FSM enable switch and the exact gap policy.
+    """
+
+    result = fsm_coordinator.run_boolean_region(
+        scope=scope,
+        region_id=f"{region_id}:confirmed",
+        behavior=f"{behavior}:confirmed",
+        mask=mask,
+        min_duration_frames=min_duration_frames,
+        max_gap_frames=max_gap_frames,
+    )
+    confirmed = np.zeros(np.asarray(mask, dtype=bool).shape, dtype=bool)
+    for span in result.spans:
+        confirmed[int(span.start) : int(span.end) + 1] = True
+    return confirmed
 
 
 def _event_rows_from_mask(
@@ -32,6 +89,10 @@ def _event_rows_from_mask(
     fill_gap_seconds: float = 0.10,
     event_scope: str = "pair",
     fsm_coordinator: ParallelBehaviorFSM | None = None,
+    member_ids_by_frame: Sequence[Iterable[int]] | Mapping[int, Iterable[int]] | None = None,
+    short_event_padding_seconds: float = 0.0,
+    short_event_max_duration_seconds: float = 0.0,
+    event_recovery: str | None = None,
 ) -> list[dict[str, Any]]:
     mask = np.asarray(mask, dtype=bool)
     if mask.size == 0:
@@ -63,36 +124,67 @@ def _event_rows_from_mask(
         peak = start + peak_offset
         actor = int(actor_values[peak]) if actor_values.size > peak else -1
         target = int(target_values[peak]) if target_values.size > peak else -1
-        source_start = int(start * sample_stride)
+        core_source_start = int(start * sample_stride)
         source_peak = int(peak * sample_stride)
-        source_end = int(end * sample_stride)
-        events.append(
-            {
-                "behavior": str(behavior),
-                "behavior_name_zh": BEHAVIOR_NAMES_ZH.get(str(behavior), str(behavior)),
-                "candidate_level": str(level),
-                "behavior_engine": "lightweight_extended_ethogram",
-                "event_scope": str(event_scope),
-                "pair_key": str(pair_key),
-                "actor_id": actor,
-                "target_id": target,
-                "role_ambiguous": bool(actor < 0 or target < 0),
-                "analysis_start_frame": int(start),
-                "analysis_peak_frame": int(peak),
-                "analysis_end_frame": int(end),
-                "start_frame": source_start,
-                "peak_frame": source_peak,
-                "end_frame": source_end,
-                "start_time_s": source_start / max(float(fps * sample_stride), 1e-9),
-                "end_time_s": source_end / max(float(fps * sample_stride), 1e-9),
-                "duration_s": (source_end - source_start + 1)
-                / max(float(fps * sample_stride), 1e-9),
-                "mean_score": float(np.nanmean(segment)) if finite_segment.size else 0.0,
-                "peak_score": float(np.nanmax(segment)) if finite_segment.size else 0.0,
-                "source_video": str(source_video),
-                "analysis_mode": "lightweight_cache_tracking",
-            }
+        core_source_end = int(end * sample_stride)
+        padding_frames = max(
+            int(np.ceil(max(float(short_event_padding_seconds), 0.0) * float(fps))),
+            0,
         )
+        max_short_frames = max(
+            int(round(max(float(short_event_max_duration_seconds), 0.0) * float(fps))),
+            0,
+        )
+        core_frames = end - start + 1
+        public_start = start
+        public_end = end
+        if padding_frames and max_short_frames and core_frames <= max_short_frames:
+            public_start = max(start - padding_frames, 0)
+            public_end = min(end + padding_frames, len(mask) - 1)
+        source_start = int(public_start * sample_stride)
+        source_end = int(public_end * sample_stride)
+        member_ids: set[int] = set()
+        member_ids_at_peak = _frame_member_ids(member_ids_by_frame, peak)
+        for member_frame in range(start, end + 1):
+            member_ids.update(_frame_member_ids(member_ids_by_frame, member_frame))
+        temporal_padding_frames = (public_end - public_start + 1) - core_frames
+        row: dict[str, Any] = {
+            "behavior": str(behavior),
+            "behavior_name_zh": BEHAVIOR_NAMES_ZH.get(str(behavior), str(behavior)),
+            "candidate_level": str(level),
+            "behavior_engine": "lightweight_extended_ethogram",
+            "event_scope": str(event_scope),
+            "pair_key": str(pair_key),
+            "actor_id": actor,
+            "target_id": target,
+            "role_ambiguous": bool(actor < 0 or target < 0),
+            # analysis_* are the evidence span.  start/end are the public
+            # display/export span and may include bounded temporal context.
+            "analysis_start_frame": int(start),
+            "analysis_peak_frame": int(peak),
+            "analysis_end_frame": int(end),
+            "core_start_frame": core_source_start,
+            "core_end_frame": core_source_end,
+            "temporal_padding_frames": int(temporal_padding_frames),
+            "event_recovery": str(event_recovery or "none"),
+            "start_frame": source_start,
+            "peak_frame": source_peak,
+            "end_frame": source_end,
+            "start_time_s": source_start / max(float(fps * sample_stride), 1e-9),
+            "end_time_s": source_end / max(float(fps * sample_stride), 1e-9),
+            "duration_s": (source_end - source_start + 1) / max(float(fps * sample_stride), 1e-9),
+            "core_duration_s": (core_source_end - core_source_start + 1)
+            / max(float(fps * sample_stride), 1e-9),
+            "mean_score": float(np.nanmean(segment)) if finite_segment.size else 0.0,
+            "peak_score": float(np.nanmax(segment)) if finite_segment.size else 0.0,
+            "source_video": str(source_video),
+            "analysis_mode": "lightweight_cache_tracking",
+        }
+        if member_ids:
+            row["member_ids"] = sorted(member_ids)
+        if member_ids_at_peak:
+            row["member_ids_at_peak"] = list(member_ids_at_peak)
+        events.append(row)
     return events
 
 
@@ -120,6 +212,8 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
             "approach_min_actor_speed_cm_s": 3.0,
             "approach_allow_together_transition": True,
             "approach_min_duration_seconds": 0.10,
+            "approach_short_event_padding_seconds": 0.10,
+            "approach_short_event_max_duration_seconds": 0.35,
             "chase_fallback": {
                 "enabled": True,
                 "max_distance_cm": 12.0,
@@ -132,6 +226,8 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
                 "min_role_confidence": 0.04,
                 "min_duration_seconds": 0.25,
                 "fill_gap_seconds": 0.15,
+                "short_event_padding_seconds": 0.10,
+                "short_event_max_duration_seconds": 0.60,
             },
             "attack_fallback": {
                 "enabled": True,
@@ -157,6 +253,22 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
                 "min_role_confidence": 0.04,
                 "min_duration_seconds": 0.033,
                 "fill_gap_seconds": 0.10,
+                "short_event_padding_seconds": 0.15,
+                "short_event_max_duration_seconds": 0.40,
+                "short_recovery": {
+                    "enabled": True,
+                    "min_attack_score": 0.80,
+                    "max_distance_cm": 9.0,
+                    "min_raw_actor_speed_cm_s": 8.0,
+                    "min_attack_evidence": 2,
+                    "min_role_confidence": 0.04,
+                    "min_escape_alignment": 0.65,
+                    "min_pursuit_alignment": 0.60,
+                    "min_initiation_score": 0.85,
+                    "max_rebound_pursuit_alignment": 0.10,
+                    "min_reaction_score": 0.70,
+                    "min_duration_seconds": 0.033,
+                },
             },
             "avoidance_min_target_escape_alignment": 0.45,
             "avoidance_min_target_speed_cm_s": 1.5,
@@ -169,6 +281,17 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
             "avoidance_min_pursuit_alignment": 0.35,
             "avoidance_min_prior_distance_drop_cm": 0.50,
             "avoidance_min_duration_seconds": 0.15,
+            "avoidance_short_event_padding_seconds": 0.10,
+            "avoidance_short_event_max_duration_seconds": 0.35,
+            "avoidance_short_recovery": {
+                "enabled": True,
+                "max_distance_cm": 10.0,
+                "min_target_escape_alignment": 0.70,
+                "min_target_speed_cm_s": 2.0,
+                "min_actor_speed_cm_s": 2.0,
+                "min_distance_increase_cm": 1.0,
+                "min_duration_seconds": 0.033,
+            },
             "pair_fill_gap_seconds": 0.15,
         },
         "group": {
@@ -395,6 +518,12 @@ def _extended_short_clip_pair_events(
                 pair_key=pair_key,
                 min_duration_seconds=float(chase_cfg.get("min_duration_seconds", 0.25)),
                 fill_gap_seconds=float(chase_cfg.get("fill_gap_seconds", 0.15)),
+                short_event_padding_seconds=float(
+                    chase_cfg.get("short_event_padding_seconds", 0.10)
+                ),
+                short_event_max_duration_seconds=float(
+                    chase_cfg.get("short_event_max_duration_seconds", 0.60)
+                ),
                 fsm_coordinator=fsm_coordinator,
             )
         )
@@ -480,6 +609,7 @@ def _extended_short_clip_pair_events(
             )
         )
         attack_mask = impact_attack | rebound_attack
+        attack_min_duration_seconds = float(attack_cfg.get("min_duration_seconds", 0.08))
         events.extend(
             _event_rows_from_mask(
                 attack_mask,
@@ -492,11 +622,87 @@ def _extended_short_clip_pair_events(
                 actor_id=selected_actor,
                 target_id=selected_target,
                 pair_key=pair_key,
-                min_duration_seconds=float(attack_cfg.get("min_duration_seconds", 0.08)),
+                min_duration_seconds=attack_min_duration_seconds,
                 fill_gap_seconds=float(attack_cfg.get("fill_gap_seconds", 0.10)),
+                short_event_padding_seconds=float(
+                    attack_cfg.get("short_event_padding_seconds", 0.15)
+                ),
+                short_event_max_duration_seconds=float(
+                    attack_cfg.get("short_event_max_duration_seconds", 0.40)
+                ),
                 fsm_coordinator=fsm_coordinator,
             )
         )
+
+        # Very short Beiyi attack examples can contain a complete contact and
+        # a high attack score in one or two frames, but not enough frames for
+        # the causal impact/rebound FSM to reach ACTIVE.  This recovery gate
+        # is deliberately narrower than the normal fallback: it still needs
+        # contact geometry, dynamic/evidence/role support, high raw actor
+        # speed, and one of two interpretable signatures (initiated impact or
+        # target reaction after a rebound).  It never uses the video name.
+        short_cfg = dict(attack_cfg.get("short_recovery", {}))
+        if bool(short_cfg.get("enabled", True)):
+            short_attack_common = (
+                valid
+                & direction_known
+                & np.isfinite(distance)
+                & (distance <= float(short_cfg.get("max_distance_cm", 9.0)))
+                & contact
+                & (attack_score >= float(short_cfg.get("min_attack_score", 0.80)))
+                & (dynamic_score >= float(attack_cfg.get("min_dynamic_score", 0.78)))
+                & (evidence_count >= float(short_cfg.get("min_attack_evidence", 3)))
+                & (role_confidence >= float(short_cfg.get("min_role_confidence", 0.04)))
+                & (actor_raw_speed >= float(short_cfg.get("min_raw_actor_speed_cm_s", 8.0)))
+            )
+            short_impact = (
+                (pursuit >= float(short_cfg.get("min_pursuit_alignment", 0.60)))
+                & (escape >= float(short_cfg.get("min_escape_alignment", 0.65)))
+                & (initiation >= float(short_cfg.get("min_initiation_score", 0.85)))
+            )
+            short_rebound = (
+                (pursuit <= float(short_cfg.get("max_rebound_pursuit_alignment", 0.10)))
+                & (escape >= float(short_cfg.get("min_escape_alignment", 0.65)))
+                & (reaction >= float(short_cfg.get("min_reaction_score", 0.70)))
+            )
+            short_attack = short_attack_common & (short_impact | short_rebound)
+            confirmed_attack = _confirmed_mask(
+                attack_mask,
+                scope="pair",
+                region_id=pair_key,
+                behavior="attack",
+                min_duration_frames=max(int(round(attack_min_duration_seconds * analysis_fps)), 1),
+                max_gap_frames=max(
+                    int(round(float(attack_cfg.get("fill_gap_seconds", 0.10)) * analysis_fps)),
+                    0,
+                ),
+                fsm_coordinator=fsm_coordinator,
+            )
+            short_attack &= ~confirmed_attack
+            events.extend(
+                _event_rows_from_mask(
+                    short_attack,
+                    behavior="attack",
+                    level="extended",
+                    fps=analysis_fps,
+                    source_video=source_video,
+                    sample_stride=sample_stride,
+                    score=attack_score,
+                    actor_id=selected_actor,
+                    target_id=selected_target,
+                    pair_key=pair_key,
+                    min_duration_seconds=float(short_cfg.get("min_duration_seconds", 0.033)),
+                    fill_gap_seconds=0.0,
+                    short_event_padding_seconds=float(
+                        attack_cfg.get("short_event_padding_seconds", 0.15)
+                    ),
+                    short_event_max_duration_seconds=float(
+                        attack_cfg.get("short_event_max_duration_seconds", 0.40)
+                    ),
+                    event_recovery="short_high_evidence",
+                    fsm_coordinator=fsm_coordinator,
+                )
+            )
     return events
 
 
@@ -526,6 +732,7 @@ def _extended_pair_events(
     cfg = _extended_behavior_config(config)
     social = dict(cfg["social"])
     n = len(pair_df)
+    analysis_fps = source_fps / max(sample_stride, 1)
     fsm_coordinator = fsm_coordinator or ParallelBehaviorFSM(
         dict(config.get("parallel_behavior_fsm", {}))
     )
@@ -729,9 +936,16 @@ def _extended_pair_events(
             pair_key=str(pair_df["pair_key"].iloc[0]),
             min_duration_seconds=float(social["approach_min_duration_seconds"]),
             fill_gap_seconds=float(social["pair_fill_gap_seconds"]),
+            short_event_padding_seconds=float(
+                social.get("approach_short_event_padding_seconds", 0.10)
+            ),
+            short_event_max_duration_seconds=float(
+                social.get("approach_short_event_max_duration_seconds", 0.35)
+            ),
             fsm_coordinator=fsm_coordinator,
         )
     )
+    avoidance_min_duration_seconds = float(social["avoidance_min_duration_seconds"])
     events.extend(
         _event_rows_from_mask(
             avoidance,
@@ -753,11 +967,90 @@ def _extended_pair_events(
             actor_id=selected_actor,
             target_id=selected_target,
             pair_key=str(pair_df["pair_key"].iloc[0]),
-            min_duration_seconds=float(social["avoidance_min_duration_seconds"]),
+            min_duration_seconds=avoidance_min_duration_seconds,
             fill_gap_seconds=float(social["pair_fill_gap_seconds"]),
+            short_event_padding_seconds=float(
+                social.get("avoidance_short_event_padding_seconds", 0.10)
+            ),
+            short_event_max_duration_seconds=float(
+                social.get("avoidance_short_event_max_duration_seconds", 0.35)
+            ),
             fsm_coordinator=fsm_coordinator,
         )
     )
+
+    # A short avoidance clip can contain only the first visible escape frame.
+    # Recover that frame only when it is both close to the interaction and
+    # directionally unambiguous; ordinary separation remains rejected.
+    avoidance_recovery = dict(social.get("avoidance_short_recovery", {}))
+    if bool(avoidance_recovery.get("enabled", True)):
+        short_avoidance = (
+            valid
+            & np.isfinite(distance)
+            & (distance <= float(avoidance_recovery.get("max_distance_cm", 10.0)))
+            & (selected_target_speed >= float(avoidance_recovery.get("min_target_speed_cm_s", 2.0)))
+            & (selected_actor_speed >= float(avoidance_recovery.get("min_actor_speed_cm_s", 2.0)))
+            & (
+                selected_escape
+                >= float(avoidance_recovery.get("min_target_escape_alignment", 0.70))
+            )
+            & (distance_increase >= float(avoidance_recovery.get("min_distance_increase_cm", 1.0)))
+            & prior_close
+            & (
+                prior_pursuit
+                | (
+                    pursuit_alignment_context
+                    >= float(social.get("avoidance_min_pursuit_alignment", 0.35))
+                )
+                | (prior_drop >= float(social.get("avoidance_min_prior_distance_drop_cm", 0.50)))
+            )
+        )
+        confirmed_avoidance = _confirmed_mask(
+            avoidance,
+            scope="pair",
+            region_id=str(pair_df["pair_key"].iloc[0]),
+            behavior="avoidance",
+            min_duration_frames=max(int(round(avoidance_min_duration_seconds * analysis_fps)), 1),
+            max_gap_frames=max(
+                int(round(float(social["pair_fill_gap_seconds"]) * analysis_fps)),
+                0,
+            ),
+            fsm_coordinator=fsm_coordinator,
+        )
+        short_avoidance &= ~confirmed_avoidance
+        events.extend(
+            _event_rows_from_mask(
+                short_avoidance,
+                behavior="avoidance",
+                level="extended",
+                fps=source_fps / max(sample_stride, 1),
+                source_video=source_video,
+                sample_stride=sample_stride,
+                score=np.where(
+                    short_avoidance,
+                    np.clip(
+                        distance_increase
+                        / max(float(social["avoidance_min_distance_increase_cm"]), 1e-6),
+                        0,
+                        1,
+                    ),
+                    0.0,
+                ),
+                actor_id=selected_actor,
+                target_id=selected_target,
+                pair_key=str(pair_df["pair_key"].iloc[0]),
+                min_duration_seconds=float(avoidance_recovery.get("min_duration_seconds", 0.033)),
+                fill_gap_seconds=0.0,
+                short_event_padding_seconds=float(
+                    social.get("avoidance_short_event_padding_seconds", 0.10)
+                ),
+                short_event_max_duration_seconds=float(
+                    social.get("avoidance_short_event_max_duration_seconds", 0.35)
+                ),
+                event_recovery="short_escape_evidence",
+                fsm_coordinator=fsm_coordinator,
+            )
+        )
     return events
 
 
@@ -855,6 +1148,8 @@ def _extended_individual_and_group_events(
     largest_cluster_size = np.zeros(frames, dtype=int)
     largest_cluster_fraction = np.zeros(frames, dtype=float)
     largest_cluster_density = np.zeros(frames, dtype=float)
+    huddle_members_by_frame: list[tuple[int, ...]] = [() for _ in range(frames)]
+    isolation_members_by_frame: list[tuple[int, ...]] = [() for _ in range(frames)]
     for frame in range(frames):
         ids = np.flatnonzero(valid[frame])
         group_size[frame] = len(ids)
@@ -896,10 +1191,16 @@ def _extended_individual_and_group_events(
         largest_cluster_fraction[frame] = len(largest) / max(len(ids), 1)
         if len(largest) >= 2:
             component_indices = np.asarray(largest, dtype=int)
+            huddle_members_by_frame[frame] = tuple(sorted(int(ids[index]) for index in largest))
             component_distances = distances[np.ix_(component_indices, component_indices)]
             edge_count = int(np.sum(component_distances <= close_threshold) // 2)
             possible_edges = len(largest) * (len(largest) - 1) // 2
             largest_cluster_density[frame] = edge_count / max(possible_edges, 1)
+        close_ids = ids[nearest <= close_threshold]
+        if len(close_ids) >= 2 and not huddle_members_by_frame[frame]:
+            huddle_members_by_frame[frame] = tuple(sorted(int(item) for item in close_ids))
+        isolated_ids = ids[nearest >= float(group_cfg["isolation_distance_cm"])]
+        isolation_members_by_frame[frame] = tuple(sorted(int(item) for item in isolated_ids))
 
     huddle = (group_size >= 2) & (
         (close_fraction >= float(group_cfg["huddle_fraction"]))
@@ -926,6 +1227,9 @@ def _extended_individual_and_group_events(
         ),
         ("isolation", isolation, isolated_fraction),
     ):
+        member_ids_by_frame = (
+            huddle_members_by_frame if behavior == "huddle" else isolation_members_by_frame
+        )
         events.extend(
             _event_rows_from_mask(
                 mask,
@@ -941,6 +1245,7 @@ def _extended_individual_and_group_events(
                 min_duration_seconds=float(group_cfg["confirm_seconds"]),
                 fill_gap_seconds=float(group_cfg["fill_gap_seconds"]),
                 event_scope="group",
+                member_ids_by_frame=member_ids_by_frame,
                 fsm_coordinator=fsm_coordinator,
             )
         )

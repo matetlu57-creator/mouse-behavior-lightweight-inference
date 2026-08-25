@@ -22,6 +22,19 @@ from ..preprocessing.constants import (
 from ..preprocessing.pair_features import _boolean_runs
 from ..tracking.cache import _cache_total_frames, _track_cache
 from ..io.csv import _write_csv
+from .overlay import (
+    BoxLabel,
+    MouseOverlay,
+    build_mouse_overlays,
+    draw_behavior_sidebar,
+    draw_text_overlay,
+    font_size_for_frame,
+    format_mouse_id,
+    load_font,
+    normalize_contact_events,
+    sidebar_width_for_frame,
+    select_display_events,
+)
 
 LOGGER = logging.getLogger("mouse_behavior.lightweight_behavior_inference")
 
@@ -33,6 +46,8 @@ def render_behavior_video(
     output_path: Path,
     expected_mice: int = 20,
     max_frames: int | None = None,
+    contact_events_path: Path | None = None,
+    font_path: Path | None = None,
 ) -> Path:
     """Render exactly one annotated MP4 for one source video.
 
@@ -80,7 +95,13 @@ def render_behavior_video(
     missing = sorted(required.difference(events_df.columns))
     if missing:
         raise ValueError(f"行为事件 CSV 缺少字段: {missing}")
-    for event in events_df.to_dict("records"):
+    event_rows: list[dict[str, Any]] = events_df.to_dict("records")
+    contact_path = contact_events_path or (events_path.parent / "lightweight_contact_events.csv")
+    if contact_path.exists():
+        contact_df = pd.read_csv(contact_path)
+        event_rows.extend(normalize_contact_events(contact_df.to_dict("records")))
+        LOGGER.info("[render] contact events loaded: %s", contact_path)
+    for event in event_rows:
         try:
             start = max(int(event.get("start_frame", 0)), 0)
             end = min(int(event.get("end_frame", -1)), total_cache_frames - 1)
@@ -98,28 +119,22 @@ def render_behavior_video(
         frame_limit = min(frame_limit, video_frame_count)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    sidebar_width = sidebar_width_for_frame(width, height)
     writer = cv2.VideoWriter(
         str(output_path),
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
-        (width, height),
+        (width + sidebar_width, height),
     )
     if not writer.isOpened():
         cap.release()
         raise RuntimeError(f"无法创建渲染视频: {output_path}")
 
     skeleton_edges = SKELETON_EDGES
-    default_color = (80, 220, 80)
-    role_colors = {
-        ("strong", "chase", "actor"): (0, 165, 255),
-        ("strong", "chase", "target"): (255, 140, 0),
-        ("strong", "attack", "actor"): (0, 0, 255),
-        ("strong", "attack", "target"): (255, 0, 255),
-        ("weak", "chase", "actor"): (0, 215, 255),
-        ("weak", "chase", "target"): (255, 200, 80),
-        ("weak", "attack", "actor"): (80, 80, 255),
-        ("weak", "attack", "target"): (255, 100, 200),
-    }
+    overlay_size = font_size_for_frame(width, height)
+    overlay_font = load_font(font_path, overlay_size)
+    sidebar_header_font = load_font(font_path, max(overlay_size + 4, 18))
+    sidebar_small_font = load_font(font_path, max(overlay_size - 1, 12))
 
     frame_index = 0
     try:
@@ -128,52 +143,14 @@ def render_behavior_video(
             if not ok:
                 break
             active_events = event_frame_map[frame_index]
-            # Keep one best row per pair/level/behavior so overlapping FSM
-            # rows do not cover the whole top panel.
-            best_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
-            for event in active_events:
-                key = (
-                    str(event.get("candidate_level", "weak")),
-                    str(event.get("behavior", "")),
-                    str(event.get("pair_key", "")),
-                )
-                previous = best_by_key.get(key)
-                if previous is None or float(event.get("peak_score", 0.0)) > float(
-                    previous.get("peak_score", 0.0)
-                ):
-                    best_by_key[key] = event
-            display_events = sorted(
-                best_by_key.values(),
-                key=lambda item: (
-                    0 if str(item.get("candidate_level")) == "strong" else 1,
-                    -float(item.get("peak_score", 0.0)),
-                ),
-            )
-
-            role_map: dict[int, tuple[int, tuple[int, int, int]]] = {}
-            active_actor_ids: set[int] = set()
-            active_target_ids: set[int] = set()
-            for event in display_events:
-                level = str(event.get("candidate_level", "weak"))
-                behavior = str(event.get("behavior", ""))
-                priority = 2 if level == "strong" else 1
-                for role_name, column in (("actor", "actor_id"), ("target", "target_id")):
-                    try:
-                        logical_id = int(event.get(column, -1))
-                    except (TypeError, ValueError):
-                        logical_id = -1
-                    if logical_id < 0 or logical_id >= expected_mice:
-                        continue
-                    if role_name == "actor":
-                        active_actor_ids.add(logical_id)
-                    else:
-                        active_target_ids.add(logical_id)
-                    old = role_map.get(logical_id)
-                    if old is None or priority > old[0]:
-                        role_map[logical_id] = (
-                            priority,
-                            role_colors.get((level, behavior, role_name), default_color),
-                        )
+            display_events, display_layer = select_display_events(active_events)
+            valid_ids = [
+                logical_id
+                for logical_id in range(expected_mice)
+                if bool(tracks["valid"][frame_index, logical_id])
+            ]
+            mouse_overlays = build_mouse_overlays(display_events, display_layer, valid_ids)
+            box_labels: list[BoxLabel] = []
 
             for logical_id in range(expected_mice):
                 if not bool(tracks["valid"][frame_index, logical_id]):
@@ -189,40 +166,18 @@ def render_behavior_video(
                 y2 = max(0, min(height - 1, int(round(float(bbox[3])))))
                 if x2 <= x1 or y2 <= y1:
                     continue
-                role_info = role_map.get(logical_id)
-                color = role_info[1] if role_info is not None else default_color
-                thickness = 3 if role_info is not None else 1
+                overlay = mouse_overlays.get(
+                    logical_id,
+                    MouseOverlay(
+                        text=f"{format_mouse_id(logical_id)}｜仅追踪",
+                        color_bgr=(170, 170, 170),
+                        priority=(0, 0.0),
+                    ),
+                )
+                color = overlay.color_bgr
+                thickness = 3 if overlay.priority[0] > 0 else 1
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-                role_suffix = ""
-                if role_info is not None:
-                    if logical_id in active_actor_ids and logical_id in active_target_ids:
-                        role_suffix = " A/T"
-                    elif logical_id in active_actor_ids:
-                        role_suffix = " A"
-                    else:
-                        role_suffix = " T"
-                label = f"ID{logical_id}{role_suffix}"
-                (text_w, text_h), baseline = cv2.getTextSize(
-                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
-                )
-                label_y = max(text_h + baseline + 2, y1)
-                cv2.rectangle(
-                    frame,
-                    (x1, label_y - text_h - baseline - 2),
-                    (x1 + text_w + 4, label_y + 2),
-                    (0, 0, 0),
-                    -1,
-                )
-                cv2.putText(
-                    frame,
-                    label,
-                    (x1 + 2, label_y),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    color,
-                    1,
-                    cv2.LINE_AA,
-                )
+                box_labels.append(BoxLabel((x1, y1, x2, y2), overlay.text, color))
                 for first, second in skeleton_edges:
                     if (
                         first < len(points)
@@ -248,38 +203,21 @@ def render_behavior_video(
                             cv2.LINE_AA,
                         )
 
-            panel_lines = [
-                f"frame {frame_index}/{frame_limit - 1}  time {frame_index / fps:.2f}s",
-                f"active events: {len(active_events)}  unique displayed: {len(display_events)}",
-            ]
-            for event in display_events[:8]:
-                level = str(event.get("candidate_level", "weak")).upper()
-                behavior = str(event.get("behavior", "")).upper()
-                pair = str(event.get("pair_key", ""))
-                score = float(event.get("peak_score", 0.0))
-                panel_lines.append(f"{level} {behavior} {pair}  score={score:.3f}")
-            panel_height = 12 + 22 * len(panel_lines)
-            cv2.rectangle(frame, (8, 8), (min(width - 8, 720), panel_height), (0, 0, 0), -1)
-            for line_index, line in enumerate(panel_lines):
-                cv2.putText(
-                    frame,
-                    line,
-                    (18, 30 + line_index * 22),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.52,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
-            cv2.putText(
+            frame = draw_text_overlay(frame, box_labels, [], overlay_font)
+            frame = draw_behavior_sidebar(
                 frame,
-                "green=tracked  orange/blue=chase  red/magenta=attack  A=actor T=target",
-                (12, height - 16),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.48,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
+                frame_index=frame_index,
+                total_frames=frame_limit,
+                fps=fps,
+                active_event_count=len(active_events),
+                display_events=display_events,
+                display_layer=display_layer,
+                mouse_overlays=mouse_overlays,
+                valid_ids=valid_ids,
+                font=overlay_font,
+                header_font=sidebar_header_font,
+                small_font=sidebar_small_font,
+                panel_width=sidebar_width,
             )
             writer.write(frame)
             frame_index += 1
@@ -296,9 +234,11 @@ def render_behavior_video(
     if frame_index <= 0 or not output_path.exists() or output_path.stat().st_size <= 0:
         raise RuntimeError(f"渲染没有产生有效视频: {output_path}")
     LOGGER.info(
-        "[render] completed: %s (%.2f GB)",
+        "[render] completed: %s (%.2f GB, %dx%d including sidebar)",
         output_path,
         output_path.stat().st_size / (1024**3),
+        width + sidebar_width,
+        height,
     )
     return output_path
 

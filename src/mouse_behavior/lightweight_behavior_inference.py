@@ -640,6 +640,12 @@ def main() -> int:
         help="render-only 的唯一 MP4 输出路径。",
     )
     parser.add_argument(
+        "--font-path",
+        type=Path,
+        default=None,
+        help="渲染中文标签使用的字体文件；默认自动寻找系统中文字体。",
+    )
+    parser.add_argument(
         "--extract-four-class-clips",
         action="store_true",
         help="兼容旧接口：只从已有事件 CSV 裁剪四类原始视频，不生成渲染视频。",
@@ -723,6 +729,7 @@ def main() -> int:
             render_output,
             expected_mice=max(int(args.expected_mice), 2),
             max_frames=args.max_frames,
+            font_path=args.font_path,
         )
         LOGGER.info("render_output=%s", render_output)
         return 0

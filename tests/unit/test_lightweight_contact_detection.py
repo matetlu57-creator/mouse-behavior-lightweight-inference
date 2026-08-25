@@ -248,3 +248,5 @@ def test_huddle_uses_local_cluster_in_multi_mouse_scene():
         config={"extended_behavior": {"enabled": True}},
     )
     assert any(event["behavior"] == "huddle" for event in events)
+    huddle = next(event for event in events if event["behavior"] == "huddle")
+    assert set(huddle["member_ids"]) == {0, 1, 2, 3, 4}
