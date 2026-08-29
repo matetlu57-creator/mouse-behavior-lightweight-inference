@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 
 from mouse_behavior import adaptive_arena_boundary as arena
+from mouse_behavior import lightweight_behavior_inference as lightweight
+from mouse_behavior.config import load_config
 
 
 def _record(frame: int, x: float, y: float) -> dict:
@@ -127,3 +129,99 @@ def test_falls_back_when_motion_evidence_is_insufficient() -> None:
     assert result.accepted is False
     assert result.rejection_reason.startswith("insufficient_motion_samples")
     assert np.all(heatmap == 0.0)
+
+
+def test_configured_boundary_skips_motion_heatmap_learning() -> None:
+    result, heatmap = arena.configured_boundary(
+        [[20, 15], [620, 15], [600, 340], [20, 340]],
+        width=640,
+        height=360,
+        source_video="short_beiyi_clip.mov",
+    )
+
+    assert result.source == "configured_polygon"
+    assert result.accepted is True
+    assert result.motion_sample_count == 0
+    assert result.sample_count == 0
+    assert np.all(heatmap == 0.0)
+    assert result.expansion_ratio == pytest.approx(1.0)
+
+
+def test_lightweight_configured_mode_does_not_call_heatmap_learner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved: dict[str, object] = {}
+
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("configured mode must not learn a motion heatmap")
+
+    def capture_artifacts(
+        result: object,
+        heatmap: object,
+        json_path: Path,
+        png_path: Path,
+        comparison_path: Path,
+    ) -> None:
+        saved["result"] = result
+        saved["heatmap"] = heatmap
+        saved["json_path"] = json_path
+        saved["png_path"] = png_path
+        saved["comparison_path"] = comparison_path
+
+    monkeypatch.setattr(lightweight.arena_boundary, "learn_from_yolo_records", fail_if_called)
+    monkeypatch.setattr(lightweight.arena_boundary, "save_boundary_artifacts", capture_artifacts)
+
+    result, heatmap = lightweight._prepare_video_arena_boundary(
+        tmp_path / "short_beiyi_clip.mov",
+        tmp_path / "cache",
+        tmp_path / "analysis",
+        tmp_path / "config.yaml",
+        {
+            "adaptive_arena": {"mode": "configured"},
+            "detector_first": {
+                "arena_mask": {
+                    "polygon": [[20, 15], [620, 15], [600, 340], [20, 340]],
+                }
+            },
+        },
+        width=640,
+        height=360,
+    )
+
+    assert result is not None
+    assert result.source == "configured_polygon"
+    assert np.all(heatmap == 0.0)
+    assert saved["result"] is result
+
+
+def test_lightweight_disabled_mode_does_not_apply_any_arena_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("disabled mode must not learn or build a boundary")
+
+    monkeypatch.setattr(lightweight.arena_boundary, "learn_from_yolo_records", fail_if_called)
+    monkeypatch.setattr(lightweight.arena_boundary, "configured_boundary", fail_if_called)
+
+    result, heatmap = lightweight._prepare_video_arena_boundary(
+        tmp_path / "short_beiyi_clip.mov",
+        tmp_path / "cache",
+        tmp_path / "analysis",
+        tmp_path / "config.yaml",
+        {"adaptive_arena": {"enabled": False, "mode": "disabled"}},
+        width=640,
+        height=360,
+    )
+
+    assert result is None
+    assert heatmap is None
+
+
+def test_beiyi_profile_disables_arena_gating() -> None:
+    root = Path(__file__).resolve().parents[2]
+    config = load_config(root / "configs" / "profiles" / "beiyi.yaml")
+
+    assert config["repository"]["profile"] == "beiyi"
+    assert config["adaptive_arena"]["mode"] == "disabled"
+    assert config["adaptive_arena"]["enabled"] is False
+    assert config["detector_first"]["arena_mask"]["enabled"] is False

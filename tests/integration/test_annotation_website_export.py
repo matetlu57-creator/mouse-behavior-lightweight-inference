@@ -15,10 +15,14 @@ from mouse_behavior.annotation_website_export import (
 def synthetic_tracks(frames: int = 6, mice: int = 4) -> dict[str, np.ndarray]:
     valid = np.ones((frames, mice), dtype=bool)
     centers = np.zeros((frames, mice, 2), dtype=float)
-    centers[:, 0] = [10.0, 10.0]
-    centers[:, 1] = [12.0, 10.0]
-    centers[:, 2] = [11.0, 12.0]
-    centers[:, 3] = [80.0, 80.0]
+    if mice > 0:
+        centers[:, 0] = [10.0, 10.0]
+    if mice > 1:
+        centers[:, 1] = [12.0, 10.0]
+    if mice > 2:
+        centers[:, 2] = [11.0, 12.0]
+    if mice > 3:
+        centers[:, 3] = [80.0, 80.0]
     keypoints = np.repeat(centers[:, :, None, :], len(KEYPOINT_NAMES), axis=2)
     boxes = np.zeros((frames, mice, 4), dtype=float)
     boxes[:, :, 0:2] = centers - 2.0
@@ -108,6 +112,33 @@ def test_website_names_ranges_and_mouse_cardinality():
     assert by_behavior["孤立行为"]["mouse_ids"] == [3]
     assert by_behavior["鼻头接触"]["mouse_ids"] == [0, 1]
     assert by_behavior["鼻尾接触"]["mouse_ids"] == [0, 1]
+
+
+def test_website_export_does_not_promote_a_pair_to_huddle():
+    annotations, skipped = build_annotations(
+        [
+            {
+                "behavior": "huddle",
+                "pair_key": "group",
+                "actor_id": -1,
+                "target_id": -1,
+                "start_frame": 0,
+                "end_frame": 5,
+                "candidate_level": "extended",
+                "peak_score": 0.8,
+            }
+        ],
+        [],
+        synthetic_tracks(mice=2),
+        fps=2.0,
+        frame_count=6,
+        huddle_distance_cm=5.0,
+        cm_per_pixel=1.0,
+    )
+
+    assert annotations == []
+    assert skipped[0]["reason"] == "participant_count_mismatch"
+    assert skipped[0]["resolved_mouse_ids"] == []
 
 
 def test_complete_video_package_matches_full_video_contract(tmp_path: Path):

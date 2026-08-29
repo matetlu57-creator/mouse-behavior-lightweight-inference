@@ -16,7 +16,7 @@ from .constants import (
     KP_RIGHT_HIP,
     KP_TAIL,
 )
-from .geometry import _angle_deg, _unit
+from .geometry import _angle_deg, _box_iou, _unit
 
 
 def _ema_smooth(values: np.ndarray, valid: np.ndarray, alpha: float = 0.70) -> np.ndarray:
@@ -123,24 +123,171 @@ def _pose_deformation_energy(
     return deformation
 
 
+def _reference_body_pixel_length(
+    raw_body_lengths: np.ndarray,
+    valid: np.ndarray,
+) -> float:
+    """Return a scene scale without letting one track dominate the median.
+
+    The camera scale is shared by every mouse in a frame, so centers must not
+    be rescaled independently by white/black body size.  A per-track median
+    gives each logical mouse one vote before taking the scene median, which is
+    more stable when one size class has more visible frames than another.
+    """
+    values = np.asarray(raw_body_lengths, dtype=float)
+    valid_mask = np.asarray(valid, dtype=bool)
+    if values.ndim != 2 or valid_mask.shape != values.shape:
+        raise ValueError("body lengths and valid mask must have the same 2-D shape")
+
+    per_track: list[float] = []
+    for mouse in range(values.shape[1]):
+        track_values = values[:, mouse]
+        track_valid = (
+            valid_mask[:, mouse]
+            & np.isfinite(track_values)
+            & (track_values >= 10.0)
+            & (track_values <= 300.0)
+        )
+        if np.any(track_valid):
+            per_track.append(float(np.median(track_values[track_valid])))
+
+    if per_track:
+        return float(np.median(np.asarray(per_track, dtype=float)))
+
+    fallback = values[np.isfinite(values) & (values >= 10.0) & (values <= 300.0)]
+    return float(np.median(fallback)) if fallback.size else 60.0
+
+
 def _kinematics(
-    tracks: Mapping[str, np.ndarray], fps: float, body_length_cm: float = 8.0
+    tracks: Mapping[str, np.ndarray],
+    fps: float,
+    body_length_cm: float = 8.0,
+    cm_per_pixel: float | None = None,
 ) -> dict[str, np.ndarray | float]:
     valid = np.asarray(tracks["valid"], dtype=bool)
     pose_quality = np.asarray(tracks["pose_quality"], dtype=float)
     raw_kp = np.asarray(tracks["keypoints_px"], dtype=float)
     raw_centers = np.asarray(tracks["centers_px"], dtype=float)
-    body_values = np.asarray(tracks["body_lengths_px"], dtype=float)
-    body_values = body_values[
-        np.isfinite(body_values) & (body_values >= 10.0) & (body_values <= 300.0)
-    ]
-    reference_body_px = float(np.median(body_values)) if body_values.size else 60.0
-    cm_per_pixel = float(body_length_cm / max(reference_body_px, 1e-6))
+    raw_body_lengths = np.asarray(tracks["body_lengths_px"], dtype=float)
+    reference_body_px = _reference_body_pixel_length(raw_body_lengths, valid)
+    if cm_per_pixel is None:
+        cm_per_pixel_value = float(body_length_cm / max(reference_body_px, 1e-6))
+    else:
+        cm_per_pixel_value = float(cm_per_pixel)
+        if not np.isfinite(cm_per_pixel_value) or cm_per_pixel_value <= 0.0:
+            raise ValueError("cm_per_pixel must be a finite positive number")
     smooth_kp = _ema_smooth_keypoints(raw_kp, valid, alpha=0.70)
     smooth_centers = _ema_smooth(raw_centers, valid, alpha=0.70)
     frames, mice = valid.shape
-    keypoints_cm = smooth_kp * cm_per_pixel
-    centers_cm = smooth_centers * cm_per_pixel
+
+    raw_bboxes_value = tracks.get("bboxes")
+    if raw_bboxes_value is None:
+        raw_bboxes = np.full((frames, mice, 4), np.nan, dtype=float)
+    else:
+        raw_bboxes = np.asarray(raw_bboxes_value, dtype=float)
+        if raw_bboxes.shape != (frames, mice, 4):
+            raise ValueError(
+                f"tracks['bboxes'] must have shape ({frames}, {mice}, 4), got {raw_bboxes.shape}"
+            )
+    bbox_geometry_valid = np.all(np.isfinite(raw_bboxes), axis=2)
+    bbox_geometry_valid &= (raw_bboxes[:, :, 2] > raw_bboxes[:, :, 0]) & (
+        raw_bboxes[:, :, 3] > raw_bboxes[:, :, 1]
+    )
+    raw_bbox_observed_value = tracks.get("bbox_observed")
+    if raw_bbox_observed_value is None:
+        bbox_observed = bbox_geometry_valid.copy()
+    else:
+        bbox_observed = np.asarray(raw_bbox_observed_value, dtype=bool)
+        if bbox_observed.shape != (frames, mice):
+            raise ValueError(
+                "tracks['bbox_observed'] must have shape "
+                f"({frames}, {mice}), got {bbox_observed.shape}"
+            )
+    raw_bbox_imputed_value = tracks.get("bbox_imputed")
+    if raw_bbox_imputed_value is None:
+        bbox_imputed = np.zeros((frames, mice), dtype=bool)
+    else:
+        bbox_imputed = np.asarray(raw_bbox_imputed_value, dtype=bool)
+        if bbox_imputed.shape != (frames, mice):
+            raise ValueError(
+                "tracks['bbox_imputed'] must have shape "
+                f"({frames}, {mice}), got {bbox_imputed.shape}"
+            )
+    # ``valid`` is pose/center validity and remains untouched.  A predicted
+    # box is a separate, lower-trust signal for the occlusion-aware social
+    # FSM; it must never turn an invisible mouse into a normal pose sample.
+    bbox_valid = bbox_geometry_valid & (bbox_observed | bbox_imputed)
+    bbox_centers_px = np.full((frames, mice, 2), np.nan, dtype=float)
+    bbox_width_px = np.full((frames, mice), np.nan, dtype=float)
+    bbox_height_px = np.full((frames, mice), np.nan, dtype=float)
+    bbox_area_px2 = np.full((frames, mice), np.nan, dtype=float)
+    bbox_scale_px = np.full((frames, mice), np.nan, dtype=float)
+    valid_boxes = np.flatnonzero(bbox_valid)
+    if valid_boxes.size:
+        frame_indices, mouse_indices = np.unravel_index(valid_boxes, bbox_valid.shape)
+        boxes = raw_bboxes[frame_indices, mouse_indices]
+        bbox_centers_px[frame_indices, mouse_indices] = np.column_stack(
+            ((boxes[:, 0] + boxes[:, 2]) * 0.5, (boxes[:, 1] + boxes[:, 3]) * 0.5)
+        )
+        bbox_width_px[frame_indices, mouse_indices] = boxes[:, 2] - boxes[:, 0]
+        bbox_height_px[frame_indices, mouse_indices] = boxes[:, 3] - boxes[:, 1]
+        bbox_area_px2[frame_indices, mouse_indices] = (
+            bbox_width_px[frame_indices, mouse_indices]
+            * bbox_height_px[frame_indices, mouse_indices]
+        )
+        pose_scales = raw_body_lengths[frame_indices, mouse_indices]
+        box_scales = np.minimum(
+            bbox_width_px[frame_indices, mouse_indices],
+            bbox_height_px[frame_indices, mouse_indices],
+        )
+        bbox_scale_px[frame_indices, mouse_indices] = np.where(
+            np.isfinite(pose_scales) & (pose_scales >= 8.0),
+            pose_scales,
+            np.maximum(box_scales, 8.0),
+        )
+
+    # Bounding-box motion is intentionally kept on the raw box stream.  EMA
+    # smoothing is appropriate for pose-derived locomotion, but would erase
+    # the short displacement/overlap changes that distinguish a grapple from
+    # an ordinary sustained chase.  Values are normalized by the per-detection
+    # body/box scale, so this channel does not depend on a fixed pixel size.
+    bbox_speed = np.zeros((frames, mice), dtype=float)
+    bbox_acceleration = np.zeros((frames, mice), dtype=float)
+    bbox_area_change_ratio = np.zeros((frames, mice), dtype=float)
+    bbox_iou_previous = np.zeros((frames, mice), dtype=float)
+    last_bbox_frame = np.full(mice, -1, dtype=int)
+    last_bbox_speed = np.zeros(mice, dtype=float)
+    for frame in range(frames):
+        for mouse in range(mice):
+            if not bbox_valid[frame, mouse]:
+                continue
+            previous = int(last_bbox_frame[mouse])
+            if previous >= 0 and frame - previous <= 3:
+                gap = max(frame - previous, 1)
+                scale = max(float(bbox_scale_px[frame, mouse]), 8.0)
+                displacement = float(
+                    np.linalg.norm(bbox_centers_px[frame, mouse] - bbox_centers_px[previous, mouse])
+                )
+                current_speed = displacement / scale / gap
+                bbox_speed[frame, mouse] = current_speed
+                bbox_acceleration[frame, mouse] = abs(current_speed - last_bbox_speed[mouse]) / gap
+                previous_area = bbox_area_px2[previous, mouse]
+                current_area = bbox_area_px2[frame, mouse]
+                if np.isfinite(previous_area) and previous_area > 1e-6:
+                    bbox_area_change_ratio[frame, mouse] = (
+                        abs(current_area - previous_area) / previous_area
+                    )
+                bbox_iou_previous[frame, mouse] = _box_iou(
+                    raw_bboxes[frame, mouse],
+                    raw_bboxes[previous, mouse],
+                )
+                last_bbox_speed[mouse] = current_speed
+            else:
+                last_bbox_speed[mouse] = 0.0
+            last_bbox_frame[mouse] = frame
+
+    keypoints_cm = smooth_kp * cm_per_pixel_value
+    centers_cm = smooth_centers * cm_per_pixel_value
     head_cm = np.full((frames, mice, 2), np.nan, dtype=float)
     heading = np.full((frames, mice, 2), np.nan, dtype=float)
     body_cm = np.full((frames, mice), np.nan, dtype=float)
@@ -149,8 +296,17 @@ def _kinematics(
             if not valid[frame, mouse]:
                 continue
             points = keypoints_cm[frame, mouse]
-            head_cm[frame, mouse] = np.nanmean(points[[KP_NOSE, KP_LEFT_EAR, KP_RIGHT_EAR]], axis=0)
-            center = np.nanmean(points[[KP_NECK, KP_LEFT_HIP, KP_RIGHT_HIP]], axis=0)
+            head_points = points[[KP_NOSE, KP_LEFT_EAR, KP_RIGHT_EAR]]
+            head_good = np.all(np.isfinite(head_points), axis=1)
+            if np.any(head_good):
+                head_cm[frame, mouse] = np.mean(head_points[head_good], axis=0)
+            center_points = points[[KP_NECK, KP_LEFT_HIP, KP_RIGHT_HIP]]
+            center_good = np.all(np.isfinite(center_points), axis=1)
+            center = (
+                np.mean(center_points[center_good], axis=0)
+                if np.any(center_good)
+                else np.full(2, np.nan, dtype=float)
+            )
             if np.all(np.isfinite(center)):
                 centers_cm[frame, mouse] = center
             axis = points[KP_NOSE] - points[KP_NECK]
@@ -252,7 +408,20 @@ def _kinematics(
         "acceleration": acceleration,
         "angular_speed": angular_speed,
         "pose_deformation": pose_deformation,
-        "cm_per_pixel": cm_per_pixel,
+        "bbox_valid": bbox_valid,
+        "bbox_observed": bbox_observed & bbox_geometry_valid,
+        "bbox_imputed": bbox_imputed & bbox_geometry_valid,
+        "bboxes": raw_bboxes,
+        "bbox_centers_px": bbox_centers_px,
+        "bbox_width_px": bbox_width_px,
+        "bbox_height_px": bbox_height_px,
+        "bbox_area_px2": bbox_area_px2,
+        "bbox_scale_px": bbox_scale_px,
+        "bbox_speed_body_lengths_per_frame": bbox_speed,
+        "bbox_acceleration_body_lengths_per_frame2": bbox_acceleration,
+        "bbox_area_change_ratio": bbox_area_change_ratio,
+        "bbox_iou_previous": bbox_iou_previous,
+        "cm_per_pixel": cm_per_pixel_value,
         "reference_body_px": reference_body_px,
         "reference_body_cm": float(body_length_cm),
     }

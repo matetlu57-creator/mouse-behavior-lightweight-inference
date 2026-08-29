@@ -8,6 +8,7 @@ import argparse
 import logging
 import shutil
 from pathlib import Path
+from typing import Sequence
 
 import pandas as pd
 
@@ -17,6 +18,7 @@ ensure_importable()
 
 from mouse_behavior.logging_config import configure_logging  # noqa: E402
 from mouse_behavior.visualization.rendering import render_behavior_video  # noqa: E402
+from validate_beiyi_extended_ethogram import BEIYI_EXPECTED_MICE  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
@@ -35,15 +37,23 @@ def render_beiyi_cases(
     render_output: Path,
     manifest: Path,
     *,
-    expected_mice: int = 20,
+    expected_mice: int = BEIYI_EXPECTED_MICE,
     force: bool = False,
     font_path: Path | None = None,
+    cache_output: Path | None = None,
+    expected_behaviors: Sequence[str] | None = None,
 ) -> Path:
-    """Copy fresh analysis files and render one MP4 for every manifest row."""
+    """Copy fresh analysis files and render selected manifest rows.
+
+    ``cache_output`` may point to a separate validation directory containing
+    the reusable YOLO caches.  This keeps newly regenerated lightweight event
+    CSVs separate from large cache artifacts.
+    """
 
     analysis_output = analysis_output.resolve()
     render_output = render_output.resolve()
     manifest = manifest.resolve()
+    cache_output = cache_output.resolve() if cache_output is not None else analysis_output
     if not analysis_output.is_dir():
         raise FileNotFoundError(f"分析输出目录不存在: {analysis_output}")
     if not manifest.is_file():
@@ -51,6 +61,11 @@ def render_beiyi_cases(
     rows = pd.read_csv(manifest)
     if rows.empty:
         raise ValueError(f"分析清单为空: {manifest}")
+    if expected_behaviors:
+        allowed = {str(value).strip() for value in expected_behaviors if str(value).strip()}
+        rows = rows[rows["expected_behavior"].astype(str).isin(allowed)].copy()
+        if rows.empty:
+            raise ValueError(f"清单中没有匹配的行为: {sorted(allowed)}")
     render_output.mkdir(parents=True, exist_ok=True)
 
     for index, row in enumerate(rows.to_dict("records"), start=1):
@@ -65,7 +80,7 @@ def render_beiyi_cases(
         if not source_analysis.is_dir():
             raise FileNotFoundError(f"新分析目录不存在: {source_analysis}")
         video = Path(str(row.get("video", ""))).resolve()
-        cache_dir = source_case / "yolo_precompute"
+        cache_dir = cache_output / case_name / "yolo_precompute"
         if not video.is_file():
             raise FileNotFoundError(f"源视频不存在: {video}")
         if not (cache_dir / "yolo_results_status.json").is_file():
@@ -90,6 +105,10 @@ def render_beiyi_cases(
             render_path,
             expected_mice=max(int(expected_mice), 2),
             font_path=font_path,
+            # Folder labels are ground truth for validation, not an input to
+            # prediction or rendering. Passing them as focus previously
+            # changed same-layer box labels and biased visual review.
+            focus_behavior=None,
         )
 
     for filename in (
@@ -107,8 +126,20 @@ def main() -> int:
     parser.add_argument("--analysis-output", type=Path, required=True)
     parser.add_argument("--render-output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--expected-mice", type=int, default=20)
+    parser.add_argument(
+        "--cache-output",
+        type=Path,
+        default=None,
+        help="另一个验证目录中的 YOLO 缓存根目录；默认从 analysis-output 查找。",
+    )
+    parser.add_argument("--expected-mice", type=int, default=BEIYI_EXPECTED_MICE)
     parser.add_argument("--font-path", type=Path, default=None)
+    parser.add_argument(
+        "--behaviors",
+        nargs="+",
+        default=None,
+        help="只渲染清单中的指定行为，例如 chase avoidance attack。",
+    )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -128,6 +159,8 @@ def main() -> int:
         expected_mice=args.expected_mice,
         force=args.force,
         font_path=args.font_path,
+        cache_output=args.cache_output,
+        expected_behaviors=args.behaviors,
     )
     return 0
 

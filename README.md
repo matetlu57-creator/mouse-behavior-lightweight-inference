@@ -63,19 +63,31 @@ YOLO Pose 缓存时，应先使用上游缓存生成脚本完成预推理。
 - chase：追逐 FSM 确认的追逐事件，渲染为“追逐”和“被追逐”；
 - attack：满足发起、接触、反应或接触后分离证据的攻击事件，渲染为“攻击”和
   “被攻击”；
+- 北医攻击在关键点被遮挡时优先使用重叠框、框中心快速位移、面积变化和 IoU 突变。
+  骑乘或扭打造成的短漏检最多使用配置的 12 帧框级桥接，但预测框不会进入普通
+  关键点轨迹或群体人数统计；
 - nose_head、nose_tail：独立几何接触事件，不是第三类攻击，也不会仅因为
   接触距离满足就打开攻击 FSM；
 - together、approach、avoidance：鼠对级社交行为；
 - running、walking、stationary：小鼠个体行为；
 - huddle、isolation：群体行为，并携带实际参与的 member_ids。
 
-渲染器按参与者显示行为，而不是用一个全局标签覆盖整帧：
+渲染器按参与者显示行为，而不是用一个全局标签覆盖整帧。对同一只小鼠，显示层级
+固定为“群体行为 > 社交行为 > 个体行为”：
 
 - 群体行为只显示在真实参与群体行为的小鼠框上；
-- 社交行为显示在对应鼠对的参与者上；
-- 个体行为仍然可以和其他小鼠的社交或群体行为同时出现；
-- 同一只小鼠同时拥有多个事件时，攻击、追逐、回避、接近和群体行为按语义
-  优先级显示；普通接触不会覆盖攻击标签；
+- huddle 只有至少三只小鼠在局部稳定核心内才成立；每只成员至少要有两个同组邻居，
+  稀疏的三鼠串联和成员不断变化的短暂近邻不会升级为扎堆。通用 profile 默认使用
+  5 cm 的单条局部邻接边，北医 profile 根据四个 huddle 正向样例的稳定三鼠核心距离
+  标定为 11 cm。大型 huddle 不要求所有成员的两两中心距离都小于 11 cm，因此远端
+  对角小鼠不会使真实扎堆失效；北医同时关闭体长二次上限，避免白鼠和黑鼠混合时
+  把固定空间阈值错误缩小。两只小鼠接近仍属于社交行为；
+- 当小鼠参与 huddle 或 isolation 时，该小鼠显示“扎堆”或“孤立”，不再显示它的
+  社交或个体行为；
+- 没有群体行为覆盖的鼠对，才显示 together、approach、chase、avoidance、attack
+  或接触行为；
+- 没有更高层级事件覆盖的小鼠，最后才显示 running、walking、stationary；
+- 不参与群体事件的小鼠仍可独立显示自己的社交或个体行为；
 - 没有行为事件的小鼠显示“仅追踪”，不会因为其他小鼠发生群体行为而被统一
   标记为群体行为。
 
@@ -90,6 +102,24 @@ YOLO Pose 缓存时，应先使用上游缓存生成脚本完成预推理。
 恢复分支只接受距离、朝向、速度、接触几何、角色和事件分数共同满足条件的
 短候选，不使用视频名称判断行为。
 
+北医 profile 先对齐规范中可从视频时间轴直接验证的持续时间。群体扎堆的距离阈值
+已经根据四个北医 huddle 正向样例做了独立标定；其它尚未完成尺度校准的速度数值不
+作为本轮验收标准。规范没有明确固定时长的行为在
+本 profile 中统一按至少 1 秒确认：接近、回避、攻击和鼻头接触至少 1 秒；规范
+明确的时长仍按原定义执行，即奔跑至少 0.5 秒，行走、静止、一起、扎堆至少
+1 秒，追逐至少 2 秒，鼻尾接触至少 0.5 秒。孤立行为是当前项目的明确例外，
+按至少 3 秒确认。核心证据达不到门槛时不会进入正式行为 CSV、渲染或网站导出，
+即使显示区间因复核需要包含前后文，也不把前后文计入行为持续时间。
+
+攻击事件还有两个跨帧可靠性门：至少需要两个分析样本在短时间窗口内共同支持，
+并且核心证据至少持续 1 秒。单帧或不足 1 秒的攻击候选不会进入行为 CSV，也不会
+在渲染框上显示为攻击；这类候选仍可在调试特征中定位原因。
+
+北医样例渲染可以额外指定重点行为。例如 `--focus-behavior attack` 会在右侧面板
+持续显示“攻击/被攻击”重点，便于检查整段视频；这个重点标签是渲染上下文，不能
+替代实际事件证据。渲染日志分别报告 `persistent_display_coverage` 和
+`evidence_coverage`，前者在指定重点时为整段视频，后者仍由真实事件区间计算。
+
 ## 安装
 
 项目要求 Python 3.10 或更高版本。建议使用项目自己的虚拟环境：
@@ -102,8 +132,28 @@ python -m pip install -e .
 python -m pip install -r requirements-dev.txt
 ~~~
 
-从视频生成 Pose 缓存时，继续使用已经安装 PyTorch 和 Ultralytics 的环境。
-模型权重不进入普通 Git 历史，详见 weights/README.md。
+在 Windows 上请使用仓库提供的测试入口：
+
+~~~powershell
+.\scripts\run_pytest.ps1
+.\scripts\run_quality.ps1 -CI
+~~~
+
+测试环境和 YOLO 推理环境是有意分开的。测试 `.venv` 只安装仓库声明的轻量
+依赖和开发工具，不加载 Torch；从视频生成 YOLO Pose 缓存时使用已验证可用的
+`yolo26` 环境，例如：
+
+~~~powershell
+D:\Anaconda3\envs\yolo26\python.exe .\scripts\build_lightweight_pose_cache.py --help
+~~~
+
+不要把项目测试命令直接交给含有多个旧版科学计算包的全局 Anaconda base 环境。
+否则可能出现 `torch\lib\c10.dll` 的 Windows DLL 初始化错误，或 Pandas 的可选
+加速包版本警告；这类错误属于运行时环境漂移，不是行为算法或 pytest 断言失败。
+
+从视频生成 Pose 缓存时，继续使用已经安装 PyTorch 和 Ultralytics 的推理环境；
+本机可使用上面的 `yolo26` 解释器。模型权重不进入普通 Git 历史，详见
+weights/README.md。
 
 ## 快速开始
 
@@ -129,7 +179,15 @@ python .\scripts\run_lightweight_behavior_inference.py --video "D:\data\part_001
 ~~~
 
 渲染视频会显示小鼠框、ID、七点骨架、当前行为和右侧行为面板。中文字体可自动
-查找，也可以使用 --font-path 指定字体。
+查找，也可以使用 --font-path 指定字体。北医三类重点样例可以在渲染时追加：
+
+~~~powershell
+python .\scripts\run_lightweight_behavior_inference.py --video "D:\data\attack.mp4" --yolo-cache "D:\cache\attack\yolo_precompute" --output-dir ".\outputs\attack" --render-only --events ".\outputs\attack\lightweight_behavior_events.csv" --render-output ".\outputs\attack\攻击重点渲染.mp4" --focus-behavior attack
+~~~
+
+`focus-behavior` 只控制渲染复核的持续重点，不会根据视频名或目录名生成行为。
+批量北医渲染脚本会把验证清单中的期望行为传给渲染器，因此重点标题会和样例
+文件夹保持一致，但推理 CSV 仍然只来自轨迹、几何和时序证据。
 
 ### 运行完整管线
 
@@ -144,6 +202,9 @@ python .\scripts\run_full_behavior_pipeline.py --video "D:\data\part_001.mp4" --
 - fast.yaml：降低计算量，适合快速检查；
 - balanced.yaml：常规分析的推荐配置；
 - high_accuracy.yaml：使用更小采样步长，优先保留短暂行为。
+- beiyi.yaml：北医短视频不使用自适应笼界，也不使用固定 polygon 笼界。北医 RFID-CV
+  示例按 10 只小鼠处理，北医验证和渲染脚本默认使用 `expected_mice=10`；通用 20
+  只小鼠视频仍需显式传入 `expected_mice=20`。
 
 新实验应在 configs/experiments/ 中使用独立文件记录。根目录的
 mouse_chase_attack_config.yaml 仍保留给完整管线和旧调用方。
@@ -201,10 +262,10 @@ mouse_ids。
 ## 测试与质量检查
 
 ~~~powershell
-python -m pytest -q
-python scripts/validate_repository.py
-python scripts/run_quality.py
-python scripts/run_quality.py --ci
+.\scripts\run_pytest.ps1
+.\scripts\run_quality.ps1 -Step repository
+.\scripts\run_quality.ps1
+.\scripts\run_quality.ps1 -CI
 ~~~
 
 测试分层如下：
@@ -214,8 +275,10 @@ python scripts/run_quality.py --ci
 - tests/regression/：历史输出、性能和最小旧实现夹具；
 - tests/e2e/：CLI 和端到端冒烟测试。
 
-北医样例的视频级覆盖只能证明示例中出现了期望类别，不能替代带帧级真值的
-Precision、Recall、F1 或 actor/target 准确率。
+北医样例的视频级覆盖只能证明示例中出现了期望类别；持续时间审计还会优先读取
+事件的 `core_duration_s`，不把渲染前后文算作行为证据。由于目录是视频级分类而
+不是逐帧标注，仍然不能替代带帧级真值的 Precision、Recall、F1 或 actor/target
+准确率。验证脚本只把目录名作为外部验收清单，不把目录名传入推理规则。
 
 ## 故障排查
 
@@ -232,13 +295,15 @@ Precision、Recall、F1 或 actor/target 准确率。
 ### 行为持续时间很短
 
 查看 CSV 中的 core_duration_s、temporal_padding_frames 和 event_recovery。
-核心证据可能只有一到两帧，而渲染区间会增加有限前后文，不要只用 duration_s
-判断算法证据持续时间。
+通用调试候选可能只有一到两帧，而渲染区间会增加有限前后文。北医 profile 会在
+正式导出前额外执行行为持续时间门，因此应优先检查 core_duration_s，再判断是否
+达到该 profile 的要求，不要只用包含前后文的 duration_s。
 
 ### 本地质量门缺少工具
 
 按照 requirements-dev.txt 安装开发依赖。如果当前解释器与 PyTorch 环境不同，
-请在运行质量门、测试和真实视频推理时分别明确 Python 路径。
+请使用项目包装器分别运行测试/质量门，并使用 `yolo26` 解释器运行真实视频的
+YOLO Pose 缓存生成。若包装器提示找不到 `.venv`，先按“安装”章节创建它。
 
 ## 贡献和 Git workflow
 

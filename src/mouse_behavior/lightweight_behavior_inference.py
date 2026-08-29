@@ -219,53 +219,74 @@ def _prepare_video_arena_boundary(
     The default is always per-video learning.  A JSON can only be reused when
     the caller explicitly sets ``reuse_boundary_json``; the boundary module
     then checks the saved source path, resolution, and file fingerprint.
+    ``mode=configured`` skips heatmap learning and uses the fixed physical
+    cage polygon from ``detector_first.arena_mask.polygon``.  ``mode=disabled``
+    removes arena gating completely.
     """
 
     arena_cfg = dict(config.get("adaptive_arena", {}))
-    if not bool(arena_cfg.get("enabled", True)):
-        return None, None
     configured_polygon = (
         dict(config.get("detector_first", {})).get("arena_mask", {}).get("polygon", [])
     )
-    reuse_value = str(arena_cfg.get("reuse_boundary_json", "") or "").strip()
-    if reuse_value:
-        reuse_path = _resolve_boundary_reuse_path(reuse_value, output_dir, config_path)
-        result = arena_boundary.load_boundary_json(
-            reuse_path,
+    boundary_mode = str(arena_cfg.get("mode", "learned")).strip().lower()
+    if boundary_mode in {"disabled", "none", "off"}:
+        LOGGER.info("笼界模式=disabled：不学习热力图，也不启用固定笼界过滤")
+        return None, None
+    if boundary_mode in {"configured", "fixed", "static"}:
+        result, heatmap = arena_boundary.configured_boundary(
+            configured_polygon,
             width=width,
             height=height,
             source_video=video_path,
-            require_video_match=bool(arena_cfg.get("reuse_require_video_match", True)),
+            heatmap_cell_px=int(arena_cfg.get("heatmap_cell_px", 20)),
         )
-        heatmap = np.zeros(
-            (
-                max(int(math.ceil(height / max(result.heatmap_cell_px, 1))), 1),
-                max(int(math.ceil(width / max(result.heatmap_cell_px, 1))), 1),
-            ),
-            dtype=np.float32,
+        LOGGER.info(
+            "笼界模式=configured：跳过短视频热力图学习，使用固定笼界 source=%s area=%.3f",
+            result.source,
+            result.occupied_area_ratio,
         )
     else:
-        records: Iterable[Mapping[str, Any]] = _iter_cache_records(cache_dir)
-        if max_frames is not None:
-            frame_limit = max(int(max_frames), 1)
-            source_records = records
+        if not bool(arena_cfg.get("enabled", True)):
+            return None, None
+        reuse_value = str(arena_cfg.get("reuse_boundary_json", "") or "").strip()
+        if reuse_value:
+            reuse_path = _resolve_boundary_reuse_path(reuse_value, output_dir, config_path)
+            result = arena_boundary.load_boundary_json(
+                reuse_path,
+                width=width,
+                height=height,
+                source_video=video_path,
+                require_video_match=bool(arena_cfg.get("reuse_require_video_match", True)),
+            )
+            heatmap = np.zeros(
+                (
+                    max(int(math.ceil(height / max(result.heatmap_cell_px, 1))), 1),
+                    max(int(math.ceil(width / max(result.heatmap_cell_px, 1))), 1),
+                ),
+                dtype=np.float32,
+            )
+        else:
+            records: Iterable[Mapping[str, Any]] = _iter_cache_records(cache_dir)
+            if max_frames is not None:
+                frame_limit = max(int(max_frames), 1)
+                source_records = records
 
-            def limited_records() -> Iterator[Mapping[str, Any]]:
-                for record in source_records:
-                    frame = int(record.get("frame", -1))
-                    if frame >= frame_limit:
-                        break
-                    yield record
+                def limited_records() -> Iterator[Mapping[str, Any]]:
+                    for record in source_records:
+                        frame = int(record.get("frame", -1))
+                        if frame >= frame_limit:
+                            break
+                        yield record
 
-            records = limited_records()
-        result, heatmap = arena_boundary.learn_from_yolo_records(
-            records,
-            width=width,
-            height=height,
-            config=arena_cfg,
-            configured_polygon=configured_polygon,
-            source_video=video_path,
-        )
+                records = limited_records()
+            result, heatmap = arena_boundary.learn_from_yolo_records(
+                records,
+                width=width,
+                height=height,
+                config=arena_cfg,
+                configured_polygon=configured_polygon,
+                source_video=video_path,
+            )
 
     json_path = output_dir / "阶段一_自适应笼界.json"
     png_path = output_dir / "阶段一_运动热力图与笼界.png"
@@ -347,12 +368,60 @@ def analyze(
         logger=LOGGER,
         sink=stage_timings,
     ).start()
+    extended_cfg_for_tracking = dict(config.get("extended_behavior", {}))
+    social_cfg_for_tracking = dict(extended_cfg_for_tracking.get("social", {}))
+    semantic_cfg_for_tracking = dict(social_cfg_for_tracking.get("semantic_fsm", {}))
+    semantic_attack_cfg_for_tracking = dict(semantic_cfg_for_tracking.get("semantic_attack", {}))
+    try:
+        bbox_occlusion_max_gap_frames = max(
+            int(semantic_attack_cfg_for_tracking.get("bbox_occlusion_max_gap_frames", 0)),
+            0,
+        )
+    except (TypeError, ValueError):
+        bbox_occlusion_max_gap_frames = 0
+    lightweight_cfg_for_tracking = dict(config.get("lightweight_behavior_inference", {}))
+    tracking_cfg = dict(lightweight_cfg_for_tracking.get("tracking", {}))
+    try:
+        initial_min_detection_score = max(
+            float(tracking_cfg.get("initial_min_detection_score", 0.0)),
+            0.0,
+        )
+    except (TypeError, ValueError, OverflowError):
+        initial_min_detection_score = 0.0
+    if not np.isfinite(initial_min_detection_score):
+        initial_min_detection_score = 0.0
+    try:
+        recent_assignment_gate = max(
+            float(tracking_cfg.get("recent_assignment_gate", 3.2)),
+            0.1,
+        )
+    except (TypeError, ValueError, OverflowError):
+        recent_assignment_gate = 3.2
+    try:
+        reacquisition_assignment_gate = max(
+            float(tracking_cfg.get("reacquisition_assignment_gate", 5.0)),
+            0.1,
+        )
+    except (TypeError, ValueError, OverflowError):
+        reacquisition_assignment_gate = 5.0
+    try:
+        reacquisition_after_missed_frames = max(
+            int(tracking_cfg.get("reacquisition_after_missed_frames", 3)),
+            0,
+        )
+    except (TypeError, ValueError, OverflowError):
+        reacquisition_after_missed_frames = 3
     tracks, tracking_stats = _track_cache(
         cache_dir,
         total_frames,
         expected_mice,
         arena_polygon=arena_polygon,
         arena_tolerance_px=arena_tolerance,
+        bbox_occlusion_max_gap_frames=bbox_occlusion_max_gap_frames,
+        initial_min_detection_score=initial_min_detection_score,
+        recent_assignment_gate=recent_assignment_gate,
+        reacquisition_assignment_gate=reacquisition_assignment_gate,
+        reacquisition_after_missed_frames=reacquisition_after_missed_frames,
     )
     # Preserve full-resolution source-frame tracks for the annotation website.
     # Behavior analysis may sample this array below; the export contract may not.
@@ -375,7 +444,31 @@ def analyze(
         }
     analysis_frames = int(tracks["valid"].shape[0])
     fps = source_fps / sample_stride
-    kin = _kinematics(tracks, fps=fps)
+    scale_cfg = dict(config.get("scale", {}))
+    scale_mode = str(scale_cfg.get("mode", "body_length")).strip().lower()
+    configured_cm_per_pixel = scale_cfg.get("cm_per_pixel")
+    fixed_cm_per_pixel: float | None = None
+    if configured_cm_per_pixel is not None:
+        try:
+            fixed_cm_per_pixel = float(configured_cm_per_pixel)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("scale.cm_per_pixel must be numeric when provided") from exc
+        if not np.isfinite(fixed_cm_per_pixel) or fixed_cm_per_pixel <= 0.0:
+            raise ValueError("scale.cm_per_pixel must be a finite positive number")
+    if scale_mode == "fixed" and fixed_cm_per_pixel is None:
+        raise ValueError("scale.mode=fixed requires a positive scale.cm_per_pixel")
+    try:
+        assumed_body_length_cm = float(scale_cfg.get("assumed_mouse_body_length_cm", 8.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("scale.assumed_mouse_body_length_cm must be numeric") from exc
+    if not np.isfinite(assumed_body_length_cm) or assumed_body_length_cm <= 0.0:
+        raise ValueError("scale.assumed_mouse_body_length_cm must be a finite positive number")
+    kin = _kinematics(
+        tracks,
+        fps=fps,
+        body_length_cm=assumed_body_length_cm,
+        cm_per_pixel=fixed_cm_per_pixel,
+    )
     kinematics_timer.stop()
     pair_workset = _prepare_pair_workset(
         kin,
@@ -415,7 +508,32 @@ def analyze(
         logger=LOGGER,
         sink=stage_timings,
     ).start()
-    if bool(_extended_behavior_config(config).get("enabled", True)):
+    extended_cfg = _extended_behavior_config(config)
+    social_cfg = dict(extended_cfg.get("social", {}))
+    try:
+        unspecified_min_duration_seconds = max(
+            float(extended_cfg.get("unspecified_min_duration_seconds", 0.0)),
+            0.0,
+        )
+    except (TypeError, ValueError):
+        unspecified_min_duration_seconds = 0.0
+    minimum_behavior_durations = {
+        behavior: max(
+            float(social_cfg[key]),
+            unspecified_min_duration_seconds,
+        )
+        for behavior, key in (
+            ("approach", "approach_min_duration_seconds"),
+            ("avoidance", "avoidance_min_duration_seconds"),
+        )
+        if key in social_cfg
+    }
+    if "attack_min_duration_seconds" in social_cfg or unspecified_min_duration_seconds > 0.0:
+        minimum_behavior_durations["attack"] = max(
+            float(social_cfg.get("attack_min_duration_seconds", 0.0)),
+            unspecified_min_duration_seconds,
+        )
+    if bool(extended_cfg.get("enabled", True)):
         extended_events.extend(
             _extended_individual_and_group_events(
                 kin,
@@ -426,10 +544,16 @@ def analyze(
                 source_fps=source_fps,
                 sample_stride=sample_stride,
                 config=config,
+                pair_behavior_events=[*events, *extended_events],
             )
         )
     events.extend(extended_events)
-    _finalize_event_records_in_place(events, contact_events, source_fps)
+    _finalize_event_records_in_place(
+        events,
+        contact_events,
+        source_fps,
+        minimum_durations=minimum_behavior_durations,
+    )
     global_events_timer.stop()
 
     website_frame_count = (
@@ -438,7 +562,6 @@ def analyze(
     website_fps = (
         float(video_fps) if np.isfinite(video_fps) and float(video_fps) > 0.0 else float(source_fps)
     )
-    extended_cfg = _extended_behavior_config(config)
     website_timer = Timer(
         "website_export",
         logger=LOGGER,
@@ -498,6 +621,7 @@ def analyze(
         "config": str(config_path),
         "analysis_mode": "lightweight_cache_tracking",
         "full_pipeline_not_run": True,
+        "scale_mode": scale_mode,
         "tracker": "position_plus_keypoint_hungarian",
         "expected_mice": int(expected_mice),
         "source_frames": int(total_frames),
@@ -640,6 +764,14 @@ def main() -> int:
         help="render-only 的唯一 MP4 输出路径。",
     )
     parser.add_argument(
+        "--focus-behavior",
+        default=None,
+        help=(
+            "渲染复核时持续显示的重点行为，例如 chase、avoidance 或 attack；"
+            "只影响显示，不参与推理判定。"
+        ),
+    )
+    parser.add_argument(
         "--font-path",
         type=Path,
         default=None,
@@ -730,6 +862,7 @@ def main() -> int:
             expected_mice=max(int(args.expected_mice), 2),
             max_frames=args.max_frames,
             font_path=args.font_path,
+            focus_behavior=args.focus_behavior,
         )
         LOGGER.info("render_output=%s", render_output)
         return 0

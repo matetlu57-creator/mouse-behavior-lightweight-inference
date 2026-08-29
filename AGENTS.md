@@ -25,17 +25,34 @@ input A/B comparison when a change can affect generated events.
 
 ## Canonical checks
 
-Run the project-local quality gate from the repository root:
+在 Windows 上优先使用项目本地 `.venv` 运行质量门。仓库提供的 PowerShell 包装器
+会自动选择 `.venv\Scripts\python.exe`，避免误用装有不兼容 GPU/DLL 依赖的全局
+Anaconda base 环境：
 
 ```text
-python scripts/run_quality.py --ci
+.\scripts\run_quality.ps1 -CI
+```
+
+也可以直接运行项目本地解释器：
+
+```text
+.\.venv\Scripts\python.exe scripts/run_quality.py --ci
 ```
 
 For a focused change, select one or more named steps:
 
 ```text
-python scripts/run_quality.py --step unit_test --step repository
+.\scripts\run_quality.ps1 -Step unit_test,repository
 ```
+
+单独运行 pytest 时使用：
+
+```text
+.\scripts\run_pytest.ps1 tests/unit
+```
+
+YOLO Pose 缓存生成属于另一条运行时边界，应使用已经验证可导入 Torch 的
+`yolo26` 环境，不要把 Torch/CUDA 依赖安装进测试 `.venv`。
 
 Before a GitHub push, also inspect `git status --short --branch`, the staged
 diff, outgoing commits, tracked file sizes, and the configured remote.

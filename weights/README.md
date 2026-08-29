@@ -4,6 +4,10 @@
 
 - `pose/best.pt`：YOLO Pose 小鼠关键点模型。
 
+当前源码仓库的默认 Pose 推理模型是 `weights/pose/best.pt`。运行
+`scripts/build_lightweight_pose_cache.py` 时如果不显式传入 `--model`，就会使用这份
+权重；服务器专用的 TensorRT engine 不属于当前默认流程。
+
 文件校验信息（SHA-256）：
 
 - `pose/best.pt`：`AB2F2FBE7A52980DF993FAD1914B630D9004254A9547FA48F245244662A1BED8`。

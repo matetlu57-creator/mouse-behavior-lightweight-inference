@@ -8,21 +8,26 @@ import argparse
 import json
 import logging
 import shutil
+import time
 from pathlib import Path
 
 import pandas as pd
 
-from _bootstrap import ensure_importable
+from _bootstrap import REPO_ROOT, ensure_importable
 
 ensure_importable()
 
 from mouse_behavior import lightweight_behavior_inference as lightweight  # noqa: E402
 from mouse_behavior.logging_config import configure_logging  # noqa: E402
 from validate_beiyi_extended_ethogram import (  # noqa: E402
+    BEIYI_EXPECTED_MICE,
     LABELS,
+    DURATION_RULES_SECONDS,
     VIDEO_EXTENSIONS,
     _behavior_hit,
     _contact_hit,
+    _duration_audit,
+    _matching_event_durations,
     _safe_case_name,
     _video_info,
 )
@@ -36,8 +41,13 @@ def main() -> int:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--source-output", type=Path, required=True, help="已有缓存的验证目录")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--expected-mice", type=int, default=20)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=REPO_ROOT / "configs" / "profiles" / "beiyi.yaml",
+        help="北医短视频默认使用固定笼界 profile。",
+    )
+    parser.add_argument("--expected-mice", type=int, default=BEIYI_EXPECTED_MICE)
     parser.add_argument("--sample-stride", type=int, default=1)
     parser.add_argument(
         "--log-level",
@@ -61,6 +71,7 @@ def main() -> int:
         if expected is not None:
             cases.append((video, expected))
     rows = []
+    started = time.perf_counter()
     for index, (video, expected) in enumerate(cases, start=1):
         case_name = _safe_case_name(index, video, dataset)
         source_case = source_output / case_name
@@ -91,6 +102,13 @@ def main() -> int:
             if expected in {"nose_head", "nose_tail"}
             else _behavior_hit(events, expected)
         )
+        matched_durations = _matching_event_durations(events, contacts, expected)
+        duration_audit = _duration_audit(
+            expected=expected,
+            video_duration_s=total_frames / max(float(fps), 1e-9),
+            target_event_found=bool(hit),
+            durations=matched_durations,
+        )
         rows.append(
             {
                 "case_index": index,
@@ -102,6 +120,9 @@ def main() -> int:
                 "target_event_found": bool(hit),
                 "video_fps": float(fps),
                 "source_frames": int(total_frames),
+                "video_duration_s": float(total_frames / max(float(fps), 1e-9)),
+                "target_event_count": int(len(matched_durations)),
+                **duration_audit,
                 "event_count": int(len(events)),
                 "contact_event_count": int(len(contacts)),
                 "behavior_counts_json": json.dumps(
@@ -145,6 +166,19 @@ def main() -> int:
         .reset_index()
     )
     aggregate["video_coverage"] = aggregate["detected_video_count"] / aggregate["video_count"]
+    duration_summary = (
+        result.groupby("expected_behavior", sort=True)
+        .agg(
+            duration_context_sufficient_count=("duration_context_sufficient", "sum"),
+            duration_rule_met_count=("duration_rule_met", "sum"),
+            duration_unverifiable_count=(
+                "duration_validation_status",
+                lambda values: int((values == "clip_too_short_to_verify").sum()),
+            ),
+        )
+        .reset_index()
+    )
+    aggregate = aggregate.merge(duration_summary, on="expected_behavior", how="left")
     aggregate.to_csv(output / "beiyi_behavior_coverage.csv", index=False, encoding="utf-8-sig")
     summary = {
         "dataset": str(dataset),
@@ -155,6 +189,12 @@ def main() -> int:
         "multi_mouse_scene": True,
         "video_count": int(len(result)),
         "all_target_videos_hit": bool(result["target_event_found"].all()),
+        "duration_rule_seconds": DURATION_RULES_SECONDS,
+        "duration_rule_met_video_count": int(result["duration_rule_met"].fillna(False).sum()),
+        "duration_unverifiable_video_count": int(
+            (result["duration_validation_status"] == "clip_too_short_to_verify").sum()
+        ),
+        "elapsed_s": float(time.perf_counter() - started),
         "coverage_csv": str(output / "beiyi_behavior_coverage.csv"),
         "case_csv": str(output / "beiyi_video_validation.csv"),
         "limitation": "北医标签为视频/文件夹级示例，不是逐帧真值；video_coverage 不能替代 Precision、Recall、F1 或 actor/target accuracy。",

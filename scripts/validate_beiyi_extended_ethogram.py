@@ -21,7 +21,6 @@ from typing import Any
 import cv2
 import pandas as pd
 import yaml
-from ultralytics import YOLO
 
 from _bootstrap import REPO_ROOT
 from mouse_behavior import lightweight_behavior_inference as lightweight
@@ -33,6 +32,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".avi", ".mkv", ".wmv", ".m4v"}
+
+# The supplied Beiyi examples follow the RFID-CV 10-mouse protocol.  Keep this
+# separate from the general 20-mouse long-video default so short-example
+# tracking does not allocate empty logical identities that can damage temporal
+# continuity and group-level statistics.
+BEIYI_EXPECTED_MICE = 10
 
 LABELS = {
     ("社交行为", "1.一起"): "together",
@@ -47,6 +52,27 @@ LABELS = {
     ("个体行为", "1.奔跑"): "running",
     ("个体行为", "2.行走"): "walking",
     ("个体行为", "3.静止"): "stationary",
+}
+
+UNSPECIFIED_MIN_DURATION_SECONDS = 1.0
+
+# The document gives fixed duration requirements for some labels.  For labels
+# whose definition is semantic but does not state a duration, this validator
+# applies the project's conservative one-second minimum policy.  Isolation is
+# the explicit project override for the current Beiyi examples: three seconds.
+DURATION_RULES_SECONDS: dict[str, float | None] = {
+    "running": 0.5,
+    "walking": 1.0,
+    "stationary": 1.0,
+    "together": 1.0,
+    "approach": UNSPECIFIED_MIN_DURATION_SECONDS,
+    "chase": 2.0,
+    "avoidance": UNSPECIFIED_MIN_DURATION_SECONDS,
+    "attack": UNSPECIFIED_MIN_DURATION_SECONDS,
+    "nose_head": UNSPECIFIED_MIN_DURATION_SECONDS,
+    "nose_tail": 0.5,
+    "huddle": 1.0,
+    "isolation": 3.0,
 }
 
 
@@ -86,17 +112,90 @@ def _behavior_hit(events_df: pd.DataFrame, expected: str) -> bool:
     return bool(events_df["behavior"].astype(str).eq(expected).any())
 
 
+def _matching_event_durations(
+    events_df: pd.DataFrame,
+    contact_df: pd.DataFrame,
+    expected: str,
+) -> list[float]:
+    """Return core evidence durations for the expected label only."""
+
+    if expected in {"nose_head", "nose_tail"}:
+        if contact_df.empty or "contact_type_components" not in contact_df:
+            return []
+        needle = expected
+        matched = contact_df[
+            contact_df["contact_type_components"]
+            .astype(str)
+            .map(lambda value: needle in value.split(";"))
+        ]
+    else:
+        if events_df.empty or "behavior" not in events_df:
+            return []
+        matched = events_df[events_df["behavior"].astype(str).eq(expected)]
+    if matched.empty:
+        return []
+    duration_column = (
+        "core_duration_s"
+        if "core_duration_s" in matched.columns
+        else "duration_s"
+        if "duration_s" in matched.columns
+        else None
+    )
+    if duration_column is None:
+        return []
+    values = pd.to_numeric(matched[duration_column], errors="coerce").dropna()
+    return [float(value) for value in values if float(value) >= 0.0]
+
+
+def _duration_audit(
+    *,
+    expected: str,
+    video_duration_s: float,
+    target_event_found: bool,
+    durations: list[float],
+) -> dict[str, Any]:
+    required = DURATION_RULES_SECONDS.get(expected)
+    longest = max(durations, default=0.0)
+    if required is None:
+        return {
+            "duration_rule_seconds": None,
+            "duration_context_sufficient": None,
+            "duration_rule_met": None,
+            "duration_validation_status": "not_specified"
+            if target_event_found
+            else "no_matching_event",
+            "target_event_max_core_duration_s": longest,
+        }
+    context_sufficient = video_duration_s >= required
+    rule_met = any(value >= required for value in durations)
+    if rule_met:
+        status = "met"
+    elif not target_event_found:
+        status = "clip_too_short_to_verify" if not context_sufficient else "no_matching_event"
+    elif not context_sufficient:
+        status = "clip_too_short_to_verify"
+    else:
+        status = "observed_below_requirement"
+    return {
+        "duration_rule_seconds": float(required),
+        "duration_context_sufficient": bool(context_sufficient),
+        "duration_rule_met": bool(rule_met),
+        "duration_validation_status": status,
+        "target_event_max_core_duration_s": longest,
+    }
+
+
 def _load_or_build_cache(
     video: Path,
     cache_dir: Path,
-    model: YOLO,
+    model: Any | None,
     model_path: Path,
     *,
     batch_size: int,
     chunk_frames: int,
     imgsz: int,
     device: str,
-) -> tuple[float, int, bool]:
+) -> tuple[float, int, bool, Any | None]:
     fps, total_frames = _video_info(video)
     status_path = cache_dir / "yolo_results_status.json"
     reusable = False
@@ -113,6 +212,16 @@ def _load_or_build_cache(
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             reusable = False
     if not reusable:
+        if model is None:
+            try:
+                from ultralytics import YOLO
+            except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "YOLO cache is missing or stale, but ultralytics is not installed in "
+                    "this interpreter. Build the cache in the inference environment or "
+                    "run this validator against an existing complete cache."
+                ) from exc
+            model = YOLO(str(model_path))
         cache_dir.mkdir(parents=True, exist_ok=True)
         pose_cache.build_cache(
             video,
@@ -124,7 +233,7 @@ def _load_or_build_cache(
             device=device,
             model=model,
         )
-    return fps, total_frames, reusable
+    return fps, total_frames, reusable, model
 
 
 def run_validation(
@@ -137,7 +246,7 @@ def run_validation(
     chunk_frames: int = 300,
     imgsz: int = 768,
     device: str = "0",
-    expected_mice: int = 20,
+    expected_mice: int = BEIYI_EXPECTED_MICE,
     sample_stride: int = 1,
     force: bool = False,
 ) -> Path:
@@ -182,7 +291,10 @@ def run_validation(
         yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
 
-    model = YOLO(str(model_path))
+    # Existing YOLO caches can be replayed in the small, stable test
+    # environment.  Import and construct the GPU inference stack lazily only
+    # if one cache is actually missing or stale.
+    model: Any | None = None
     rows: list[dict[str, Any]] = []
     started = time.perf_counter()
     try:
@@ -193,7 +305,7 @@ def run_validation(
             analysis_dir = case_dir / "analysis"
             if force and case_dir.exists():
                 shutil.rmtree(case_dir)
-            fps, total_frames, cache_reused = _load_or_build_cache(
+            fps, total_frames, cache_reused, model = _load_or_build_cache(
                 video,
                 cache_dir,
                 model,
@@ -222,6 +334,13 @@ def run_validation(
                 if expected in {"nose_head", "nose_tail"}
                 else _behavior_hit(events_df, expected)
             )
+            matched_durations = _matching_event_durations(events_df, contacts_df, expected)
+            duration_audit = _duration_audit(
+                expected=expected,
+                video_duration_s=total_frames / max(float(fps), 1e-9),
+                target_event_found=bool(hit),
+                durations=matched_durations,
+            )
             behavior_counts = (
                 events_df["behavior"].astype(str).value_counts().to_dict()
                 if "behavior" in events_df
@@ -243,9 +362,12 @@ def run_validation(
                     "target_event_found": bool(hit),
                     "video_fps": float(fps),
                     "source_frames": int(total_frames),
+                    "video_duration_s": float(total_frames / max(float(fps), 1e-9)),
                     "cache_reused": bool(cache_reused),
                     "event_count": int(len(events_df)),
                     "contact_event_count": int(len(contacts_df)),
+                    "target_event_count": int(len(matched_durations)),
+                    **duration_audit,
                     "behavior_counts_json": json.dumps(
                         behavior_counts, ensure_ascii=False, sort_keys=True
                     ),
@@ -282,6 +404,19 @@ def run_validation(
         .reset_index()
     )
     aggregate["video_coverage"] = aggregate["detected_video_count"] / aggregate["video_count"]
+    duration_summary = (
+        result_df.groupby("expected_behavior", sort=True)
+        .agg(
+            duration_context_sufficient_count=("duration_context_sufficient", "sum"),
+            duration_rule_met_count=("duration_rule_met", "sum"),
+            duration_unverifiable_count=(
+                "duration_validation_status",
+                lambda values: int((values == "clip_too_short_to_verify").sum()),
+            ),
+        )
+        .reset_index()
+    )
+    aggregate = aggregate.merge(duration_summary, on="expected_behavior", how="left")
     aggregate.to_csv(output / "beiyi_behavior_coverage.csv", index=False, encoding="utf-8-sig")
     summary = {
         "dataset": str(dataset),
@@ -291,6 +426,10 @@ def run_validation(
         "multi_mouse_scene": True,
         "video_count": int(len(result_df)),
         "all_target_videos_hit": bool(result_df["target_event_found"].all()),
+        "duration_rule_met_video_count": int(result_df["duration_rule_met"].fillna(False).sum()),
+        "duration_unverifiable_video_count": int(
+            (result_df["duration_validation_status"] == "clip_too_short_to_verify").sum()
+        ),
         "elapsed_s": float(time.perf_counter() - started),
         "coverage_csv": str(output / "beiyi_behavior_coverage.csv"),
         "case_csv": str(output / "beiyi_video_validation.csv"),
@@ -307,13 +446,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "default.yaml")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=REPO_ROOT / "configs" / "profiles" / "beiyi.yaml",
+        help="北医短视频默认使用固定笼界 profile；如需实验覆盖可显式传入其他配置。",
+    )
     parser.add_argument("--model", type=Path, default=REPO_ROOT / "weights" / "pose" / "best.pt")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--chunk-frames", type=int, default=300)
     parser.add_argument("--imgsz", type=int, default=768)
     parser.add_argument("--device", default="0")
-    parser.add_argument("--expected-mice", type=int, default=20)
+    parser.add_argument("--expected-mice", type=int, default=BEIYI_EXPECTED_MICE)
     parser.add_argument("--sample-stride", type=int, default=1)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(

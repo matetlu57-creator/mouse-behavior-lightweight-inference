@@ -159,6 +159,8 @@ features 和标准行为证据只在候选窗口内计算。窗口外仍保留�
 - standard_fsm.py：标准追逐和攻击的状态转移、持续时间和角色确定；
 - ethogram.py：扩展行为分类、短事件恢复、个体行为、社交行为和群体行为；
 - pair_analysis.py：候选鼠对的窗口化分析编排和事件汇总；
+- social_fsm.py：扩展社交行为的相对距离和方向 FSM；北医 profile 在这里使用
+  框接触、框运动和有限遮挡桥接作为攻击的主要证据；
 - engine.py：对外组织标准行为引擎相关接口；
 - __init__.py：公开必要的行为分析对象。
 
@@ -286,6 +288,8 @@ scripts/ 只放命令行和批处理入口，算法实现应放在 src/mouse_beh
 
 - scripts/validate_repository.py：目录边界、敏感文件和大文件检查；
 - scripts/run_quality.py：从 .quality-gate.toml 读取并执行质量门；
+- scripts/run_quality.ps1、scripts/run_pytest.ps1：Windows 下固定优先使用项目
+  `.venv` 的测试/质量门入口，避免误用全局 Anaconda base；
 - tools/check_repository.py：仓库检查的实际实现；
 - tools/compare_analysis_outputs.py：规范化比较两次分析输出；
 - tools/inspect_distribution.py：检查打包产物内容；
@@ -304,6 +308,7 @@ configs/default.yaml
 configs/profiles/fast.yaml
 configs/profiles/balanced.yaml
 configs/profiles/high_accuracy.yaml
+configs/profiles/beiyi.yaml
           ↓
 configs/experiments/<experiment>.yaml
 ~~~
@@ -349,7 +354,7 @@ weights/pose/best.pt
 2. 与该视频一一对应且已经完成的 YOLO Pose 缓存目录；
 3. YAML 配置或 profile；
 4. 视频 FPS，除非从调用方明确提供其他有效值；
-5. 预期小鼠数量，北医 20 鼠样例通常传入 20。
+5. 预期小鼠数量：通用 20 鼠视频传入 20；北医 RFID-CV 10 鼠示例使用北医脚本默认值 10。
 
 缓存目录至少应包含：
 
@@ -363,6 +368,8 @@ yolo_precompute/
 
 yolo_results_status.json 必须标记完成，next_frame 必须与视频总帧数一致。
 每条 Pose 记录包含七个关键点、关键点置信度、bbox_xyxy、框置信度和姿态质量。
+轻量跟踪输出还会记录 `bbox_observed` 和 `bbox_imputed`。后者只表示短时框级
+遮挡保持，不等于检测器在该帧真实检测到了小鼠。
 
 ### 6.2 缓存生成输入
 
@@ -484,9 +491,11 @@ lightweight_analysis_metadata.json 用于复现和性能分析，通常包含：
 - 接触行为区域：判断 nose_head、nose_tail 和组合接触；
 - 群体行为区域：判断 huddle、isolation，并保存真实成员。
 
-这些区域并行运行。不能因为一只小鼠参与了社交行为，就把它的个体行为删掉；
-也不能因为当前帧有群体行为，就把整帧所有小鼠都标成群体行为。渲染器根据实际
-参与者和显示优先级决定每个 ID 的文字，不改变事件 CSV 中的核心证据。
+这些区域并行运行，事件 CSV 保留各区域的核心证据。渲染器根据实际参与者和固定
+层级“群体行为 > 社交行为 > 个体行为”决定每个 ID 的文字：参与 huddle 或
+isolation 的小鼠不再显示较低层级的鼠对或个体行为，未参与群体事件的小鼠仍可
+显示自己的社交或个体行为；不会因为当前帧有群体行为，就把整帧所有小鼠都标成
+群体行为。
 
 ## 九、调试和性能定位
 

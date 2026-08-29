@@ -19,6 +19,37 @@ from ..utils.timer import Timer
 LOGGER = logging.getLogger("mouse_behavior.lightweight_behavior_inference")
 
 
+def _bbox_iou_array(boxes_a: np.ndarray, boxes_b: np.ndarray) -> np.ndarray:
+    """Return frame/pair IoU values without requiring pose landmarks."""
+
+    boxes_a = np.asarray(boxes_a, dtype=float)
+    boxes_b = np.asarray(boxes_b, dtype=float)
+    if boxes_a.shape != boxes_b.shape or boxes_a.ndim != 3 or boxes_a.shape[-1] != 4:
+        raise ValueError(
+            f"bbox arrays must have the same shape (frames, pairs, 4), got "
+            f"{boxes_a.shape} and {boxes_b.shape}"
+        )
+    finite = np.all(np.isfinite(boxes_a), axis=2) & np.all(np.isfinite(boxes_b), axis=2)
+    valid_a = (boxes_a[:, :, 2] > boxes_a[:, :, 0]) & (boxes_a[:, :, 3] > boxes_a[:, :, 1])
+    valid_b = (boxes_b[:, :, 2] > boxes_b[:, :, 0]) & (boxes_b[:, :, 3] > boxes_b[:, :, 1])
+    x1 = np.maximum(boxes_a[:, :, 0], boxes_b[:, :, 0])
+    y1 = np.maximum(boxes_a[:, :, 1], boxes_b[:, :, 1])
+    x2 = np.minimum(boxes_a[:, :, 2], boxes_b[:, :, 2])
+    y2 = np.minimum(boxes_a[:, :, 3], boxes_b[:, :, 3])
+    intersection = np.maximum(x2 - x1, 0.0) * np.maximum(y2 - y1, 0.0)
+    area_a = np.maximum(boxes_a[:, :, 2] - boxes_a[:, :, 0], 0.0) * np.maximum(
+        boxes_a[:, :, 3] - boxes_a[:, :, 1], 0.0
+    )
+    area_b = np.maximum(boxes_b[:, :, 2] - boxes_b[:, :, 0], 0.0) * np.maximum(
+        boxes_b[:, :, 3] - boxes_b[:, :, 1], 0.0
+    )
+    union = area_a + area_b - intersection
+    result = np.zeros(union.shape, dtype=float)
+    valid = finite & valid_a & valid_b & (union > 1e-9)
+    result[valid] = intersection[valid] / union[valid]
+    return np.clip(result, 0.0, 1.0)
+
+
 def _pair_dataframe(
     metrics: Mapping[str, Any],
     pair_index: int,
@@ -36,6 +67,37 @@ def _pair_dataframe(
     acceleration = np.asarray(metrics["acceleration"], dtype=float)
     angular = np.asarray(metrics["angular_speed"], dtype=float)
     pose_deformation = np.asarray(metrics["pose_deformation"], dtype=float)
+    bbox_speed = np.asarray(
+        metrics.get("bbox_speed_body_lengths_per_frame", np.zeros_like(speed)),
+        dtype=float,
+    )
+    bbox_acceleration = np.asarray(
+        metrics.get("bbox_acceleration_body_lengths_per_frame2", np.zeros_like(speed)),
+        dtype=float,
+    )
+    bbox_area_change = np.asarray(
+        metrics.get("bbox_area_change_ratio", np.zeros_like(speed)),
+        dtype=float,
+    )
+    bbox_iou_previous = np.asarray(
+        metrics.get("bbox_iou_previous", np.zeros_like(speed)),
+        dtype=float,
+    )
+    bbox_centers_px = np.asarray(
+        metrics.get(
+            "bbox_centers_px",
+            np.full((*speed.shape, 2), np.nan, dtype=float),
+        ),
+        dtype=float,
+    )
+    if bbox_centers_px.shape != (*speed.shape, 2):
+        bbox_centers_px = np.full((*speed.shape, 2), np.nan, dtype=float)
+    bbox_scale_px = np.asarray(
+        metrics.get("bbox_scale_px", np.full_like(speed, np.nan, dtype=float)),
+        dtype=float,
+    )
+    if bbox_scale_px.shape != speed.shape:
+        bbox_scale_px = np.full_like(speed, np.nan, dtype=float)
     i, j = int(mouse_a), int(mouse_b)
     p = len(valid)
     direction = np.asarray(metrics["direction"][:, pair_index], dtype=float)
@@ -56,6 +118,34 @@ def _pair_dataframe(
     nose_head_ba = np.asarray(metrics["nose_head_ba"][:, pair_index], dtype=float)
     behavior_speed = np.asarray(metrics["behavior_speed"], dtype=float)
     distance_body_lengths = distance / 8.0
+    bbox_center_distance = np.asarray(
+        metrics.get("bbox_center_distance_body_lengths", np.full(valid.shape, np.inf)),
+        dtype=float,
+    )[:, pair_index]
+    bbox_overlap_iou = np.asarray(
+        metrics.get("bbox_overlap_iou", np.zeros_like(metrics["distance"])),
+        dtype=float,
+    )[:, pair_index]
+    bbox_pair_valid = np.asarray(
+        metrics.get("bbox_pair_valid", np.zeros_like(metrics["valid_pair"], dtype=bool)),
+        dtype=bool,
+    )[:, pair_index]
+    bbox_pair_observed = np.asarray(
+        metrics.get("bbox_pair_observed", np.zeros_like(metrics["valid_pair"], dtype=bool)),
+        dtype=bool,
+    )[:, pair_index]
+    bbox_pair_imputed = np.asarray(
+        metrics.get("bbox_pair_imputed", np.zeros_like(metrics["valid_pair"], dtype=bool)),
+        dtype=bool,
+    )[:, pair_index]
+    bbox_observed = np.asarray(
+        metrics.get("bbox_observed", np.ones_like(speed, dtype=bool)),
+        dtype=bool,
+    )
+    bbox_imputed = np.asarray(
+        metrics.get("bbox_imputed", np.zeros_like(speed, dtype=bool)),
+        dtype=bool,
+    )
     score_ab = pursuit_ab + escape_ab + 0.15 * speed[:, i]
     score_ba = pursuit_ba + escape_ba + 0.15 * speed[:, j]
     tie = np.abs(score_ab - score_ba) <= 0.05
@@ -79,6 +169,21 @@ def _pair_dataframe(
         "valid_pair": valid,
         "center_distance_cm": distance,
         "center_distance_body_lengths": distance_body_lengths,
+        "bbox_center_distance_body_lengths": bbox_center_distance,
+        "bbox_overlap_iou": bbox_overlap_iou,
+        "bbox_pair_valid": bbox_pair_valid,
+        "bbox_pair_observed": bbox_pair_observed,
+        "bbox_pair_imputed": bbox_pair_imputed,
+        "mouse_a_bbox_observed": bbox_observed[:, i],
+        "mouse_b_bbox_observed": bbox_observed[:, j],
+        "mouse_a_bbox_imputed": bbox_imputed[:, i],
+        "mouse_b_bbox_imputed": bbox_imputed[:, j],
+        "mouse_a_bbox_center_x_px": bbox_centers_px[:, i, 0],
+        "mouse_a_bbox_center_y_px": bbox_centers_px[:, i, 1],
+        "mouse_b_bbox_center_x_px": bbox_centers_px[:, j, 0],
+        "mouse_b_bbox_center_y_px": bbox_centers_px[:, j, 1],
+        "mouse_a_bbox_scale_px": bbox_scale_px[:, i],
+        "mouse_b_bbox_scale_px": bbox_scale_px[:, j],
         "head_distance_cm": np.asarray(metrics["head_distance"][:, pair_index], dtype=float),
         "mouse_a_speed_cm_s": speed[:, i],
         "mouse_b_speed_cm_s": speed[:, j],
@@ -213,6 +318,22 @@ def _pair_dataframe(
                 f"{prefix}_nose_head_distance_cm": nose_head,
                 f"{prefix}_actor_pose_deformation_energy": pose_deformation[:, actor],
                 f"{prefix}_target_pose_deformation_energy": pose_deformation[:, target],
+                f"{prefix}_actor_bbox_speed_body_lengths_per_frame": bbox_speed[:, actor],
+                f"{prefix}_target_bbox_speed_body_lengths_per_frame": bbox_speed[:, target],
+                f"{prefix}_actor_bbox_acceleration_body_lengths_per_frame2": bbox_acceleration[
+                    :, actor
+                ],
+                f"{prefix}_target_bbox_acceleration_body_lengths_per_frame2": bbox_acceleration[
+                    :, target
+                ],
+                f"{prefix}_actor_bbox_area_change_ratio": bbox_area_change[:, actor],
+                f"{prefix}_target_bbox_area_change_ratio": bbox_area_change[:, target],
+                f"{prefix}_actor_bbox_jump_score": 1.0 - bbox_iou_previous[:, actor],
+                f"{prefix}_target_bbox_jump_score": 1.0 - bbox_iou_previous[:, target],
+                f"{prefix}_actor_bbox_observed": bbox_observed[:, actor],
+                f"{prefix}_target_bbox_observed": bbox_observed[:, target],
+                f"{prefix}_actor_bbox_imputed": bbox_imputed[:, actor],
+                f"{prefix}_target_bbox_imputed": bbox_imputed[:, target],
             }
         )
     return pd.DataFrame(data)
@@ -262,6 +383,87 @@ def _pair_metrics(
                 f"frame_mask must have shape ({frames}, {pairs}), got {frame_mask.shape}"
             )
     valid_pair = raw_valid_pair & frame_mask
+    raw_bboxes_value = kin.get("bboxes")
+    raw_bbox_centers_value = kin.get("bbox_centers_px")
+    raw_bbox_scale_value = kin.get("bbox_scale_px")
+    if raw_bboxes_value is None:
+        raw_bboxes = np.full((frames, mice, 4), np.nan, dtype=float)
+    else:
+        raw_bboxes = np.asarray(raw_bboxes_value, dtype=float)
+    if raw_bbox_centers_value is None:
+        bbox_centers = np.full((frames, mice, 2), np.nan, dtype=float)
+    else:
+        bbox_centers = np.asarray(raw_bbox_centers_value, dtype=float)
+    if raw_bbox_scale_value is None:
+        bbox_scale = np.full((frames, mice), np.nan, dtype=float)
+    else:
+        bbox_scale = np.asarray(raw_bbox_scale_value, dtype=float)
+    bbox_available = (
+        raw_bboxes.shape == (frames, mice, 4)
+        and bbox_centers.shape == (frames, mice, 2)
+        and bbox_scale.shape == (frames, mice)
+    )
+    if bbox_available:
+        bbox_valid = np.asarray(
+            kin.get(
+                "bbox_valid",
+                np.all(np.isfinite(raw_bboxes), axis=2),
+            ),
+            dtype=bool,
+        )
+        if bbox_valid.shape != (frames, mice):
+            raise ValueError(
+                f"kin['bbox_valid'] must have shape ({frames}, {mice}), got {bbox_valid.shape}"
+            )
+        bbox_pair_valid = bbox_valid[:, pair_i] & bbox_valid[:, pair_j] & frame_mask
+        bbox_observed_value = kin.get("bbox_observed")
+        if bbox_observed_value is None:
+            bbox_observed = bbox_valid.copy()
+        else:
+            bbox_observed = np.asarray(bbox_observed_value, dtype=bool)
+        if bbox_observed.shape != (frames, mice):
+            raise ValueError(
+                f"kin['bbox_observed'] must have shape ({frames}, {mice}), got {bbox_observed.shape}"
+            )
+        bbox_imputed_value = kin.get("bbox_imputed")
+        if bbox_imputed_value is None:
+            bbox_imputed = np.zeros((frames, mice), dtype=bool)
+        else:
+            bbox_imputed = np.asarray(bbox_imputed_value, dtype=bool)
+        if bbox_imputed.shape != (frames, mice):
+            raise ValueError(
+                f"kin['bbox_imputed'] must have shape ({frames}, {mice}), got {bbox_imputed.shape}"
+            )
+        bbox_pair_observed = (bbox_observed[:, pair_i] | bbox_observed[:, pair_j]) & bbox_pair_valid
+        bbox_pair_imputed = (bbox_imputed[:, pair_i] | bbox_imputed[:, pair_j]) & bbox_pair_valid
+        bbox_delta = bbox_centers[:, pair_j] - bbox_centers[:, pair_i]
+        pair_scales = np.stack((bbox_scale[:, pair_i], bbox_scale[:, pair_j]), axis=0)
+        finite_pair_scales = np.isfinite(pair_scales)
+        pair_scale = np.divide(
+            np.nansum(pair_scales, axis=0),
+            np.sum(finite_pair_scales, axis=0),
+            out=np.full((frames, pairs), np.nan, dtype=float),
+            where=np.sum(finite_pair_scales, axis=0) > 0,
+        )
+        bbox_center_distance = np.full((frames, pairs), np.inf, dtype=float)
+        bbox_distance_values = np.linalg.norm(bbox_delta, axis=2)
+        np.divide(
+            bbox_distance_values,
+            np.maximum(pair_scale, 8.0),
+            out=bbox_center_distance,
+            where=bbox_pair_valid & np.isfinite(pair_scale),
+        )
+        bbox_overlap_iou = _bbox_iou_array(raw_bboxes[:, pair_i], raw_bboxes[:, pair_j])
+        bbox_center_distance[~bbox_pair_valid] = np.inf
+        bbox_overlap_iou[~bbox_pair_valid] = 0.0
+    else:
+        bbox_observed = np.zeros((frames, mice), dtype=bool)
+        bbox_imputed = np.zeros((frames, mice), dtype=bool)
+        bbox_pair_valid = np.zeros((frames, pairs), dtype=bool)
+        bbox_pair_observed = np.zeros((frames, pairs), dtype=bool)
+        bbox_pair_imputed = np.zeros((frames, pairs), dtype=bool)
+        bbox_center_distance = np.full((frames, pairs), np.inf, dtype=float)
+        bbox_overlap_iou = np.zeros((frames, pairs), dtype=float)
     delta = centers[:, pair_j] - centers[:, pair_i]
     distance = np.linalg.norm(delta, axis=2)
     head_distance = np.linalg.norm(heads[:, pair_j] - heads[:, pair_i], axis=2)
@@ -408,6 +610,40 @@ def _pair_metrics(
         "acceleration": np.asarray(kin["acceleration"], dtype=float),
         "angular_speed": np.asarray(kin["angular_speed"], dtype=float),
         "pose_deformation": np.asarray(kin["pose_deformation"], dtype=float),
+        "bbox_pair_valid": bbox_pair_valid,
+        "bbox_pair_observed": bbox_pair_observed,
+        "bbox_pair_imputed": bbox_pair_imputed,
+        "bbox_observed": bbox_observed,
+        "bbox_imputed": bbox_imputed,
+        "bbox_center_distance_body_lengths": bbox_center_distance,
+        "bbox_overlap_iou": bbox_overlap_iou,
+        "bbox_speed_body_lengths_per_frame": np.asarray(
+            kin.get("bbox_speed_body_lengths_per_frame", np.zeros_like(speed)),
+            dtype=float,
+        ),
+        "bbox_acceleration_body_lengths_per_frame2": np.asarray(
+            kin.get("bbox_acceleration_body_lengths_per_frame2", np.zeros_like(speed)),
+            dtype=float,
+        ),
+        "bbox_area_change_ratio": np.asarray(
+            kin.get("bbox_area_change_ratio", np.zeros_like(speed)),
+            dtype=float,
+        ),
+        "bbox_iou_previous": np.asarray(
+            kin.get("bbox_iou_previous", np.zeros_like(speed)),
+            dtype=float,
+        ),
+        "bbox_centers_px": np.asarray(
+            kin.get(
+                "bbox_centers_px",
+                np.full((*speed.shape, 2), np.nan, dtype=float),
+            ),
+            dtype=float,
+        ),
+        "bbox_scale_px": np.asarray(
+            kin.get("bbox_scale_px", np.full_like(speed, np.nan, dtype=float)),
+            dtype=float,
+        ),
     }
     return metrics, pair_i, pair_j
 
