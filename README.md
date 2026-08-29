@@ -7,8 +7,8 @@
 Pose 逐帧缓存为输入，完成小鼠匹配、笼界范围、关键点几何、候选鼠对、接触
 检测、行为状态机和结果渲染。
 
-仓库只保存源代码、配置、测试和说明文档，不保存实验视频、YOLO 缓存、模型
-权重或生成结果。
+仓库保存源代码、配置、测试、说明文档，以及通过 Git LFS 管理的已确认可公开使用的
+默认 Pose 权重；不保存实验视频、YOLO 缓存、私人标注或生成结果。
 
 ## 项目导航
 
@@ -152,8 +152,8 @@ D:\Anaconda3\envs\yolo26\python.exe .\scripts\build_lightweight_pose_cache.py --
 加速包版本警告；这类错误属于运行时环境漂移，不是行为算法或 pytest 断言失败。
 
 从视频生成 Pose 缓存时，继续使用已经安装 PyTorch 和 Ultralytics 的推理环境；
-本机可使用上面的 `yolo26` 解释器。模型权重不进入普通 Git 历史，详见
-weights/README.md。
+本机可使用上面的 `yolo26` 解释器。默认 Pose 权重通过 Git LFS 提供，先执行
+`git lfs pull`，详见 weights/README.md。
 
 ## 快速开始
 
@@ -308,7 +308,8 @@ YOLO Pose 缓存生成。若包装器提示找不到 `.venv`，先按“安装�
 ## 贡献和 Git workflow
 
 一个功能使用一个 branch；需要同时试验多个方向时，使用仓库外 worktree。不要
-在根目录复制第二份源码，也不要把视频、缓存、权重和生成结果加入提交。
+在根目录复制第二份源码，也不要把视频、缓存、未登记权重和生成结果加入提交。
+默认 Pose 权重是唯一登记的 Git LFS 模型文件。
 
 ~~~powershell
 git switch main
@@ -329,7 +330,7 @@ git push -u origin feat/short-description
 当前仓库尚未选择开源许可证。除非版权持有人另行授权，源码默认不授予复制、修改、
 再发布或公开发布许可，详见 LICENSE。
 
-请勿提交视频、私人标注、模型权重、缓存、凭据或 API token。安全问题不要公开发
+请勿提交视频、私人标注、未登记模型权重、缓存、凭据或 API token。安全问题不要公开发
 Issue，请按照 SECURITY.md 通过私密渠道联系维护者。
 
 项目问题、复现信息和功能建议请使用 GitHub Issue；提交代码前请先阅读

@@ -54,8 +54,16 @@ D:\Anaconda3\envs\yolo26\python.exe .\scripts\build_lightweight_pose_cache.py --
 
 ## 模型和数据
 
-仓库不提交视频、Pose 缓存、模型权重、私人标注或生成结果。权重应放在本地
-weights/，数据应放在仓库外；公开发布前需要确认模型、数据和标注的许可证。
+仓库通过 Git LFS 提供已经确认可公开使用的默认 Pose 权重。安装 Git LFS 后获取模型：
+
+~~~powershell
+git lfs install
+git lfs pull
+~~~
+
+模型检出后的路径是 `weights/pose/best.pt`。视频、Pose 缓存、私人标注和生成结果仍应
+放在仓库外；公开发布前需要确认模型、数据和标注的许可证。其他模型权重、TensorRT
+engine 和训练产物不属于当前仓库发布范围。
 
 ## 安装验证
 
