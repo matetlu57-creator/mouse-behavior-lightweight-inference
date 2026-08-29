@@ -183,7 +183,7 @@ def main() -> int:
     summary = {
         "dataset": str(dataset),
         "source_pose_cache": str(source_output),
-        "model": "weights/pose/best.pt (local Release asset, if available)",
+        "model": "weights/pose/best.pt (Git LFS)",
         "pose_only": True,
         "obb_used": False,
         "multi_mouse_scene": True,

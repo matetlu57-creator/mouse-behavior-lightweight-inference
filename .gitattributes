@@ -8,3 +8,4 @@
 *.yml text eol=lf
 *.md text eol=lf
 *.py text eol=lf
+weights/pose/*.pt filter=lfs diff=lfs merge=lfs -text

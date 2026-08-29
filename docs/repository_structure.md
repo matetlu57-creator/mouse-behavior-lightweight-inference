@@ -8,7 +8,7 @@ Python 模块、输入输出、行为分析链路、调试方式和 Git 协作�
 2. 想修改行为算法或渲染逻辑的开发者；
 3. 需要检查结果、定位问题或维护 GitHub 仓库的人。
 
-本文只描述仓库中已经存在的职责边界，不把视频、YOLO 缓存、模型权重或本地
+本文只描述仓库中已经存在的职责边界，不把视频、YOLO 缓存、未登记模型权重或本地
 分析结果当作源码的一部分。未来代码发生变化时，应同时更新本文、对应模块的
 测试和相关算法文档。
 
@@ -40,7 +40,7 @@ mouse-behavior-lightweight-inference/
 ├── examples/                 最小可运行示例
 ├── tools/                    仓库检查、构建检查和结果比较工具
 ├── data/                     数据目录说明，不保存真实数据集
-├── weights/                  模型权重放置说明，不提交权重文件
+├── weights/                  默认 Pose 权重通过 Git LFS 管理，其他权重不提交
 ├── outputs/                  本地运行结果占位目录，不提交生成物
 ├── .github/                  GitHub Actions、Issue 和 PR 模板
 ├── pyproject.toml            Python 包、入口、pytest、ruff、mypy 配置
@@ -334,8 +334,8 @@ Ultralytics 和 PyTorch 的推理环境；缓存分析本身只读取缓存，�
 
 ### 5.3 模型权重
 
-模型权重不进入普通 Git 历史。公开说明位于 weights/README.md，本地约定路径
-是：
+默认 Pose 权重通过 Git LFS 管理，公开说明位于 weights/README.md。其他模型权重、
+TensorRT engine 和训练产物不进入仓库。本地约定路径是：
 
 ~~~text
 weights/pose/best.pt
@@ -623,8 +623,8 @@ git fetch origin main
 git worktree add -b feat/another-direction ..\mouse_behavior_another_direction origin/main
 ~~~
 
-不要在当前仓库根目录复制一份完整源码，也不要把视频、缓存、权重或结果加入
-commit。
+不要在当前仓库根目录复制一份完整源码，也不要把视频、缓存、未登记权重或结果加入
+commit。默认 Pose 权重只能按 Git LFS 规则提交。
 
 提交前检查：
 
@@ -666,11 +666,11 @@ Actions 结果。远端 main 的文件树应与待交付版本逐项比对。
 
 ## 十二、数据安全和发布边界
 
-以下内容不进入普通 Git 历史：
+以下内容不进入普通 Git 历史或 Git LFS：
 
 - 原始视频和渲染视频；
 - YOLO Pose 缓存；
-- 模型权重；
+- 未登记模型权重；默认 Pose 权重是唯一的 Git LFS 例外；
 - 私人标注、SQLite 数据库和真实数据集；
 - API token、密码、cookie、私钥和本机凭据；
 - 临时日志、调试 dump、缓存和分析输出。

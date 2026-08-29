@@ -40,16 +40,19 @@ htmlcov/
 yolo_precompute/
 *_precompute/
 
-# Keep repository documentation/placeholders while excluding local datasets,
-# downloaded weights, and generated output directories.
+# Keep repository documentation/placeholders while excluding local datasets
+# and generated output directories. The canonical public Pose weight is
+# intentionally re-included below and stored through Git LFS.
 data/*
 !data/README.md
 outputs/*
 !outputs/.gitkeep
 weights/*
 !weights/README.md
+!weights/pose/
 weights/pose/*
 !weights/pose/README.md
+!weights/pose/best.pt
 
 # Generated analysis outputs
 output/
