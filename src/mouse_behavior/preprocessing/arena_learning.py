@@ -166,6 +166,46 @@ def _fallback_polygon(
     return frame, "frame_fallback"
 
 
+def configured_boundary(
+    configured_polygon: Any,
+    *,
+    width: int,
+    height: int,
+    heatmap_cell_px: int = 20,
+    source_video: Optional[str | os.PathLike[str]] = None,
+) -> tuple[ArenaBoundaryResult, np.ndarray]:
+    """Use the configured cage polygon without learning from motion.
+
+    Short validation clips do not provide enough trajectory evidence for a
+    reliable per-video heatmap.  This helper keeps the fixed physical cage
+    polygon as an auditable boundary and returns an empty heatmap to make it
+    explicit that no adaptive learning was performed.
+    """
+
+    width = max(int(width), 1)
+    height = max(int(height), 1)
+    cell_px = max(int(heatmap_cell_px), 1)
+    polygon, source = _fallback_polygon(configured_polygon, width, height)
+    configured = source == "configured_polygon"
+    area_ratio = _polygon_area(polygon) / max(float(width * height), 1.0)
+    result = ArenaBoundaryResult(
+        polygon=_polygon_lists(polygon),
+        source=source,
+        motion_sample_count=0,
+        sample_count=0,
+        occupied_area_ratio=float(area_ratio),
+        expansion_ratio=1.0,
+        width=width,
+        height=height,
+        heatmap_cell_px=cell_px,
+        source_video=str(Path(source_video).resolve()) if source_video else "",
+        source_video_fingerprint=_video_fingerprint(str(source_video)) if source_video else {},
+        accepted=bool(configured),
+        rejection_reason="" if configured else "configured_polygon_invalid",
+    )
+    return result, _empty_heatmap(width, height, cell_px)
+
+
 def _detection_center(payload: Mapping[str, Any]) -> Optional[_DetectionPoint]:
     """Use the same body-core center policy as the identity tracker."""
 
@@ -507,6 +547,7 @@ __all__ = [
     "_polygon_lists",
     "_polygon_area",
     "_fallback_polygon",
+    "configured_boundary",
     "_detection_center",
     "_frame_points",
     "_match_motion_tracks",

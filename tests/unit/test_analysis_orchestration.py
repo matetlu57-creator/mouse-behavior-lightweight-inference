@@ -75,3 +75,32 @@ def test_event_finalization_assigns_ids_by_stable_contract_order():
     assert events[1]["duration_s"] == 0.3
     assert contacts[1]["contact_event_id"] == "LCE00001"
     assert contacts[0]["contact_event_id"] == "LCE00002"
+
+
+def test_event_finalization_applies_configured_behavior_duration_gate():
+    events = [
+        {
+            "behavior": "attack",
+            "start_frame": 0,
+            "end_frame": 28,
+            "core_duration_s": 29 / 30,
+        },
+        {
+            "behavior": "attack",
+            "start_frame": 40,
+            "end_frame": 69,
+            "core_duration_s": 1.0,
+        },
+    ]
+
+    lightweight._finalize_event_records_in_place(
+        events,
+        [],
+        source_fps=30.0,
+        minimum_durations={"attack": 1.0},
+    )
+
+    assert len(events) == 1
+    assert events[0]["start_frame"] == 40
+    assert events[0]["core_duration_s"] == 1.0
+    assert events[0]["duration_s"] == 1.0

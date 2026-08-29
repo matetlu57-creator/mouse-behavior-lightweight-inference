@@ -47,6 +47,45 @@ def test_short_event_keeps_core_span_and_adds_bounded_display_context() -> None:
     assert event["event_recovery"] == "none"
 
 
+def test_event_role_uses_confirmed_span_majority_not_peak_frame() -> None:
+    mask = np.ones(10, dtype=bool)
+    score = np.ones(10, dtype=float)
+    score[2] = 10.0
+    actor = np.full(10, 1, dtype=int)
+    target = np.full(10, 3, dtype=int)
+    actor[2] = 3
+    target[2] = 1
+
+    events = _event_rows_from_mask(
+        mask,
+        behavior="chase",
+        level="extended",
+        fps=10.0,
+        source_video=Path("role_crossing.mov"),
+        sample_stride=1,
+        score=score,
+        actor_id=actor,
+        target_id=target,
+        pair_key="1_3",
+        min_duration_seconds=0.5,
+        fill_gap_seconds=0.0,
+    )
+
+    assert len(events) == 1
+    assert events[0]["peak_frame"] == 2
+    assert events[0]["actor_id"] == 1
+    assert events[0]["target_id"] == 3
+    assert events[0]["role_trace"] == [
+        {
+            "pair_key": "1_3",
+            "actor_id": 1,
+            "target_id": 3,
+            "start_frame": 0,
+            "end_frame": 9,
+        }
+    ]
+
+
 def test_short_attack_recovery_accepts_two_temporally_supported_hits() -> None:
     pair = pd.DataFrame(
         {
@@ -168,3 +207,33 @@ def test_finalizer_suppresses_legacy_one_frame_attack_rows() -> None:
     assert len(events) == 1
     assert events[0]["start_frame"] == 20
     assert events[0]["light_event_id"] == "LWE00001"
+
+
+def test_finalizer_suppresses_attack_contained_by_stable_huddle() -> None:
+    events = [
+        {
+            "behavior": "attack",
+            "candidate_level": "extended",
+            "analysis_start_frame": 0,
+            "analysis_end_frame": 59,
+            "start_frame": 0,
+            "end_frame": 59,
+            "duration_s": 2.0,
+            "huddle_conflict_status": "contained_by_stable_huddle",
+        },
+        {
+            "behavior": "attack",
+            "candidate_level": "extended",
+            "analysis_start_frame": 0,
+            "analysis_end_frame": 59,
+            "start_frame": 0,
+            "end_frame": 59,
+            "duration_s": 2.0,
+            "huddle_conflict_status": "independent_pair_behavior",
+        },
+    ]
+
+    _finalize_event_records_in_place(events, [], 30.0)
+
+    assert len(events) == 1
+    assert events[0]["huddle_conflict_status"] == "independent_pair_behavior"

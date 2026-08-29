@@ -6,6 +6,8 @@ events into a compact, human-readable overlay for visual review.
 
 from __future__ import annotations
 
+import ast
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -40,11 +42,35 @@ DISPLAY_NAMES_ZH = {
     "nose_tail_contact": "鼻尾接触",
 }
 
-FOCUS_BEHAVIORS = frozenset({"chase", "avoidance", "attack"})
+FOCUS_BEHAVIORS = frozenset(
+    {
+        "running",
+        "walking",
+        "stationary",
+        "together",
+        "approach",
+        "chase",
+        "avoidance",
+        "attack",
+        "nose_head_contact",
+        "nose_tail_contact",
+        "huddle",
+        "isolation",
+    }
+)
 FOCUS_NAMES_ZH = {
     "chase": "追逐/被追逐",
     "avoidance": "回避/被回避",
     "attack": "攻击/被攻击",
+    "approach": "接近/被接近",
+    "together": "一起",
+    "nose_head_contact": "鼻头接触",
+    "nose_tail_contact": "鼻尾接触",
+    "huddle": "扎堆",
+    "isolation": "孤立",
+    "running": "奔跑",
+    "walking": "行走",
+    "stationary": "静止",
 }
 
 ROLE_NAMES_ZH = {
@@ -84,24 +110,36 @@ CATEGORY_NAMES_ZH = {
     "none": "个体行为",
 }
 
-# A frame can legitimately contain several orthogonal event streams.  The
-# renderer therefore resolves conflicts per mouse rather than hiding every
-# individual event whenever another mouse is in a social/group event.
-# Semantic priority is intentionally independent of the numerical confidence
-# score: a contact score of 1.0 must not overwrite a high-confidence attack.
+# A frame can legitimately contain several event streams.  The renderer
+# resolves conflicts per mouse with the ethogram hierarchy first, then uses
+# the within-layer behavior order and score as tie-breakers.  The social
+# order starts with approach: it is the pre-contact transition that should
+# remain visible when its evidence window overlaps together, avoidance,
+# contact, chase, or attack.  A group label therefore wins over any social or
+# individual label for its members, even when a pair event has a higher
+# numerical confidence.
 DISPLAY_PRIORITY = {
-    "attack": 100,
-    "chase": 90,
-    "avoidance": 80,
-    "approach": 70,
-    "together": 60,
-    "nose_head_contact": 50,
-    "nose_tail_contact": 50,
+    "approach": 140,
+    # Chase and attack remain explicit social channels.  They are below the
+    # approach transition but above the generic together/contact fallbacks so
+    # a reliable aggressive event is not hidden by a contact CSV row.
+    "attack": 130,
+    "chase": 120,
+    "avoidance": 110,
+    "together": 100,
+    "nose_head_contact": 90,
+    "nose_tail_contact": 90,
     "huddle": 40,
     "isolation": 40,
     "running": 30,
     "walking": 20,
     "stationary": 10,
+}
+
+DISPLAY_CATEGORY_PRIORITY = {
+    "group": 3,
+    "social": 2,
+    "individual": 1,
 }
 
 
@@ -138,14 +176,21 @@ def canonical_behavior(value: Any) -> str:
 
 
 def normalize_focus_behavior(value: Any) -> str | None:
-    """Normalize an externally supplied render focus without changing inference.
+    """Normalize an optional review heading without changing displayed events.
 
     The Beiyi validation manifest may provide the expected folder label to the
-    renderer.  This value controls only the persistent review heading; event
-    CSVs and behavior decisions never read it.
+    renderer.  The value is heading-only: it must never alter event selection,
+    per-mouse labels, or the group/social/individual hierarchy.
     """
 
     aliases = {
+        "奔跑": "running",
+        "行走": "walking",
+        "静止": "stationary",
+        "一起": "together",
+        "接近": "approach",
+        "接近/被接近": "approach",
+        "接近-被接近": "approach",
         "追逐": "chase",
         "追逐/被追逐": "chase",
         "追逐-被追逐": "chase",
@@ -154,9 +199,21 @@ def normalize_focus_behavior(value: Any) -> str | None:
         "回避-被回避": "avoidance",
         "攻击": "attack",
         "攻击行为": "attack",
+        "鼻头": "nose_head_contact",
+        "鼻头接触": "nose_head_contact",
+        "鼻尾": "nose_tail_contact",
+        "鼻尾接触": "nose_tail_contact",
+        "扎堆": "huddle",
+        "扎堆行为": "huddle",
+        "孤立": "isolation",
+        "孤立行为": "isolation",
     }
     raw = str(value or "").strip().lower()
     behavior = aliases.get(raw, canonical_behavior(raw))
+    if behavior == "nose_head":
+        behavior = "nose_head_contact"
+    elif behavior == "nose_tail":
+        behavior = "nose_tail_contact"
     return behavior if behavior in FOCUS_BEHAVIORS else None
 
 
@@ -264,12 +321,96 @@ def _deduplicate(events: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return list(best.values())
 
 
-def _display_priority(event: Mapping[str, Any]) -> int:
-    return int(DISPLAY_PRIORITY.get(canonical_behavior(event.get("behavior")), 0))
+def _display_priority(event: Mapping[str, Any], focus_behavior: str | None = None) -> int:
+    category = event_category(event)
+    category_priority = int(DISPLAY_CATEGORY_PRIORITY.get(category or "", 0))
+    behavior_priority = int(DISPLAY_PRIORITY.get(canonical_behavior(event.get("behavior")), 0))
+    # ``focus_behavior`` is retained in the public signature for backwards
+    # compatibility with existing callers.  It is intentionally ignored so
+    # an external review label cannot influence the rendered prediction.
+    _ = focus_behavior
+    return category_priority * 1000 + behavior_priority
+
+
+def _trace_entries(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, (list, tuple)):
+        rows = value
+    elif isinstance(value, str) and value.strip():
+        raw = value.strip()
+        try:
+            rows = json.loads(raw)
+        except json.JSONDecodeError:
+            try:
+                rows = ast.literal_eval(raw)
+            except (SyntaxError, ValueError):
+                return []
+    else:
+        return []
+    if not isinstance(rows, (list, tuple)):
+        return []
+    return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
+def resolve_event_for_frame(
+    event: Mapping[str, Any],
+    frame_index: int,
+) -> dict[str, Any] | None:
+    """Resolve one identity-bridged pair event to its active IDs this frame.
+
+    A merged event may mention every logical ID observed before and after an
+    ID switch.  Those IDs are historical aliases, not simultaneous animals.
+    ``role_trace`` is therefore authoritative for rendering; frames in the
+    bounded bridge gap have no pair label instead of showing ghost members.
+    Legacy events without a trace retain their historical behavior.
+    """
+
+    resolved = dict(event)
+    role_trace = _trace_entries(event.get("role_trace"))
+    frame = int(frame_index)
+    if role_trace:
+        active_role = None
+        for row in role_trace:
+            start = _safe_int(row.get("start_frame"), default=-1)
+            end = _safe_int(row.get("end_frame"), default=-1)
+            if start >= 0 and end >= start and start <= frame <= end:
+                active_role = row
+                break
+        if active_role is None:
+            return None
+        resolved.update(
+            {
+                "actor_id": _safe_int(active_role.get("actor_id")),
+                "target_id": _safe_int(active_role.get("target_id")),
+                "pair_key": str(active_role.get("pair_key", "")).strip(),
+            }
+        )
+        # Historical aliases are not simultaneous pair participants.
+        resolved.pop("participant_ids", None)
+        resolved.pop("member_ids", None)
+        resolved.pop("member_ids_at_peak", None)
+
+    member_trace = _trace_entries(event.get("member_trace"))
+    if member_trace:
+        active_members = None
+        for row in member_trace:
+            start = _safe_int(row.get("start_frame"), default=-1)
+            end = _safe_int(row.get("end_frame"), default=-1)
+            if start >= 0 and end >= start and start <= frame <= end:
+                active_members = list(pair_ids(row.get("member_ids")))
+                break
+        if not active_members:
+            return None
+        resolved["member_ids"] = active_members
+        resolved.pop("participant_ids", None)
+        resolved.pop("member_ids_at_peak", None)
+        if canonical_behavior(resolved.get("behavior")) == "isolation" and len(active_members) == 1:
+            resolved["actor_id"] = active_members[0]
+    return resolved
 
 
 def select_display_events(
     active_events: Iterable[Mapping[str, Any]],
+    focus_behavior: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Select frame events while preserving orthogonal behavior channels.
 
@@ -280,20 +421,43 @@ def select_display_events(
     """
 
     events = _deduplicate(active_events)
-    selected = events
-    categories = {event_category(event) for event in events if event_category(event) is not None}
-    high_level = categories.intersection({"social", "group"})
-    if high_level and "individual" in categories:
+    group_members: set[int] = set()
+    for event in events:
+        if event_category(event) == "group":
+            group_members.update(_event_ids(event))
+
+    # Keep the event stream useful for the sidebar while suppressing lower
+    # layers that are fully covered by a group event. A pair touching one
+    # group member and one outside mouse remains visible for the outside mouse;
+    # build_mouse_overlays() applies the same hierarchy per participant.
+    selected = []
+    for event in events:
+        category = event_category(event)
+        event_ids = set(_event_ids(event))
+        if (
+            category != "group"
+            and group_members
+            and event_ids
+            and event_ids.issubset(group_members)
+        ):
+            continue
+        selected.append(event)
+
+    categories = {event_category(event) for event in selected if event_category(event) is not None}
+    if "group" in categories:
+        layer = "group"
+    elif {"social", "individual"}.issubset(categories):
         layer = "mixed"
-    elif high_level:
-        layer = "social_group" if len(high_level) == 2 else next(iter(high_level))
+    elif "social" in categories:
+        layer = "social"
     elif "individual" in categories:
         layer = "individual"
     else:
         layer = "none"
     selected.sort(
         key=lambda event: (
-            -_display_priority(event),
+            -int(DISPLAY_CATEGORY_PRIORITY.get(event_category(event) or "", 0)),
+            -_display_priority(event, focus_behavior),
             -event_score(event),
             int(event.get("start_frame", 0) or 0),
         )
@@ -323,7 +487,7 @@ def _event_ids(event: Mapping[str, Any]) -> tuple[int, ...]:
     # Group events produced by the extended ethogram carry their actual
     # participants.  ``pair_ids`` also handles CSV round-trips such as
     # ``"[1, 4, 9]"`` and ``"1;4;9"`` without introducing a second schema.
-    for field in ("member_ids", "member_ids_at_peak"):
+    for field in ("participant_ids", "member_ids", "member_ids_at_peak"):
         for number in pair_ids(event.get(field)):
             if number not in ids:
                 ids.append(number)
@@ -350,6 +514,7 @@ def build_mouse_overlays(
     display_events: Sequence[Mapping[str, Any]],
     layer: str,
     valid_ids: Iterable[int],
+    focus_behavior: str | None = None,
 ) -> dict[int, MouseOverlay]:
     """Build an ID+behavior label for every valid track in the frame."""
 
@@ -382,7 +547,7 @@ def build_mouse_overlays(
                 candidate = MouseOverlay(
                     text=f"{format_mouse_id(mouse_id)}｜群体：{DISPLAY_NAMES_ZH.get(behavior, behavior)}",
                     color_bgr=_event_color(behavior),
-                    priority=(_display_priority(event), score),
+                    priority=(_display_priority(event, focus_behavior), score),
                 )
                 if candidate.priority > overlays[mouse_id].priority:
                     overlays[mouse_id] = candidate
@@ -394,7 +559,7 @@ def build_mouse_overlays(
             candidate = MouseOverlay(
                 text=f"{format_mouse_id(mouse_id)}｜{label}",
                 color_bgr=_event_color(behavior, role),
-                priority=(_display_priority(event), score),
+                priority=(_display_priority(event, focus_behavior), score),
             )
             if candidate.priority > overlays[mouse_id].priority:
                 overlays[mouse_id] = candidate
@@ -709,6 +874,7 @@ __all__ = [
     "normalize_focus_behavior",
     "normalize_contact_events",
     "pair_ids",
+    "resolve_event_for_frame",
     "sidebar_width_for_frame",
     "select_display_events",
 ]

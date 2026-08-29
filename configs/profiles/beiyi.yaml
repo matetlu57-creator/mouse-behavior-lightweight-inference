@@ -1,0 +1,304 @@
+extends: ../default.yaml
+
+# 北医示例视频通常只有几秒钟，不能可靠地从短轨迹学习笼界。
+# 本 profile 不使用自适应笼界，也不使用固定 polygon 笼界。
+repository:
+  profile: beiyi
+adaptive_arena:
+  enabled: false
+  mode: disabled
+detector_first:
+  arena_mask:
+    enabled: false
+lightweight_behavior_inference:
+  sample_stride: 1
+  render_video: false
+  extract_four_class_clips: false
+  tracking:
+    # Short Beiyi clips can contain low-confidence mirror detections outside
+    # the cage.  Do not allocate a permanent logical ID from such a candidate;
+    # an initially hidden real mouse can still claim the free ID as soon as a
+    # sufficiently reliable detection appears.  This is not an arena polygon
+    # and does not classify videos from their folder names.
+    initial_min_detection_score: 0.50
+    # 短片中一次遮挡后不允许丢失轨迹跨越半个笼子抢占无关检测框。
+    # 普通轨迹与重连轨迹使用相同的有限门；真正重新出现的目标仍可在
+    # 原位置附近恢复，过远检测留给持续可见的 ID 或空闲 ID。
+    recent_assignment_gate: 3.20
+    reacquisition_assignment_gate: 3.20
+    reacquisition_after_missed_frames: 3
+
+# 对齐规范中的持续时间。规范没有给出固定时长的行为，在本 profile 中统一
+# 使用至少 1 秒的可靠性门。当前北医样例的真实厘米尺度和速度/距离换算仍
+# 不作为本轮验收条件，因此不在这里修改速度和距离阈值。
+standard_behavior_engine:
+  weak:
+    chase_fsm:
+      confirm_seconds: 2.0
+  strong:
+    chase_fsm:
+      confirm_seconds: 2.0
+extended_behavior:
+  unspecified_min_duration_seconds: 1.0
+  individual:
+    running_min_duration_seconds: 0.5
+    walking_min_duration_seconds: 1.0
+    stationary_min_duration_seconds: 1.0
+  social:
+    together_min_duration_seconds: 1.0
+    # The annotation specification defines together as pair proximity below
+    # 10 cm. The default profile is intentionally stricter at 8 cm; Beiyi uses
+    # the documented boundary while retaining the full one-second duration
+    # and low-motion gates.
+    together_max_distance_cm: 10.0
+    approach_min_duration_seconds: 1.0
+    avoidance_min_duration_seconds: 1.0
+    attack_min_duration_seconds: 1.0
+    chase_fallback:
+      min_duration_seconds: 2.0
+    # 北医样例的物理尺度不作为本轮验收条件。该层使用相对距离变化、
+    # 方向一致性、目标转向和接触动力学，并通过公共 FSM 做持续时间确认。
+    semantic_fsm:
+      enabled: true
+      feature_smoothing_seconds: 0.25
+      semantic_approach:
+        # Use a sustained relative trend instead of a single short-window
+        # distance drop. The moving mouse must be clearly faster than the
+        # mostly stationary mouse.
+        min_relative_distance_drop: 0.08
+        min_pursuit_alignment: 0.35
+        min_speed_gap_ratio: 0.35
+        # Approach is a directed transition into the low-distance part of the
+        # pair's own timeline. This avoids treating an estimated 10.3 cm as
+        # categorically different from 10.0 cm when body sizes differ.
+        arrival_distance_quantile: 0.35
+        arrival_distance_multiplier: 1.15
+        arrival_context_seconds: 3.0
+        max_target_speed_fraction_of_actor: 0.35
+        suppress_during_contact: false
+        trend_lookback_seconds: 0.75
+        hold_seconds: 0.75
+        hold_min_fraction: 0.25
+        # 保留已经确认的“靠近→到达”状态直到该鼠对的连续接触结束；
+        # 接触本身不能新建接近，回避或攻击会立即终止这一延续。
+        post_arrival_contact_hold_seconds: 3.0
+        post_arrival_min_seed_seconds: 0.50
+      semantic_chase:
+        min_pursuit_alignment: 0.35
+        min_target_escape_alignment: 0.20
+        min_direction_similarity: 0.45
+        min_directional_score: 0.35
+        min_actor_speed_gap_ratio: -0.15
+        min_follow_speed_gap_ratio: 0.10
+        min_follow_actor_speed_cm_s: 3.0
+        min_follow_target_speed_cm_s: 1.0
+        min_actor_speed_cm_s: 3.0
+        min_target_speed_cm_s: 1.0
+        min_target_speed_fraction_of_actor: 0.15
+        # 分位数只能说明“对该鼠对相对较近”，不能阻止跨笼同向运动误报。
+        # 追逐必须保持在 2.5 个检测体长内，不依赖未标定的厘米尺度。
+        max_distance_body_lengths: 2.5
+        # 追逐角色优先结合“追逐者位于目标后方”的几何关系，避免同一
+        # 鼠对在平行运动或急转弯时把追逐者/被追逐者写反。
+        role_behind_weight: 2.0
+        # 追逐的发起角色由事件开头两秒的持续证据确定；后续急转弯、绕行
+        # 或短时遮挡不会把整段事件的追逐者反写。
+        role_initial_context_seconds: 2.0
+        # If the target box is directly observed for less than 85% of a short
+        # pair timeline and interpolation is present, keep the absolute target
+        # motion gate but waive only the relative speed-ratio gate. This
+        # recovers pursuit under documented target occlusion without treating
+        # a fully observed stationary mouse as chased.
+        target_occlusion_observed_fraction: 0.85
+        occlusion_fill_gap_seconds: 1.10
+        occlusion_gap_min_imputed_fraction: 0.50
+        # A confirmed pursuit may end with the target hidden under the actor.
+        # Extend only through a bounded one-observed/one-predicted box interval;
+        # the final bout must still satisfy the real-pose support fraction.
+        occlusion_trailing_hold_seconds: 1.10
+        occlusion_trailing_min_seed_seconds: 0.35
+        # 追逐3在目标被持续遮挡前有一个检测框短暂重现、但姿态方向不可靠
+        # 的过渡帧；只允许这一帧且要求下一帧立即进入单目标遮挡。
+        occlusion_trailing_observed_bridge_frames: 1
+        occlusion_trailing_max_distance_body_lengths: 3.0
+        # Prediction can bridge a short missed target, but at least half of a
+        # final chase bout must still contain a directly valid two-mouse pose.
+        # This prevents a few contact frames from becoming a long chase when
+        # one ID is actually absent; chase3 remains above this gate.
+        min_directional_evidence_fraction_per_bout: 0.30
+        min_pose_valid_fraction_per_bout: 0.50
+        follow_distance_quantile: 0.85
+        follow_context_seconds: 1.0
+        follow_min_relative_distance_drop: 0.08
+        min_combined_speed_cm_s: 3.0
+        hold_seconds: 0.50
+        hold_min_fraction: 0.25
+        # 追逐3只有约1秒的明确可见时段，因此北医 profile 使用1秒
+        # 作为最低可靠持续时间；更长的通用管线仍可使用2秒确认。
+        min_duration_seconds: 1.0
+        fill_gap_seconds: 0.35
+      semantic_avoidance:
+        near_distance_quantile: 0.35
+        near_distance_multiplier: 1.50
+        context_seconds: 3.0
+        boundary_context_seconds: 0.50
+        boundary_max_clip_seconds: 3.0
+        allow_clip_start_context: true
+        min_target_escape_alignment: 0.50
+        min_target_turn_angle_deg: 45.0
+        turn_window_seconds: 0.75
+        min_turn_fraction: 0.30
+        distance_trend_seconds: 0.50
+        min_evader_speed_cm_s: 1.0
+        min_relative_distance_increase: 0.10
+        hold_seconds: 0.75
+        # 当发起接近的一方骑跨/遮挡后消失时，只有“先接近、后急转、
+        # 可见目标持续远离最后位置”的完整因果链才能恢复回避状态。
+        occlusion_recovery_enabled: true
+        occlusion_recovery_lookback_seconds: 0.75
+        occlusion_recovery_confirmation_seconds: 0.75
+        occlusion_recovery_state_seconds: 3.0
+        occlusion_recovery_pre_context_seconds: 0.50
+        occlusion_recovery_min_joint_frames: 4
+        occlusion_recovery_min_pursuit_alignment: 0.35
+        occlusion_recovery_min_pursuit_fraction: 0.30
+        occlusion_recovery_min_turn_angle_deg: 45.0
+        occlusion_recovery_max_start_distance_body_lengths: 1.25
+        occlusion_recovery_min_distance_growth_body_lengths: 0.45
+        occlusion_recovery_min_path_displacement_body_lengths: 0.45
+        # The direction-change trigger may occupy only a few frames in a
+        # short clip. Keep a bounded state hold, then let the common 1 s FSM
+        # gate decide whether it is reliable.
+        hold_min_fraction: 0.05
+        boundary_hold_min_fraction: 0.02
+        min_duration_seconds: 1.0
+        fill_gap_seconds: 0.35
+      semantic_attack:
+        # The provider score is continuous evidence, not an attack label.
+        # During a Beiyi attack, riding/wrestling can hide the nose, ears, or
+        # neck.  The attack FSM therefore uses detection-box contact and rapid
+        # box motion as its primary channel; pose evidence is only additive.
+        min_attack_score: 0.82
+        min_dynamic_score: 0.82
+        min_raw_speed_cm_s: 12.0
+        min_target_turn_angle_deg: 35.0
+        min_pose_deformation: 0.12
+        use_bbox_motion: true
+        require_nose_head_contact: false
+        bbox_allow_keypoint_contact_fallback: false
+        bbox_require_overlap: true
+        min_bbox_overlap_iou: 0.20
+        max_bbox_center_distance_body_lengths: 1.35
+        min_bbox_speed_body_lengths_per_frame: 0.10
+        min_bbox_acceleration_body_lengths_per_frame2: 0.08
+        min_bbox_area_change_ratio: 0.10
+        min_bbox_jump_score: 0.20
+        min_bbox_motion_frames: 3
+        bbox_motion_support_seconds: 0.30
+        bbox_contact_gap_seconds: 0.20
+        bbox_contact_gap_min_fraction: 0.20
+        # 追逐和攻击都可能出现框重叠及高速运动。若鼠对框中心沿同一方向
+        # 在笼内持续平移，则按追逐处理；局部往复抖动仍保留为攻击。
+        # 阈值来自全部追逐/攻击正例的框轨迹对照，而非视频文件名。
+        reclassify_coherent_translation_as_chase: true
+        coherent_translation_min_duration_seconds: 0.75
+        coherent_translation_fill_gap_seconds: 0.50
+        coherent_translation_min_valid_fraction: 0.50
+        coherent_translation_min_net_body_lengths: 2.0
+        coherent_translation_min_path_efficiency: 0.50
+        # 遮挡后的检测框交接在单帧内可接近 2 个体长；攻击正例的对应
+        # 最大步长均低于 0.5 个体长，因此 2.0 仍保留清晰安全间隔。
+        coherent_translation_max_step_body_lengths: 2.00
+        coherent_translation_max_sample_gap_frames: 3
+        coherent_translation_role_context_seconds: 1.0
+        coherent_translation_role_min_fraction: 0.55
+        coherent_translation_prior_chase_seconds: 2.0
+        # 在骑乘或扭打造成的短暂漏检期间，只保留框中心的有限外推。
+        # 预测框只进入攻击框证据，不进入普通轨迹、关键点几何或群体计数。
+        bbox_occlusion_max_gap_frames: 12
+        min_impact_pursuit_alignment: 0.45
+        min_reaction_escape_alignment: 0.50
+        # 关键点动作证据只作为辅助；攻击的主要动作证据来自重叠框的
+        # 快速位移、面积变化或前后框 IoU 突变。
+        require_action_signature: true
+        min_impact_acceleration_cm_s2: 1500.0
+        reaction_turn_window_seconds: 0.75
+        min_reaction_turn_fraction: 0.15
+        min_contact_frames: 2
+        contact_support_seconds: 0.20
+        contact_hold_min_fraction: 0.25
+        min_normalized_distance_increase: 0.75
+        min_separation_frames: 2
+        separation_support_seconds: 0.30
+        separation_context_seconds: 0.75
+        reaction_context_seconds: 0.75
+        trigger_support_seconds: 0.40
+        min_trigger_frames: 2
+        # Attack1 has a short visible lunge followed by direct nose-head
+        # contact.  1.20 s of bounded context lets the shared 1 s reliability
+        # gate retain that event without extending an unrelated chase.
+        bout_context_seconds: 1.20
+        # A real attack seed opens a bounded episode.  Temporary separation,
+        # riding/occlusion, and detector-box hand-off stay in that episode
+        # only while the same pair remains within 2.8 detected body lengths.
+        # Proximity alone can never create an attack without the seed above.
+        state_hold_seconds: 2.00
+        # Offline short-clip analysis may recover the beginning of the same
+        # close-pair conflict before the first reliable overlap/motion seed.
+        # The future seed must itself pass the 0.5 s reliability gate.
+        state_pre_hold_seconds: 1.50
+        state_min_seed_seconds: 0.50
+        state_max_distance_body_lengths: 2.80
+        fill_gap_seconds: 0.50
+      identity_bridge_seconds: 0.50
+      # 回避也允许在短暂遮挡后拼接同一事件，但仍要求前后片段有共同
+      # 身份证据和相邻时间关系，不会把无关 pair 合并。
+      bridge_avoidance: true
+      # One bridge may represent one detector ID hand-off. Do not let a
+      # shared-ID chain absorb several unrelated pairs in a crowded cage.
+      max_identity_bridge_participants: 3
+      max_identity_bridge_segments: 2
+  group:
+    # 四个北医 huddle 正向样例的稳定三鼠核心，其帧级最大中心距离约为
+    # 10.35、6.94、7.22、7.42 cm。以覆盖四个样例的最大稳定距离为基线，
+    # 取 11 cm 作为统一的局部邻接阈值；同一大型 huddle 的对角成员不要求
+    # 彼此也小于 11 cm。
+    # 该值是 profile 的几何标定参数，不读取视频文件名，也不按目录直接分类。
+    huddle_distance_cm: 11.0
+    huddle_min_duration_seconds: 1.0
+    isolation_min_duration_seconds: 3.0
+    # Isolation means one or at most two mice separated from a meaningful
+    # majority group. A random three-mouse component in a scattered cage is
+    # not a group reference and must not suppress social/individual labels.
+    # At least half of the visible mice must form the main group. Among mice
+    # outside that group, only the strongest spatial outlier is allowed to
+    # enter the 3-second per-ID isolation confirmation.
+    isolation_min_main_cluster_fraction: 0.50
+    huddle_min_cluster_size: 3
+    huddle_min_cluster_fraction: 0.0
+    huddle_min_cluster_density: 0.5
+    huddle_require_clique: false
+    huddle_min_member_neighbors: 2
+    # 大型群体使用局部邻居支持度，不使用整组全局边密度，否则远端对角
+    # 小鼠会把真实 huddle 错误拆掉。
+    huddle_density_mode: local
+    huddle_local_neighbor_cap: 4
+    # 群体优先：若“攻击”只存在于同一稳定扎堆内部，按密集遮挡造成的
+    # 框抖动误报处理；只有攻击鼠对在扎堆外仍有至少 2 s 独立冲突
+    # 证据时，才从该扎堆成员中排除这两只鼠。该门限仍只读取轨迹时序，
+    # 不读取视频名或标签目录。
+    huddle_resolve_attack_conflicts: true
+    huddle_attack_independent_seconds: 2.0
+    # 北医的 11 cm 是固定的 profile 空间阈值。关闭体长二次上限，避免
+    # 白鼠/黑鼠体型混合时由中位体长把 11 cm 错误缩小；该兼容字段保留。
+    huddle_body_length_cap_enabled: false
+    huddle_max_pair_distance_body_lengths: 1.75
+contact_detection:
+  nose_head_min_duration_seconds: 1.0
+  nose_tail_min_duration_seconds: 0.5
+  # 这是关键点几何抖动容错，不是把未知的真实厘米尺度写死。北医短片中
+  # 鼻头距离在阈值附近时允许有限放宽，并只桥接同一几何状态的短缺口。
+  nose_head_distance_multiplier: 1.5
+  fill_gap_seconds: 0.20
+parallel_behavior_fsm:
+  collect_diagnostics: false

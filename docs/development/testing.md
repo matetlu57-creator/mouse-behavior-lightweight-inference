@@ -2,14 +2,16 @@
 
 所有命令都从仓库根目录执行。项目使用 pytest 分层测试，并通过
 scripts/run_quality.py 统一调用格式、lint、类型、仓库、测试、覆盖率和构建检查。
+Windows 开发机优先通过 scripts/run_quality.ps1 调用它；包装器会固定使用项目
+本地 `.venv`，避免测试误加载全局 Anaconda base 中不兼容的 Torch/CUDA DLL。
 
 ## 常用命令
 
 ~~~powershell
-python -m pytest -q
-python scripts/validate_repository.py
-python scripts/run_quality.py
-python scripts/run_quality.py --ci
+.\scripts\run_pytest.ps1
+.\scripts\run_quality.ps1 -Step repository
+.\scripts\run_quality.ps1
+.\scripts\run_quality.ps1 -CI
 ~~~
 
 修改代码后，先运行能直接反驳本次修改的 targeted tests，再运行完整测试。修改

@@ -18,6 +18,15 @@ python -m pip install -e .
 python -m pip install -r requirements-dev.txt
 ~~~
 
+Windows 下测试和质量门固定使用这个项目本地 `.venv`。不要直接使用包含多个
+深度学习环境的全局 Anaconda base 环境，因为它可能加载到不匹配的 CUDA 或
+Microsoft C/C++ DLL。安装完成后使用：
+
+~~~powershell
+.\scripts\run_pytest.ps1
+.\scripts\run_quality.ps1 -CI
+~~~
+
 PowerShell 如果阻止当前脚本执行，可以只对当前进程放开策略：
 
 ~~~powershell
@@ -36,10 +45,11 @@ python -m pip install -e .
 python -m pip install -r requirements-dev.txt
 ~~~
 
-运行时明确使用对应解释器路径，避免把两个环境混用：
+运行时明确使用对应解释器路径，避免把两个环境混用。项目测试/质量门使用
+`.venv`；从视频生成 YOLO Pose 缓存使用已经验证可用的 `yolo26`：
 
 ~~~powershell
-D:\Anaconda3\envs\pytorch\python.exe .\scripts\build_lightweight_pose_cache.py --help
+D:\Anaconda3\envs\yolo26\python.exe .\scripts\build_lightweight_pose_cache.py --help
 ~~~
 
 ## 模型和数据
@@ -52,7 +62,7 @@ weights/，数据应放在仓库外；公开发布前需要确认模型、数据
 ~~~powershell
 python -c "import mouse_behavior; print(mouse_behavior.__file__)"
 python .\scripts\run_lightweight_behavior_inference.py --help
-python -m pytest -q tests/unit
+.\scripts\run_pytest.ps1 tests/unit
 ~~~
 
 如果 import mouse_behavior 指向其他目录，先确认已经使用 pip install -e .，并检查

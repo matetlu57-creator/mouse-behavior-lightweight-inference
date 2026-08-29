@@ -177,6 +177,9 @@ detector_first:
 # 比例值0.97表示-3%；边界外候选不能创建或接管正式ID。
 adaptive_arena:
   enabled: true
+  # learned: per-video heatmap learning (default for long videos)
+  # configured: skip heatmap learning and use detector_first.arena_mask.polygon
+  mode: learned
   boundary_expansion_ratio: 0.97
   # Each video learns its own polygon by default.  Reuse is only for rerunning
   # the same video, and the saved source path/file fingerprint must match.
@@ -1594,11 +1597,24 @@ extended_behavior:
       min_duration_seconds: 0.033
     pair_fill_gap_seconds: 0.15
   group:
-    huddle_distance_cm: 9.0
+    # 扎堆空间条件：至少三只小鼠形成局部聚集；5 cm 是通用 profile 的
+    # 单条邻接边阈值，不要求同一群体的所有两两中心距离都小于该值。
+    huddle_distance_cm: 5.0
     huddle_fraction: 0.55
     huddle_min_cluster_size: 3
-    huddle_min_cluster_fraction: 0.30
-    huddle_min_cluster_density: 0.50
+    # A huddle is a local k-core, not an end-to-end connected chain. Every
+    # member must have at least two neighbours inside the same local group.
+    huddle_min_cluster_fraction: 0.0
+    huddle_min_cluster_density: 0.5
+    huddle_require_clique: false
+    huddle_min_member_neighbors: 2
+    # local 允许大型 huddle 的对角成员距离超过单条边阈值；global 保留
+    # 旧的全局边密度规则，full-clique 仍由 huddle_require_clique 控制。
+    huddle_density_mode: local
+    huddle_local_neighbor_cap: 4
+    # 体长上限只用于防止尺度漂移；有固定空间阈值的 profile 可关闭。
+    huddle_body_length_cap_enabled: true
+    huddle_max_pair_distance_body_lengths: 1.25
     isolation_distance_cm: 15.0
     isolation_neighbor_fraction: 0.15
     confirm_seconds: 0.30

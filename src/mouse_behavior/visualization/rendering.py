@@ -34,6 +34,7 @@ from .overlay import (
     normalize_contact_events,
     canonical_behavior,
     normalize_focus_behavior,
+    resolve_event_for_frame,
     sidebar_width_for_frame,
     select_display_events,
 )
@@ -83,11 +84,50 @@ def render_behavior_video(
             require_video_match=True,
         )
         arena_polygon = np.asarray(boundary.polygon, dtype=np.float64)
+    bbox_occlusion_max_gap_frames = 0
+    initial_min_detection_score = 0.0
+    recent_assignment_gate = 3.2
+    reacquisition_assignment_gate = 5.0
+    reacquisition_after_missed_frames = 3
+    metadata_path = events_path.parent / "lightweight_analysis_metadata.json"
+    if metadata_path.exists():
+        try:
+            with metadata_path.open("r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            tracking_metadata = metadata.get("tracking", {})
+            if isinstance(tracking_metadata, dict):
+                bbox_occlusion_max_gap_frames = max(
+                    int(tracking_metadata.get("bbox_occlusion_max_gap_frames", 0)),
+                    0,
+                )
+                initial_min_detection_score = max(
+                    float(tracking_metadata.get("initial_min_detection_score", 0.0)),
+                    0.0,
+                )
+                recent_assignment_gate = max(
+                    float(tracking_metadata.get("recent_assignment_gate", 3.2)),
+                    0.1,
+                )
+                reacquisition_assignment_gate = max(
+                    float(tracking_metadata.get("reacquisition_assignment_gate", 5.0)),
+                    0.1,
+                )
+                reacquisition_after_missed_frames = max(
+                    int(tracking_metadata.get("reacquisition_after_missed_frames", 3)),
+                    0,
+                )
+        except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            LOGGER.warning("[render] unable to read tracking settings: %s", metadata_path)
     tracks, tracking_stats = _track_cache(
         cache_dir,
         total_cache_frames,
         expected_mice,
         arena_polygon=arena_polygon,
+        bbox_occlusion_max_gap_frames=bbox_occlusion_max_gap_frames,
+        initial_min_detection_score=initial_min_detection_score,
+        recent_assignment_gate=recent_assignment_gate,
+        reacquisition_assignment_gate=reacquisition_assignment_gate,
+        reacquisition_after_missed_frames=reacquisition_after_missed_frames,
     )
 
     event_frame_map: list[list[dict[str, Any]]] = [[] for _ in range(total_cache_frames)]
@@ -114,7 +154,9 @@ def render_behavior_video(
         if end < start:
             continue
         for frame_index in range(start, end + 1):
-            event_frame_map[frame_index].append(event)
+            resolved_event = resolve_event_for_frame(event, frame_index)
+            if resolved_event is not None:
+                event_frame_map[frame_index].append(resolved_event)
 
     if not np.isfinite(fps) or fps <= 0:
         fps = 29.329
@@ -157,17 +199,28 @@ def render_behavior_video(
             )
             if focus_active:
                 focus_evidence_frames += 1
-            display_events, display_layer = select_display_events(active_events)
+            display_events, display_layer = select_display_events(
+                active_events,
+                focus_behavior=normalized_focus,
+            )
             valid_ids = [
                 logical_id
                 for logical_id in range(expected_mice)
                 if bool(tracks["valid"][frame_index, logical_id])
+                or bool(tracks["bbox_imputed"][frame_index, logical_id])
             ]
-            mouse_overlays = build_mouse_overlays(display_events, display_layer, valid_ids)
+            mouse_overlays = build_mouse_overlays(
+                display_events,
+                display_layer,
+                valid_ids,
+                focus_behavior=normalized_focus,
+            )
             box_labels: list[BoxLabel] = []
 
             for logical_id in range(expected_mice):
-                if not bool(tracks["valid"][frame_index, logical_id]):
+                pose_valid = bool(tracks["valid"][frame_index, logical_id])
+                bbox_held = bool(tracks["bbox_imputed"][frame_index, logical_id])
+                if not pose_valid and not bbox_held:
                     continue
                 bbox = np.asarray(tracks["bboxes"][frame_index, logical_id], dtype=float)
                 points = np.asarray(tracks["keypoints_px"][frame_index, logical_id], dtype=float)
@@ -188,10 +241,58 @@ def render_behavior_video(
                         priority=(0, 0.0),
                     ),
                 )
+                if bbox_held:
+                    overlay = MouseOverlay(
+                        text=f"{overlay.text}｜遮挡保持",
+                        color_bgr=overlay.color_bgr,
+                        priority=overlay.priority,
+                    )
                 color = overlay.color_bgr
                 thickness = 3 if overlay.priority[0] > 0 else 1
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+                line_type = cv2.LINE_AA
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness, line_type)
                 box_labels.append(BoxLabel((x1, y1, x2, y2), overlay.text, color))
+                if bbox_held:
+                    # A dashed inner line makes a predicted box visibly
+                    # different from a real detector observation without
+                    # hiding the behavior/ID label.
+                    dash = max(min((x2 - x1) // 8, (y2 - y1) // 8), 4)
+                    for left in range(x1, x2, dash * 2):
+                        cv2.line(
+                            frame,
+                            (left, y1),
+                            (min(left + dash, x2), y1),
+                            color,
+                            1,
+                            line_type,
+                        )
+                        cv2.line(
+                            frame,
+                            (left, y2),
+                            (min(left + dash, x2), y2),
+                            color,
+                            1,
+                            line_type,
+                        )
+                    for top in range(y1, y2, dash * 2):
+                        cv2.line(
+                            frame,
+                            (x1, top),
+                            (x1, min(top + dash, y2)),
+                            color,
+                            1,
+                            line_type,
+                        )
+                        cv2.line(
+                            frame,
+                            (x2, top),
+                            (x2, min(top + dash, y2)),
+                            color,
+                            1,
+                            line_type,
+                        )
+                if not pose_valid:
+                    continue
                 for first, second in skeleton_edges:
                     if (
                         first < len(points)
@@ -258,7 +359,7 @@ def render_behavior_video(
     )
     if normalized_focus:
         LOGGER.info(
-            "[render] focus=%s persistent_display_coverage=1.000 evidence_coverage=%.3f",
+            "[render] review_heading_focus=%s heading_persistent=true evidence_coverage=%.3f",
             normalized_focus,
             focus_evidence_frames / max(frame_index, 1),
         )

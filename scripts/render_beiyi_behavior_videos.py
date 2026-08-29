@@ -18,6 +18,7 @@ ensure_importable()
 
 from mouse_behavior.logging_config import configure_logging  # noqa: E402
 from mouse_behavior.visualization.rendering import render_behavior_video  # noqa: E402
+from validate_beiyi_extended_ethogram import BEIYI_EXPECTED_MICE  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def render_beiyi_cases(
     render_output: Path,
     manifest: Path,
     *,
-    expected_mice: int = 20,
+    expected_mice: int = BEIYI_EXPECTED_MICE,
     force: bool = False,
     font_path: Path | None = None,
     cache_output: Path | None = None,
@@ -97,7 +98,6 @@ def render_beiyi_cases(
         events_path = destination_analysis / "lightweight_behavior_events.csv"
         render_path = destination_analysis / "轻量行为推理_渲染.mp4"
         LOGGER.info("[%02d/%d] render %s", index, len(rows), case_name)
-        expected_behavior = str(row.get("expected_behavior", "")).strip() or None
         render_behavior_video(
             video,
             cache_dir,
@@ -105,10 +105,10 @@ def render_beiyi_cases(
             render_path,
             expected_mice=max(int(expected_mice), 2),
             font_path=font_path,
-            # The manifest is an external review label from the Beiyi folder
-            # structure.  It controls only the persistent render heading; the
-            # inference CSV was already produced without reading this label.
-            focus_behavior=expected_behavior,
+            # Folder labels are ground truth for validation, not an input to
+            # prediction or rendering. Passing them as focus previously
+            # changed same-layer box labels and biased visual review.
+            focus_behavior=None,
         )
 
     for filename in (
@@ -132,7 +132,7 @@ def main() -> int:
         default=None,
         help="另一个验证目录中的 YOLO 缓存根目录；默认从 analysis-output 查找。",
     )
-    parser.add_argument("--expected-mice", type=int, default=20)
+    parser.add_argument("--expected-mice", type=int, default=BEIYI_EXPECTED_MICE)
     parser.add_argument("--font-path", type=Path, default=None)
     parser.add_argument(
         "--behaviors",

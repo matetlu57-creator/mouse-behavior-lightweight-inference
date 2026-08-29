@@ -9445,34 +9445,48 @@ def process_video(
         )
     adaptive_arena_result: Optional[arena_boundary.ArenaBoundaryResult] = None
     adaptive_arena_cfg = dict(config.get("adaptive_arena", {}))
+    boundary_mode = str(adaptive_arena_cfg.get("mode", "learned")).strip().lower()
     if (
-        bool(adaptive_arena_cfg.get("enabled", True))
+        boundary_mode not in {"disabled", "none", "off"}
+        and (
+            boundary_mode in {"configured", "fixed", "static"}
+            or bool(adaptive_arena_cfg.get("enabled", True))
+        )
         and detector_enabled
         and yolo_precompute_cache is not None
     ):
         configured_polygon = detector_cfg.get("arena_mask", {}).get("polygon", [])
-        reuse_value = str(adaptive_arena_cfg.get("reuse_boundary_json", "") or "").strip()
-        if reuse_value:
-            reuse_path = Path(reuse_value)
-            if not reuse_path.is_absolute():
-                reuse_path = PROJECT_DIR / reuse_path
-            adaptive_arena_result = arena_boundary.load_boundary_json(
-                reuse_path,
+        if boundary_mode in {"configured", "fixed", "static"}:
+            adaptive_arena_result, heatmap = arena_boundary.configured_boundary(
+                configured_polygon,
                 width=width,
                 height=height,
+                heatmap_cell_px=int(adaptive_arena_cfg.get("heatmap_cell_px", 20)),
                 source_video=video_path,
-                require_video_match=bool(adaptive_arena_cfg.get("reuse_require_video_match", True)),
             )
-            heatmap = np.zeros((max(height // 20, 2), max(width // 20, 2)), dtype=np.float32)
         else:
-            adaptive_arena_result, heatmap = arena_boundary.learn_from_yolo_records(
-                yolo_precompute_cache.iter_frames(start_frame=0),
-                width=width,
-                height=height,
-                config=adaptive_arena_cfg,
-                configured_polygon=configured_polygon,
-                source_video=video_path,
-            )
+            reuse_value = str(adaptive_arena_cfg.get("reuse_boundary_json", "") or "").strip()
+            if reuse_value:
+                reuse_path = Path(reuse_value)
+                if not reuse_path.is_absolute():
+                    reuse_path = PROJECT_DIR / reuse_path
+                adaptive_arena_result = arena_boundary.load_boundary_json(
+                    reuse_path,
+                    width=width,
+                    height=height,
+                    source_video=video_path,
+                    require_video_match=bool(adaptive_arena_cfg.get("reuse_require_video_match", True)),
+                )
+                heatmap = np.zeros((max(height // 20, 2), max(width // 20, 2)), dtype=np.float32)
+            else:
+                adaptive_arena_result, heatmap = arena_boundary.learn_from_yolo_records(
+                    yolo_precompute_cache.iter_frames(start_frame=0),
+                    width=width,
+                    height=height,
+                    config=adaptive_arena_cfg,
+                    configured_polygon=configured_polygon,
+                    source_video=video_path,
+                )
         arena_boundary.save_boundary_artifacts(
             adaptive_arena_result,
             heatmap,

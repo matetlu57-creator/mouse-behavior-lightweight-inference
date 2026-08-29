@@ -18,6 +18,7 @@ from .ethogram import (
     _extended_short_clip_pair_events,
     _extract_contact_events,
 )
+from .social_fsm import event_pair_ids
 from ..utils.timer import Timer
 
 LOGGER = logging.getLogger("mouse_behavior.lightweight_behavior_inference")
@@ -33,6 +34,262 @@ class _PairAnalysisResult:
     pair_summaries: list[dict[str, Any]]
     top_evidence: list[dict[str, Any]]
     fsm_coordinator: ParallelBehaviorFSM
+
+
+def _event_interval(event: Mapping[str, Any], *, core: bool = False) -> tuple[int, int]:
+    """Return a normalized source-frame interval for an event record."""
+
+    start_key = "core_start_frame" if core else "start_frame"
+    end_key = "core_end_frame" if core else "end_frame"
+    try:
+        start = int(event.get(start_key, event.get("start_frame", 0)) or 0)
+    except (TypeError, ValueError, OverflowError):
+        start = 0
+    try:
+        end = int(event.get(end_key, event.get("end_frame", start)) or start)
+    except (TypeError, ValueError, OverflowError):
+        end = start
+    return (min(start, end), max(start, end))
+
+
+def _semantic_bridge_settings(config: Mapping[str, Any]) -> tuple[float, int, int]:
+    extended = config.get("extended_behavior", {})
+    social = extended.get("social", {}) if isinstance(extended, Mapping) else {}
+    semantic = social.get("semantic_fsm", {}) if isinstance(social, Mapping) else {}
+    if not isinstance(semantic, Mapping):
+        semantic = {}
+    try:
+        bridge_seconds = max(float(semantic.get("identity_bridge_seconds", 0.50)), 0.0)
+    except (TypeError, ValueError):
+        bridge_seconds = 0.50
+    try:
+        max_participants = max(
+            int(semantic.get("max_identity_bridge_participants", 6)),
+            2,
+        )
+    except (TypeError, ValueError):
+        max_participants = 6
+    try:
+        max_segments = max(
+            int(semantic.get("max_identity_bridge_segments", 2)),
+            1,
+        )
+    except (TypeError, ValueError):
+        max_segments = 2
+    return bridge_seconds, max_participants, max_segments
+
+
+def _merge_identity_bridged_events(
+    component: list[Mapping[str, Any]],
+    *,
+    source_fps: float,
+) -> dict[str, Any]:
+    """Merge one identity-continuous semantic event component.
+
+    The representative actor/target is taken from the highest-scoring segment
+    so the existing renderer remains compatible.  ``role_trace`` and
+    ``participant_ids`` retain the changing IDs for downstream auditing.
+    """
+
+    ordered = sorted(
+        (dict(event) for event in component),
+        key=lambda event: _event_interval(event, core=True),
+    )
+    representative = max(
+        ordered,
+        key=lambda event: float(event.get("peak_score", event.get("mean_score", 0.0)) or 0.0),
+    )
+    merged = dict(representative)
+    public_intervals = [_event_interval(event) for event in ordered]
+    core_intervals = [_event_interval(event, core=True) for event in ordered]
+    analysis_intervals = [
+        _event_interval(
+            {
+                "start_frame": event.get("analysis_start_frame", event.get("start_frame", 0)),
+                "end_frame": event.get("analysis_end_frame", event.get("end_frame", 0)),
+            }
+        )
+        for event in ordered
+    ]
+    public_start = min(start for start, _ in public_intervals)
+    public_end = max(end for _, end in public_intervals)
+    core_start = min(start for start, _ in core_intervals)
+    core_end = max(end for _, end in core_intervals)
+    analysis_start = min(start for start, _ in analysis_intervals)
+    analysis_end = max(end for _, end in analysis_intervals)
+    participants = sorted(
+        {
+            participant
+            for event in ordered
+            for participant in event_pair_ids(event)
+            if participant >= 0
+        }
+    )
+    pair_keys = sorted(
+        {str(event.get("pair_key", "")) for event in ordered if str(event.get("pair_key", ""))}
+    )
+
+    def safe_id(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return -1
+
+    role_trace = [
+        {
+            "pair_key": str(event.get("pair_key", "")),
+            "actor_id": safe_id(event.get("actor_id", -1)),
+            "target_id": safe_id(event.get("target_id", -1)),
+            "start_frame": _event_interval(event, core=True)[0],
+            "end_frame": _event_interval(event, core=True)[1],
+        }
+        for event in ordered
+    ]
+    merged.update(
+        {
+            "pair_key": "|".join(pair_keys),
+            "participant_ids": participants,
+            "member_ids": participants,
+            "identity_bridge": True,
+            "identity_bridge_pairs": pair_keys,
+            "role_trace": role_trace,
+            "event_recovery": "identity_bridge",
+            "analysis_start_frame": analysis_start,
+            "analysis_end_frame": analysis_end,
+            "core_start_frame": core_start,
+            "core_end_frame": core_end,
+            "start_frame": public_start,
+            "end_frame": public_end,
+            "core_duration_s": (core_end - core_start + 1) / max(source_fps, 1e-9),
+            "duration_s": (public_end - public_start + 1) / max(source_fps, 1e-9),
+            "mean_score": float(
+                np.mean([float(event.get("mean_score", 0.0) or 0.0) for event in ordered])
+            ),
+            "peak_score": max(
+                float(event.get("peak_score", event.get("mean_score", 0.0)) or 0.0)
+                for event in ordered
+            ),
+            "role_ambiguous": bool(
+                any(bool(event.get("role_ambiguous", False)) for event in ordered)
+            ),
+        }
+    )
+    return merged
+
+
+def _stitch_identity_bridged_events(
+    events: list[dict[str, Any]],
+    *,
+    source_fps: float,
+    config: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Join semantic pair events across short detector/ID-switch gaps.
+
+    This is deliberately limited to semantic chase, avoidance, and attack
+    candidates.  It never joins different behaviors, unrelated source videos,
+    or pairs with no shared identity evidence.  Approach is left unstitched
+    because its actor/target transition is itself the event being measured.
+    """
+
+    if not events:
+        return []
+    bridge_seconds, max_participants, max_segments = _semantic_bridge_settings(config)
+    bridge_frames = int(round(bridge_seconds * max(float(source_fps), 1e-9)))
+    bridge_behaviors = {"chase", "attack"}
+    # Avoidance is opt-in because a shared ID in a crowded scene can otherwise
+    # merge unrelated evasion candidates.  The Beiyi profile enables it after
+    # validating the short rider/occlusion examples; generic profiles keep the
+    # conservative historical default.
+    semantic = config.get("extended_behavior", {})
+    social = semantic.get("social", {}) if isinstance(semantic, Mapping) else {}
+    semantic_fsm = social.get("semantic_fsm", {}) if isinstance(social, Mapping) else {}
+    if isinstance(semantic_fsm, Mapping) and bool(semantic_fsm.get("bridge_avoidance", False)):
+        bridge_behaviors.add("avoidance")
+    candidates: list[int] = []
+    for index, event in enumerate(events):
+        recovery = str(event.get("event_recovery", ""))
+        behavior = str(event.get("behavior", "")).strip().lower()
+        if (
+            str(event.get("event_scope", "pair")) == "pair"
+            and behavior in bridge_behaviors
+            and recovery.startswith("semantic_")
+            and len(event_pair_ids(event)) >= 2
+        ):
+            candidates.append(index)
+    if not candidates:
+        return list(events)
+
+    used: set[int] = set()
+    replacements: dict[int, dict[str, Any]] = {}
+    for seed_index in candidates:
+        if seed_index in used:
+            continue
+        component = [seed_index]
+        used.add(seed_index)
+        changed = True
+        while changed and len(component) < max_segments:
+            changed = False
+            component_events = [events[index] for index in component]
+            behavior = str(component_events[0].get("behavior", "")).strip().lower()
+            source_videos = {
+                str(event.get("source_video", ""))
+                for event in component_events
+                if str(event.get("source_video", ""))
+            }
+            component_ids = set().union(*(event_pair_ids(event) for event in component_events))
+            component_end = max(_event_interval(event, core=True)[1] for event in component_events)
+            for index in candidates:
+                if index in used:
+                    continue
+                candidate = events[index]
+                if str(candidate.get("behavior", "")).strip().lower() != behavior:
+                    continue
+                candidate_source = str(candidate.get("source_video", ""))
+                if source_videos and candidate_source and candidate_source not in source_videos:
+                    continue
+                candidate_ids = event_pair_ids(candidate)
+                if not component_ids.intersection(candidate_ids):
+                    continue
+                candidate_start, candidate_end = _event_interval(candidate, core=True)
+                # Only bridge a later segment.  Overlapping events are not an
+                # identity switch; allowing them caused unrelated pair events
+                # from the same noisy frame to collapse into one long event.
+                if candidate_start <= component_end:
+                    continue
+                gap = candidate_start - component_end - 1
+                if gap > bridge_frames:
+                    continue
+                if len(component_ids | candidate_ids) > max_participants:
+                    continue
+                component.append(index)
+                used.add(index)
+                changed = True
+                component_ids.update(candidate_ids)
+                component_end = max(component_end, candidate_end)
+                if len(component) >= max_segments:
+                    break
+        if len(component) > 1:
+            merged = _merge_identity_bridged_events(
+                [events[index] for index in component],
+                source_fps=source_fps,
+            )
+            replacements[seed_index] = merged
+            LOGGER.info(
+                "[identity bridge] %s %s segments: %s",
+                merged.get("behavior", ""),
+                merged.get("source_video", ""),
+                " -> ".join(merged.get("identity_bridge_pairs", [])),
+            )
+        else:
+            replacements[seed_index] = events[seed_index]
+
+    result: list[dict[str, Any]] = []
+    for index, event in enumerate(events):
+        if index in replacements:
+            result.append(replacements[index])
+        elif index not in used:
+            result.append(event)
+    return result
 
 
 def _analyze_candidate_pairs(
@@ -246,6 +503,11 @@ def _analyze_candidate_pairs(
                 row["source_time_s"] = float(row["frame"]) * sample_stride / source_fps
             top_evidence.extend(evidence_rows)
         pair_summaries.append(summary)
+    extended_events = _stitch_identity_bridged_events(
+        extended_events,
+        source_fps=source_fps,
+        config=config,
+    )
     pair_analysis_timer.stop()
     return _PairAnalysisResult(
         events=events,
@@ -261,25 +523,62 @@ def _finalize_event_records_in_place(
     events: list[dict[str, Any]],
     contact_events: list[dict[str, Any]],
     source_fps: float,
+    minimum_durations: Mapping[str, float] | None = None,
 ) -> None:
-    """Finalize event records and reject unsupported one-frame attacks.
+    """Finalize event records and apply the configured temporal reliability gates.
 
     A one-frame attack can still be useful while debugging the feature matrix,
     but it is not a reliable behavior event for a rendered video or an export.
     The attack-specific temporal gate normally removes it earlier.  This final
     safety net also covers legacy standard-FSM rows, which are produced by a
     separate extractor and therefore cannot share the extended ethogram gate.
+    ``minimum_durations`` is intentionally optional so callers using the
+    historical API retain their previous behavior; production profiles can
+    provide a behavior-level minimum for labels whose document definition does
+    not specify a fixed duration.
     """
+
+    configured_minimums: dict[str, float] = {}
+    for behavior, value in (minimum_durations or {}).items():
+        try:
+            configured_minimums[str(behavior).strip().lower()] = max(float(value), 0.0)
+        except (TypeError, ValueError):
+            continue
 
     reliable_events: list[dict[str, Any]] = []
     suppressed_single_frame_attacks = 0
+    suppressed_huddle_contained_attacks = 0
+    suppressed_short_duration: dict[str, int] = {}
     for event in events:
         behavior = str(event.get("behavior", "")).strip().lower()
         if behavior == "attack":
+            if event.get("huddle_conflict_status") == "contained_by_stable_huddle":
+                suppressed_huddle_contained_attacks += 1
+                continue
             start = int(event.get("analysis_start_frame", event.get("start_frame", 0)) or 0)
             end = int(event.get("analysis_end_frame", event.get("end_frame", start)) or start)
             if end <= start:
                 suppressed_single_frame_attacks += 1
+                continue
+        required = configured_minimums.get(behavior)
+        if required is not None:
+            raw_duration = event.get("core_duration_s", event.get("duration_s"))
+            try:
+                core_duration = float(raw_duration)
+            except (TypeError, ValueError):
+                core_duration = float("nan")
+            if not np.isfinite(core_duration):
+                # Some legacy standard-FSM rows predate ``core_duration_s``
+                # and carry a null placeholder after CSV round-trip.  Fall
+                # back to the public duration before deciding whether the
+                # attack is reliable; otherwise a one-frame/short attack can
+                # escape the configured temporal gate as NaN.
+                try:
+                    core_duration = float(event.get("duration_s"))
+                except (TypeError, ValueError):
+                    core_duration = float("nan")
+            if np.isfinite(core_duration) and core_duration < required:
+                suppressed_short_duration[behavior] = suppressed_short_duration.get(behavior, 0) + 1
                 continue
         reliable_events.append(event)
     events[:] = reliable_events
@@ -287,6 +586,19 @@ def _finalize_event_records_in_place(
         LOGGER.info(
             "[behavior] suppressed %d unsupported one-frame attack event(s)",
             suppressed_single_frame_attacks,
+        )
+    if suppressed_huddle_contained_attacks:
+        LOGGER.info(
+            "[behavior] suppressed %d attack event(s) contained by a stable huddle",
+            suppressed_huddle_contained_attacks,
+        )
+    if suppressed_short_duration:
+        LOGGER.info(
+            "[behavior] suppressed events below configured minimum duration: %s",
+            ", ".join(
+                f"{behavior}={count}"
+                for behavior, count in sorted(suppressed_short_duration.items())
+            ),
         )
 
     for index, event in enumerate(

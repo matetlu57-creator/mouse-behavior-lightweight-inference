@@ -58,7 +58,8 @@ PAIR_BEHAVIORS = {
     "nose_head_contact",
     "nose_tail_contact",
 }
-INDIVIDUAL_BEHAVIORS = {"running", "walking", "stationary", "isolation"}
+GROUP_BEHAVIORS = {"huddle", "isolation"}
+INDIVIDUAL_BEHAVIORS = {"running", "walking", "stationary"}
 
 
 def _json_number(value: Any, *, default: float = 0.0) -> float:
@@ -84,10 +85,7 @@ def _safe_directory_name(value: str) -> str:
 
 def _pair_ids(pair_key: Any) -> list[int]:
     text = str(pair_key or "")
-    match = re.fullmatch(r"(\d+)_(\d+)", text)
-    if match is None:
-        return []
-    return sorted({int(match.group(1)), int(match.group(2))})
+    return sorted({int(raw) for raw in re.findall(r"-?\d+", text) if int(raw) >= 0})
 
 
 def _member_ids(value: Any) -> list[int]:
@@ -185,14 +183,15 @@ def _huddle_ids(
         maximum_size = max(maximum_size, len(component))
         for track_id in component:
             membership[track_id] += 1
-    if maximum_size < 2 or membership.max(initial=0) <= 0:
+    # A huddle is a group behavior and cannot be inferred from a pair.
+    if maximum_size < 3 or membership.max(initial=0) <= 0:
         return []
     ranked = sorted(
         (int(track_id) for track_id in np.flatnonzero(membership > 0)),
         key=lambda track_id: (-int(membership[track_id]), track_id),
     )
     selected = sorted(ranked[:maximum_size])
-    return selected if len(selected) >= 2 else []
+    return selected if len(selected) >= 3 else []
 
 
 def _isolation_id(
@@ -249,7 +248,7 @@ def _event_mouse_ids(
             set(_member_ids(event.get("member_ids")))
             | set(_member_ids(event.get("member_ids_at_peak")))
         )
-        if len(explicit_members) >= 2:
+        if len(explicit_members) >= 3:
             return [track_id for track_id in explicit_members if track_id in visible]
         return [
             track_id
@@ -270,6 +269,8 @@ def _event_mouse_ids(
         return [actor] if actor >= 0 and actor in visible else []
 
     ids = set(_pair_ids(event.get("pair_key")))
+    ids.update(_member_ids(event.get("participant_ids")))
+    ids.update(_member_ids(event.get("member_ids")))
     actor = _json_int(event.get("actor_id"), default=-1)
     target = _json_int(event.get("target_id"), default=-1)
     if actor >= 0:
@@ -361,13 +362,15 @@ def build_annotations(
             huddle_distance_cm=huddle_distance_cm,
             cm_per_pixel=cm_per_pixel,
         )
-        expected_ok = (
-            len(mouse_ids) == 1
-            if behavior in INDIVIDUAL_BEHAVIORS
-            else len(mouse_ids) >= 2
-            if behavior == "huddle"
-            else len(mouse_ids) == 2
-        )
+        # Isolation is a group-context event with one actual participant: the
+        # isolated mouse. Huddle, by contrast, must contain at least three
+        # participants. Pair events remain exactly two participants.
+        if behavior in INDIVIDUAL_BEHAVIORS:
+            expected_ok = len(mouse_ids) == 1
+        elif behavior in GROUP_BEHAVIORS:
+            expected_ok = len(mouse_ids) == 1 if behavior == "isolation" else len(mouse_ids) >= 3
+        else:
+            expected_ok = len(mouse_ids) == 2
         if not expected_ok:
             skipped.append(
                 {
