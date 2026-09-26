@@ -419,60 +419,6 @@ def _boolean_spans(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return starts, ends
 
 
-def _bridge_attack_reacquisition_gap(
-    mask: np.ndarray,
-    pair_df: pd.DataFrame,
-    *,
-    fps: float,
-    attack_config: Mapping[str, Any],
-) -> np.ndarray:
-    """Bridge a missing-box interval only after a real attack seed.
-
-    The pair is fixed by the input pair dataframe; this helper never searches
-    for or assigns a replacement identity. The first observed pair frame after
-    a dropout must be nearby, otherwise the old attack bout remains closed.
-    """
-
-    result = np.asarray(mask, dtype=bool).reshape(-1).copy()
-    if not result.size or "bbox_pair_observed" not in pair_df:
-        return result
-    observed = _numeric_column(pair_df, "bbox_pair_observed", 0.0).astype(bool)
-    observed &= _numeric_column(pair_df, "bbox_pair_valid", 0.0).astype(bool)
-    distance = _numeric_column(
-        pair_df,
-        "bbox_center_distance_body_lengths",
-        np.inf,
-    )
-    max_gap_frames = max(
-        int(
-            round(max(float(attack_config.get("state_reacquisition_gap_seconds", 0.0)), 0.0) * fps)
-        ),
-        0,
-    )
-    max_distance = max(
-        float(attack_config.get("state_reacquisition_max_distance_body_lengths", 2.8)),
-        0.0,
-    )
-    if max_gap_frames == 0:
-        return result
-    starts, ends = _boolean_spans(result)
-    for end_value in ends:
-        end = int(end_value)
-        later_observed = np.flatnonzero(observed[end + 1 :])
-        if not later_observed.size:
-            continue
-        reacquired = end + 1 + int(later_observed[0])
-        missing_frames = reacquired - end - 1
-        if (
-            missing_frames > 0
-            and missing_frames <= max_gap_frames
-            and np.isfinite(distance[reacquired])
-            and distance[reacquired] <= max_distance
-        ):
-            result[end + 1 : reacquired + 1] = True
-    return result
-
-
 def _bbox_coherent_translation_bouts(
     pair_df: pd.DataFrame,
     attack_mask: np.ndarray,
@@ -2189,15 +2135,6 @@ def build_semantic_pair_signals(
             )
         attack_mask = recovered
         attack_state_bridge = attack_mask & ~attack_seed
-
-    before_reacquisition_bridge = attack_mask.copy()
-    attack_mask = _bridge_attack_reacquisition_gap(
-        attack_mask,
-        pair_df,
-        fps=analysis_fps,
-        attack_config=attack_cfg,
-    )
-    attack_state_bridge |= attack_mask & ~before_reacquisition_bridge
 
     # Keep the parallel FSM evidence channels independent here.  ``attack_mask``
     # is still provisional: the temporal reliability gate or the group layer

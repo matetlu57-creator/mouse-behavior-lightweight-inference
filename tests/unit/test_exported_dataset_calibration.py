@@ -743,7 +743,7 @@ def test_loader_uses_eight_centimeter_body_length_and_estimates_mouse_width(tmp_
     features = load_exported_features(path, fps=30.0)
 
     assert features.cm_per_pixel == 0.8
-    assert features.mouse_width_cm == 3.2
+    assert np.isclose(features.mouse_width_cm, 3.2)
 
 
 def test_loader_uses_partial_keypoints_and_never_uses_box_geometry(tmp_path):

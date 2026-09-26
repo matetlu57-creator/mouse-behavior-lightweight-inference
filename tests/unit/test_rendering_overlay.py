@@ -38,9 +38,9 @@ def test_social_event_is_scoped_to_participants_and_keeps_individual_behavior() 
     assert layer == "mixed"
     assert {event["behavior"] for event in selected} == {"approach", "running"}
     overlays = build_mouse_overlays(selected, layer, [0, 1, 2])
-    assert overlays[0].text == "ID 00｜奔跑"
-    assert overlays[1].text == "ID 01｜主动接近"
-    assert overlays[2].text == "ID 02｜被接近"
+    assert overlays[0].text == "ID 00｜个体：奔跑"
+    assert overlays[1].text == "ID 01｜社交：主动接近"
+    assert overlays[2].text == "ID 02｜社交：被接近"
     assert "按参与ID分别显示" in build_panel_lines(selected, layer)[0]
 
 
@@ -55,16 +55,16 @@ def test_group_event_shows_specific_behavior_for_known_members() -> None:
         ]
     )
 
-    assert layer == "group"
+    assert layer == "mixed"
     assert {event["behavior"] for event in selected} == {"isolation", "stationary"}
     overlays = build_mouse_overlays(selected, layer, [0, 1, 2])
-    assert overlays[0].text == "ID 00｜静止"
+    assert overlays[0].text == "ID 00｜个体：静止"
     assert overlays[1].text == "ID 01｜群体：孤立"
     assert overlays[2].text == "ID 02｜群体：孤立"
     assert "孤立" in build_panel_lines(selected, layer)[1]
 
 
-def test_group_behavior_overrides_social_and_individual_for_huddle_members() -> None:
+def test_group_behavior_preserves_social_and_individual_for_huddle_members() -> None:
     selected, layer = select_display_events(
         [
             _event("running", actor=0, pair="mouse_0"),
@@ -79,15 +79,15 @@ def test_group_behavior_overrides_social_and_individual_for_huddle_members() -> 
 
     overlays = build_mouse_overlays(selected, layer, [0, 1, 2, 3])
 
-    assert layer == "group"
-    assert overlays[0].text == "ID 00｜群体：扎堆"
-    assert overlays[1].text == "ID 01｜群体：扎堆"
+    assert layer == "mixed"
+    assert overlays[0].text == "ID 00｜群体：扎堆｜社交：攻击｜个体：奔跑"
+    assert overlays[1].text == "ID 01｜群体：扎堆｜社交：被攻击"
     assert overlays[2].text == "ID 02｜群体：扎堆"
-    assert overlays[3].text == "ID 03｜行走"
-    assert not any(event["behavior"] == "attack" for event in selected)
+    assert overlays[3].text == "ID 03｜个体：行走"
+    assert any(event["behavior"] == "attack" for event in selected)
 
 
-def test_isolation_overrides_individual_only_for_isolated_mouse() -> None:
+def test_isolation_preserves_lower_layers_for_isolated_mouse() -> None:
     selected, layer = select_display_events(
         [
             _event("stationary", actor=1, pair="mouse_1"),
@@ -101,10 +101,10 @@ def test_isolation_overrides_individual_only_for_isolated_mouse() -> None:
 
     overlays = build_mouse_overlays(selected, layer, [1, 2])
 
-    assert layer == "group"
-    assert overlays[1].text == "ID 01｜群体：孤立"
-    assert overlays[2].text == "ID 02｜被接近"
-    assert not any(event["behavior"] == "stationary" for event in selected)
+    assert layer == "mixed"
+    assert overlays[1].text == "ID 01｜群体：孤立｜社交：主动接近｜个体：静止"
+    assert overlays[2].text == "ID 02｜社交：被接近"
+    assert any(event["behavior"] == "stationary" for event in selected)
 
 
 def test_attack_semantic_priority_beats_contact_score() -> None:
@@ -133,8 +133,8 @@ def test_attack_semantic_priority_beats_contact_score() -> None:
     overlays = build_mouse_overlays(selected, layer, [1, 2])
 
     assert layer == "social"
-    assert overlays[1].text == "ID 01｜攻击"
-    assert overlays[2].text == "ID 02｜被攻击"
+    assert overlays[1].text == "ID 01｜社交：攻击"
+    assert overlays[2].text == "ID 02｜社交：被攻击"
 
 
 def test_approach_is_highest_social_display_priority() -> None:
@@ -152,8 +152,8 @@ def test_approach_is_highest_social_display_priority() -> None:
 
     assert layer == "social"
     assert selected[0]["behavior"] == "approach"
-    assert overlays[1].text == "ID 01｜主动接近"
-    assert overlays[2].text == "ID 02｜被接近"
+    assert overlays[1].text == "ID 01｜社交：主动接近"
+    assert overlays[2].text == "ID 02｜社交：被接近"
 
 
 def test_individual_layer_labels_every_tracked_id_even_when_no_event_is_active() -> None:
@@ -186,8 +186,8 @@ def test_contact_events_are_adapted_to_directional_social_labels() -> None:
 
     assert layer == "social"
     assert len(selected) == 1
-    assert overlays[4].text == "ID 04｜鼻头接触"
-    assert overlays[5].text == "ID 05｜鼻头接触"
+    assert overlays[4].text == "ID 04｜社交：鼻头接触"
+    assert overlays[5].text == "ID 05｜社交：鼻头接触"
 
 
 def test_individual_behavior_is_visible_when_no_social_or_group_event_is_active() -> None:
@@ -196,7 +196,7 @@ def test_individual_behavior_is_visible_when_no_social_or_group_event_is_active(
     overlays = build_mouse_overlays(selected, layer, [0, 1])
 
     assert layer == "individual"
-    assert overlays[0].text == "ID 00｜奔跑"
+    assert overlays[0].text == "ID 00｜个体：奔跑"
     assert overlays[1].text == "ID 01｜仅追踪"
 
 
@@ -292,8 +292,8 @@ def test_focus_is_heading_only_and_does_not_reorder_same_layer_events() -> None:
     )
 
     assert selected[0]["behavior"] == "chase"
-    assert overlays[1].text == "ID 01｜追逐"
-    assert overlays[2].text == "ID 02｜被追逐"
+    assert overlays[1].text == "ID 01｜社交：追逐"
+    assert overlays[2].text == "ID 02｜社交：被追逐"
 
     selected, layer = select_display_events(
         [
@@ -308,8 +308,8 @@ def test_focus_is_heading_only_and_does_not_reorder_same_layer_events() -> None:
         [1, 2, 3],
         focus_behavior="attack",
     )
-    assert overlays[1].text == "ID 01｜群体：扎堆"
-    assert overlays[2].text == "ID 02｜群体：扎堆"
+    assert overlays[1].text == "ID 01｜群体：扎堆｜社交：攻击"
+    assert overlays[2].text == "ID 02｜群体：扎堆｜社交：被攻击"
 
 
 def test_identity_bridge_roles_are_resolved_per_frame_without_ghost_ids() -> None:
@@ -340,8 +340,8 @@ def test_identity_bridge_roles_are_resolved_per_frame_without_ghost_ids() -> Non
     assert first is not None
     selected, layer = select_display_events([first])
     overlays = build_mouse_overlays(selected, layer, [2, 6, 9])
-    assert overlays[2].text == "ID 02｜攻击"
-    assert overlays[6].text == "ID 06｜被攻击"
+    assert overlays[2].text == "ID 02｜社交：攻击"
+    assert overlays[6].text == "ID 06｜社交：被攻击"
     assert overlays[9].text == "ID 09｜仅追踪"
 
     assert resolve_event_for_frame(event, 6) is None
@@ -350,9 +350,9 @@ def test_identity_bridge_roles_are_resolved_per_frame_without_ghost_ids() -> Non
     assert second is not None
     selected, layer = select_display_events([second])
     overlays = build_mouse_overlays(selected, layer, [2, 6, 9])
-    assert overlays[2].text == "ID 02｜攻击"
+    assert overlays[2].text == "ID 02｜社交：攻击"
     assert overlays[6].text == "ID 06｜仅追踪"
-    assert overlays[9].text == "ID 09｜被攻击"
+    assert overlays[9].text == "ID 09｜社交：被攻击"
 
 
 def test_group_members_are_resolved_per_frame_without_union_leakage() -> None:
