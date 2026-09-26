@@ -7,24 +7,65 @@ PROJECT_NAME = "mouse-behavior-lightweight-inference"
 SOCIAL_BEHAVIORS = (
     "together",
     "approach",
+    "following",
     "chase",
     "avoidance",
     "attack",
     "nose_head_contact",
     "nose_tail_contact",
 )
-GROUP_BEHAVIORS = ("huddle", "isolation")
+GROUP_BEHAVIORS = (
+    "huddle",
+    "social_clustering",
+    "group_locomotion",
+    "dispersal",
+    "isolation",
+)
 INDIVIDUAL_BEHAVIORS = ("running", "walking", "stationary")
 EXTENDED_BEHAVIORS = SOCIAL_BEHAVIORS + GROUP_BEHAVIORS + INDIVIDUAL_BEHAVIORS
+BEHAVIOR_LAYERS = {
+    "individual": INDIVIDUAL_BEHAVIORS,
+    "social": SOCIAL_BEHAVIORS,
+    "group": GROUP_BEHAVIORS,
+}
+BEHAVIOR_LAYER_ORDER = ("individual", "social", "group")
+# Rendering consumes these only within a layer. Category priority is applied
+# separately so a group event never destroys co-occurring lower-layer output.
+BEHAVIOR_DISPLAY_PRIORITY = {
+    # The user's explicit within-group order.
+    "huddle": 115,
+    "social_clustering": 110,
+    "dispersal": 105,
+    "group_locomotion": 100,
+    "isolation": 95,
+    # Social order is a display order; train-calibrated Top-1 scoring is free
+    # to prefer a more specific event such as Attack over Approach.
+    "approach": 190,
+    "together": 180,
+    "chase": 170,
+    "avoidance": 160,
+    "attack": 150,
+    "nose_head_contact": 140,
+    "nose_tail_contact": 130,
+    "following": 120,
+    # Individual labels have no biological precedence over one another.
+    "running": 55,
+    "walking": 55,
+    "stationary": 55,
+}
 BEHAVIOR_NAMES_ZH = {
     "together": "一起",
     "approach": "接近",
+    "following": "跟随",
     "chase": "追逐",
     "avoidance": "回避",
     "attack": "攻击",
     "nose_head_contact": "鼻头接触",
     "nose_tail_contact": "鼻尾接触",
     "huddle": "扎堆",
+    "social_clustering": "社会聚集",
+    "group_locomotion": "群体同步运动",
+    "dispersal": "群体分散",
     "isolation": "孤立",
     "running": "奔跑",
     "walking": "行走",
@@ -64,6 +105,9 @@ __all__ = [
     "GROUP_BEHAVIORS",
     "INDIVIDUAL_BEHAVIORS",
     "EXTENDED_BEHAVIORS",
+    "BEHAVIOR_LAYERS",
+    "BEHAVIOR_LAYER_ORDER",
+    "BEHAVIOR_DISPLAY_PRIORITY",
     "BEHAVIOR_NAMES_ZH",
     "KP_NOSE",
     "KP_LEFT_EAR",
