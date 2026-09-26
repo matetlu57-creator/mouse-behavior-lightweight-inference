@@ -358,9 +358,7 @@ def _coordinate_candidates(
     return candidates
 
 
-def _non_group_regressions(
-    metrics: Mapping[str, Any], baseline: Mapping[str, Any]
-) -> list[str]:
+def _non_group_regressions(metrics: Mapping[str, Any], baseline: Mapping[str, Any]) -> list[str]:
     current_rows = dict(metrics.get("per_behavior", {}))
     baseline_rows = dict(baseline.get("per_behavior", {}))
     regressions: list[str] = []
@@ -375,13 +373,9 @@ def _non_group_regressions(
     return sorted(regressions)
 
 
-def _group_rule_rank(
-    metrics: Mapping[str, Any], baseline: Mapping[str, Any]
-) -> tuple[float, ...]:
+def _group_rule_rank(metrics: Mapping[str, Any], baseline: Mapping[str, Any]) -> tuple[float, ...]:
     regressions = _non_group_regressions(metrics, baseline)
-    regressions.extend(
-        strict_top1_regressions(metrics, baseline)
-    )
+    regressions.extend(strict_top1_regressions(metrics, baseline))
     regressions = sorted(set(regressions))
     if regressions:
         return (0.0, -float(len(regressions)))
@@ -403,9 +397,7 @@ def _together_speed_rank(
 ) -> tuple[float, ...]:
     """Tune Together's low-motion ceiling without trading away another class."""
 
-    regressions = strict_top1_regressions(
-        metrics, baseline, excluded_behaviors={"together"}
-    )
+    regressions = strict_top1_regressions(metrics, baseline, excluded_behaviors={"together"})
     together = dict(metrics.get("per_behavior", {}).get("together", {}))
     return (
         0.0 if regressions else 1.0,
@@ -463,9 +455,7 @@ def _tune_group_rules(
                 )
                 for index in range(len(candidates))
             ]
-            candidate_index = max(
-                range(len(candidates)), key=lambda index: candidate_keys[index]
-            )
+            candidate_index = max(range(len(candidates)), key=lambda index: candidate_keys[index])
             for candidate, metrics in zip(candidates, metrics_list):
                 row = _history_row(
                     stage=f"group_rules_pass_{pass_index}",
@@ -475,9 +465,7 @@ def _tune_group_rules(
                     target_accuracy=target_accuracy,
                 )
                 row["non_group_regressions"] = "unchanged by focused candidate path"
-                row["group_rule_rank"] = json.dumps(
-                    _group_rule_rank(metrics, baseline_focus)
-                )
+                row["group_rule_rank"] = json.dumps(_group_rule_rank(metrics, baseline_focus))
                 history.append(row)
             if candidate_keys[candidate_index] > candidate_keys[0]:
                 current = candidates[candidate_index]
@@ -522,13 +510,9 @@ def _tune_group_rules(
             target_accuracy=target_accuracy,
         )
         row["protected_behavior_regressions"] = json.dumps(
-            strict_top1_regressions(
-                metrics, together_baseline, excluded_behaviors={"together"}
-            )
+            strict_top1_regressions(metrics, together_baseline, excluded_behaviors={"together"})
         )
-        row["together_speed_rank"] = json.dumps(
-            _together_speed_rank(metrics, together_baseline)
-        )
+        row["together_speed_rank"] = json.dumps(_together_speed_rank(metrics, together_baseline))
         history.append(row)
     best_together_index = max(
         range(len(together_candidates)),
@@ -553,11 +537,11 @@ def _two_collective_rank(
     rows = metrics["per_behavior"]
     base_rows = baseline["per_behavior"]
     changed_protected = [
-        name for name, row in base_rows.items()
+        name
+        for name, row in base_rows.items()
         if name not in focus
         and int(row["support"]) > 0
-        and int(row["strict_top1_correct"])
-        != int(rows[name]["strict_top1_correct"])
+        and int(row["strict_top1_correct"]) != int(rows[name]["strict_top1_correct"])
     ]
     losses = sum(
         int(rows[name]["strict_top1_correct"] < base_rows[name]["strict_top1_correct"])
@@ -583,12 +567,14 @@ def _tune_two_collective_rules(
 
     baseline = _evaluate_loaded_candidates(train_cache, [initial])[0]
     focused_cache = [
-        item for item in train_cache
+        item
+        for item in train_cache
         if item[0].canonical_behavior in {"huddle", "social_clustering", "isolation"}
     ]
     focused_baseline = _evaluate_loaded_candidates(focused_cache, [initial])[0]
     protected_cache = [
-        item for item in train_cache
+        item
+        for item in train_cache
         if item[0].canonical_behavior not in {"huddle", "social_clustering"}
     ]
 
@@ -609,7 +595,7 @@ def _tune_two_collective_rules(
     history: list[dict[str, Any]] = []
     for pass_index in range(1, max_passes + 1):
         changed = False
-        for name in (parameter_names or tuple(TWO_COLLECTIVE_RULE_GRID)):
+        for name in parameter_names or tuple(TWO_COLLECTIVE_RULE_GRID):
             values = TWO_COLLECTIVE_RULE_GRID[name]
             candidates = _coordinate_candidates(current, name, values)
             metrics_list = _evaluate_loaded_candidates(focused_cache, candidates)
@@ -636,7 +622,8 @@ def _tune_two_collective_rules(
                 )
                 row["protected_behavior_regressions"] = json.dumps(
                     strict_top1_regressions(
-                        metrics, focused_baseline,
+                        metrics,
+                        focused_baseline,
                         excluded_behaviors={"huddle", "social_clustering"},
                     )
                 )
@@ -647,16 +634,20 @@ def _tune_two_collective_rules(
             if best != 0 and ranks[best] > ranks[0]:
                 current = candidates[best]
                 changed = True
-                LOGGER.info("two-collective tuned %s=%s rank=%s", name, getattr(current, name), ranks[best])
+                LOGGER.info(
+                    "two-collective tuned %s=%s rank=%s", name, getattr(current, name), ranks[best]
+                )
         if not changed:
             break
     current_metrics = _evaluate_loaded_candidates(train_cache, [current])[0]
     protected = strict_top1_regressions(
-        current_metrics, baseline,
+        current_metrics,
+        baseline,
         excluded_behaviors={"huddle", "social_clustering"},
     )
     changed_counts = [
-        name for name, row in baseline["per_behavior"].items()
+        name
+        for name, row in baseline["per_behavior"].items()
         if name not in {"huddle", "social_clustering"}
         and int(row["strict_top1_correct"])
         != int(current_metrics["per_behavior"][name]["strict_top1_correct"])
@@ -691,10 +682,7 @@ def _history_row(
         "protected_behavior_regressions": "",
         "together_speed_rank": "",
         "per_behavior_accuracy": json.dumps(
-            {
-                name: details["accuracy"]
-                for name, details in metrics["per_behavior"].items()
-            },
+            {name: details["accuracy"] for name, details in metrics["per_behavior"].items()},
             ensure_ascii=False,
             sort_keys=True,
         ),
@@ -759,9 +747,7 @@ def _write_report(
         f"{training_metrics['prediction_coverage']:.3f} | {training_metrics['target_id_availability_rate']:.3f} |",
     ]
     if validation_metrics is not None:
-        validation_met = training_target_reached(
-            validation_metrics, target_validation_accuracy
-        )
+        validation_met = training_target_reached(validation_metrics, target_validation_accuracy)
         lines.append(
             f"| validation | {validation_metrics['n_samples']} | {validation_metrics['target_id_accuracy']:.3f} | "
             f"{validation_metrics['macro_target_id_accuracy']:.3f} | {minimum_behavior_accuracy(validation_metrics):.3f} | "
@@ -830,9 +816,7 @@ def _write_report(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument(
-        "--config", type=Path, default=REPO_ROOT / "configs" / "default.yaml"
-    )
+    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "default.yaml")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -919,7 +903,11 @@ def main() -> int:
         all_records=retained,
         train_records=train_records,
         validation_records=validation_records,
-        counts={behavior: counts[behavior] for behavior in sorted(counts) if behavior not in excluded_counts},
+        counts={
+            behavior: counts[behavior]
+            for behavior in sorted(counts)
+            if behavior not in excluded_counts
+        },
         excluded_counts=excluded_counts,
     )
     LOGGER.info(
@@ -965,9 +953,7 @@ def main() -> int:
     else:
         bootstrap_candidates = _bootstrap_candidates(seed)
         bootstrap_metrics = _evaluate_loaded_candidates(train_cache, bootstrap_candidates)
-        for index, (candidate, metrics) in enumerate(
-            zip(bootstrap_candidates, bootstrap_metrics)
-        ):
+        for index, (candidate, metrics) in enumerate(zip(bootstrap_candidates, bootstrap_metrics)):
             history.append(
                 _history_row(
                     stage=f"bootstrap_{index}",
@@ -1055,9 +1041,7 @@ def main() -> int:
         args.output_dir / "train_predictions.csv",
         _prediction_rows_loaded(train_cache, tuned, split="train"),
     )
-    training_met = training_target_reached(
-        training_metrics, args.target_train_accuracy
-    )
+    training_met = training_target_reached(training_metrics, args.target_train_accuracy)
     if not training_met and not (args.group_rules_only or args.two_group_only):
         _write_report(
             args.output_dir / "calibration_report.md",
@@ -1085,9 +1069,7 @@ def main() -> int:
         "parameters frozen before validation; training accuracy gate %s",
         "passed" if training_met else "not reached, validating diagnostic outcome",
     )
-    validation_cache = _load_feature_cache(
-        validation_records, max_tracks=args.max_tracks
-    )
+    validation_cache = _load_feature_cache(validation_records, max_tracks=args.max_tracks)
     validation_metrics = _evaluate_loaded_candidates(validation_cache, [tuned])[0]
     (args.output_dir / "validation_metrics.json").write_text(
         json.dumps(validation_metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -1111,9 +1093,7 @@ def main() -> int:
     )
     LOGGER.info("training metrics: %s", json.dumps(training_metrics, ensure_ascii=False))
     LOGGER.info("validation metrics: %s", json.dumps(validation_metrics, ensure_ascii=False))
-    if not training_target_reached(
-        validation_metrics, args.target_validation_accuracy
-    ):
+    if not training_target_reached(validation_metrics, args.target_validation_accuracy):
         LOGGER.warning(
             "validation expectation missed: overall=%.4f minimum_behavior=%.4f",
             validation_metrics["target_id_accuracy"],

@@ -73,9 +73,7 @@ def test_filter_and_session_split_preserve_behavior_coverage() -> None:
     assert [record.sample_id for record in kept] == ["a1", "a2", "b1", "b2"]
     assert counts == {"Rare": 1, "Static": 2, "Together": 2}
     assert excluded == {"Rare": 1}
-    train, validation = split_by_recording_session(
-        kept, validation_sessions={"val.mp4"}
-    )
+    train, validation = split_by_recording_session(kept, validation_sessions={"val.mp4"})
     assert {record.sample_id for record in train} == {"a1", "b1"}
     assert {record.sample_id for record in validation} == {"a2", "b2"}
 
@@ -154,7 +152,8 @@ def test_contact_rule_uses_absolute_head_or_tail_distance() -> None:
         centers_cm=np.zeros((frames, 2, 2), dtype=np.float32),
         speed_cm_s=np.zeros((frames, 2), dtype=np.float32),
         velocity_cm_s=np.zeros((frames, 2, 2), dtype=np.float32),
-        pair_i=np.asarray([0]), pair_j=np.asarray([1]),
+        pair_i=np.asarray([0]),
+        pair_j=np.asarray([1]),
         pair_distance_cm=distance,
         pair_closing_speed_cm_s=np.zeros_like(distance),
         pair_direction_similarity=np.zeros_like(distance),
@@ -162,11 +161,14 @@ def test_contact_rule_uses_absolute_head_or_tail_distance() -> None:
         pair_nose_tail_cm=np.full_like(distance, 1.8),
         nearest_distance_cm=np.full((frames, 2), 3.0, dtype=np.float32),
         mean_nearest_distance_cm=np.full(frames, 3.0, dtype=np.float32),
-        cm_per_pixel=0.1, track_selection_truncated=False, selected_track_count=2,
+        cm_per_pixel=0.1,
+        track_selection_truncated=False,
+        selected_track_count=2,
     )
     ambiguous = predict_features(features, HeuristicParameters(pair_min_duration_s=0.1))
     assert ambiguous["pair_scores"]["1,2"]["nose_head_contact"] > 0.0
     assert ambiguous["pair_scores"]["1,2"]["nose_tail_contact"] > 0.0
+
 
 def test_target_id_accuracy_does_not_credit_the_wrong_mouse() -> None:
     prediction = {
@@ -295,7 +297,12 @@ def test_isolation_loses_for_same_target_if_it_is_in_a_group_event() -> None:
     }
 
     metrics = evaluate_predictions(
-        [(_record("isolation-target-in-huddle", "Isolation", "val.mp4", mouse_ids=(1,)), prediction)]
+        [
+            (
+                _record("isolation-target-in-huddle", "Isolation", "val.mp4", mouse_ids=(1,)),
+                prediction,
+            )
+        ]
     )
 
     assert metrics["target_id_accuracy"] == 0.0
@@ -346,12 +353,8 @@ def test_social_clustering_needs_multiple_moving_members_and_near_start() -> Non
         clustering_min_duration_s=5.0,
     )
 
-    one_mouse_moves = predict_features(
-        _group_formation_features(moving_members=1), parameters
-    )
-    two_mice_move = predict_features(
-        _group_formation_features(moving_members=2), parameters
-    )
+    one_mouse_moves = predict_features(_group_formation_features(moving_members=1), parameters)
+    two_mice_move = predict_features(_group_formation_features(moving_members=2), parameters)
     distant_start = predict_features(
         _group_formation_features(moving_members=3),
         replace(parameters, clustering_initial_max_distance_cm=20.0),
@@ -365,10 +368,7 @@ def test_social_clustering_needs_multiple_moving_members_and_near_start() -> Non
     assert two_mice_move["group_scores"]["1,2,3"]["social_clustering"] > 0.0
     assert "1,2,3" not in distant_start["group_scores"]
     assert huddle_member["group_scores"]["1,2,3"]["social_clustering"] > 0.0
-    assert all(
-        values["isolation"] == 0.0
-        for values in huddle_member["identity_scores"].values()
-    )
+    assert all(values["isolation"] == 0.0 for values in huddle_member["identity_scores"].values())
 
 
 def test_social_clustering_member_support_excludes_one_frame_bystander() -> None:
@@ -430,7 +430,9 @@ def test_already_close_moving_group_can_be_social_clustering_without_distance_dr
 
     assert predict_features(features, parameters)["group_scores"]["1,2,3"]["social_clustering"] > 0
     stable = replace(features, centers_cm=np.zeros_like(centers))
-    assert "social_clustering" not in predict_features(stable, parameters)["group_scores"].get("1,2,3", {})
+    assert "social_clustering" not in predict_features(stable, parameters)["group_scores"].get(
+        "1,2,3", {}
+    )
     short = replace(
         features,
         valid=features.valid[:4],
@@ -445,7 +447,9 @@ def test_already_close_moving_group_can_be_social_clustering_without_distance_dr
         nearest_distance_cm=features.nearest_distance_cm[:4],
         mean_nearest_distance_cm=features.mean_nearest_distance_cm[:4],
     )
-    assert "social_clustering" not in predict_features(short, parameters)["group_scores"].get("1,2,3", {})
+    assert "social_clustering" not in predict_features(short, parameters)["group_scores"].get(
+        "1,2,3", {}
+    )
 
 
 def test_one_track_displacement_outlier_does_not_override_tight_huddle() -> None:
@@ -465,7 +469,9 @@ def test_one_track_displacement_outlier_does_not_override_tight_huddle() -> None
         clustering_motion_min_displacement_cm=6.0,
     )
 
-    assert "social_clustering" not in predict_features(features, parameters)["group_scores"].get("1,2,3", {})
+    assert "social_clustering" not in predict_features(features, parameters)["group_scores"].get(
+        "1,2,3", {}
+    )
     loose = replace(
         features,
         pair_distance_cm=np.full_like(features.pair_distance_cm, 10.0),
@@ -543,22 +549,16 @@ def test_group_rule_tuning_penalizes_false_positives_before_top1_recall() -> Non
         "macro_f1": 0.8,
     }
 
-    assert group_rule_calibration_rank(specific_rule) > group_rule_calibration_rank(
-        broad_rule
-    )
+    assert group_rule_calibration_rank(specific_rule) > group_rule_calibration_rank(broad_rule)
 
 
 def test_group_rule_ties_prefer_narrow_clustering_and_huddle_visibility_floor() -> None:
     assert group_rule_parameter_tie_break(
         "clustering_initial_max_distance_cm", 24.0, 6
-    ) > group_rule_parameter_tie_break(
-        "clustering_initial_max_distance_cm", 30.0, 0
-    )
+    ) > group_rule_parameter_tie_break("clustering_initial_max_distance_cm", 30.0, 0)
     assert group_rule_parameter_tie_break(
         "huddle_min_member_support_fraction", 0.25, 3
-    ) > group_rule_parameter_tie_break(
-        "huddle_min_member_support_fraction", 0.1, 1
-    )
+    ) > group_rule_parameter_tie_break("huddle_min_member_support_fraction", 0.1, 1)
 
 
 def test_walking_threshold_is_independent_from_stationary_threshold() -> None:
@@ -661,7 +661,7 @@ def test_group_calibration_parameters_load_from_project_config_shape() -> None:
                         "initial_max_neighbor_distance_cm": 24.0,
                         "min_mean_speed_cm_s": 3.0,
                     },
-                }
+                },
             }
         }
     )
@@ -695,9 +695,9 @@ def test_strict_top1_guard_rejects_improving_huddle_at_social_cluster_cost():
     }
 
     assert strict_top1_regressions(candidate, baseline) == ["social_clustering"]
-    assert strict_top1_regressions(
-        candidate, baseline, excluded_behaviors={"social_clustering"}
-    ) == []
+    assert (
+        strict_top1_regressions(candidate, baseline, excluded_behaviors={"social_clustering"}) == []
+    )
 
 
 def test_running_requires_directional_fast_motion_for_half_a_second():
@@ -732,7 +732,10 @@ def test_running_requires_directional_fast_motion_for_half_a_second():
 def test_loader_uses_eight_centimeter_body_length_and_estimates_mouse_width(tmp_path):
     detections = []
     for track_id, x in ((1, 0), (2, 100)):
-        points = [[x + dx, dy, 0.99] for dx, dy in ((0, 0), (1, 1), (1, -1), (3, 0), (5, 2), (5, -2), (10, 0))]
+        points = [
+            [x + dx, dy, 0.99]
+            for dx, dy in ((0, 0), (1, 1), (1, -1), (3, 0), (5, 2), (5, -2), (10, 0))
+        ]
         detections.append({"track_id": track_id, "keypoints": points, "box": [x, -1, x + 10, 1]})
     path = tmp_path / "tracks.json"
     path.write_text(json.dumps([{"frame": 0, "detections": detections}]), encoding="utf-8")
@@ -745,13 +748,28 @@ def test_loader_uses_eight_centimeter_body_length_and_estimates_mouse_width(tmp_
 
 def test_loader_uses_partial_keypoints_and_never_uses_box_geometry(tmp_path):
     points = [
-        [10., 10., .99], [20., 20., 0.0], [30., 30., .99], [40., 40., .99],
-        [50., 50., .99], [60., 60., 0.0], [70., 70., 0.0],
+        [10.0, 10.0, 0.99],
+        [20.0, 20.0, 0.0],
+        [30.0, 30.0, 0.99],
+        [40.0, 40.0, 0.99],
+        [50.0, 50.0, 0.99],
+        [60.0, 60.0, 0.0],
+        [70.0, 70.0, 0.0],
     ]
     path = tmp_path / "partial_tracks.json"
-    path.write_text(json.dumps([{"frame": 0, "detections": [{
-        "track_id": 7, "keypoints": points, "box": [1000, 1000, 1100, 1100]
-    }]}]), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "frame": 0,
+                    "detections": [
+                        {"track_id": 7, "keypoints": points, "box": [1000, 1000, 1100, 1100]}
+                    ],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     features = load_exported_features(path, fps=30.0)
 
@@ -772,9 +790,7 @@ def test_huddling_gap_default_and_profile_override_are_five_seconds() -> None:
 
 def test_isolation_uses_nearest_neighbor_distance_for_ten_seconds() -> None:
     frames = 10
-    pair_distances = np.tile(
-        np.asarray([[10.0, 100.0, 100.0]], dtype=np.float32), (frames, 1)
-    )
+    pair_distances = np.tile(np.asarray([[10.0, 100.0, 100.0]], dtype=np.float32), (frames, 1))
     features = ExportedFeatures(
         fps=1.0,
         track_ids=np.asarray([1, 2, 3]),
@@ -916,9 +932,7 @@ def test_calibration_rank_enforces_every_behavior_target_before_f1() -> None:
     assert minimum_behavior_accuracy(feasible) == 0.95
     assert training_target_reached(feasible, 0.95)
     assert not training_target_reached(high_f1_but_failed_class, 0.95)
-    assert calibration_rank(feasible, 0.95) > calibration_rank(
-        high_f1_but_failed_class, 0.95
-    )
+    assert calibration_rank(feasible, 0.95) > calibration_rank(high_f1_but_failed_class, 0.95)
 
 
 def test_duration_vectorization_preserves_longest_run_per_column() -> None:

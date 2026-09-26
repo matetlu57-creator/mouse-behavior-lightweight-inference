@@ -666,9 +666,7 @@ def _event_rows_from_mask(
             "pair_key": str(pair_key),
             "actor_id": actor,
             "target_id": target,
-            "role_ambiguous": bool(
-                str(event_scope) == "pair" and (actor < 0 or target < 0)
-            ),
+            "role_ambiguous": bool(str(event_scope) == "pair" and (actor < 0 or target < 0)),
             # analysis_* are the evidence span.  start/end are the public
             # display/export span and may include bounded temporal context.
             "analysis_start_frame": int(start),
@@ -1596,15 +1594,11 @@ def _semantic_extended_pair_events(
     )
     distance = pd.to_numeric(pair_df["center_distance_cm"], errors="coerce").to_numpy(float)
     extended_cfg = _extended_behavior_config(config)
-    together_distance_cm = float(
-        social.get("together_max_distance_cm", 8.0)
-    )
+    together_distance_cm = float(social.get("together_max_distance_cm", 8.0))
     stationary_speed_limit = float(
         social.get(
             "together_max_individual_speed_cm_s",
-            dict(extended_cfg.get("individual", {})).get(
-                "stationary_max_speed_cm_s", 10.0
-            ),
+            dict(extended_cfg.get("individual", {})).get("stationary_max_speed_cm_s", 10.0),
         )
     )
     together = (
@@ -1757,9 +1751,7 @@ def _following_events(
     minimum_direction = float(
         np.clip(following_cfg.get("min_direction_similarity", 0.70), -1.0, 1.0)
     )
-    minimum_pursuit = float(
-        np.clip(following_cfg.get("min_pursuit_alignment", 0.35), -1.0, 1.0)
-    )
+    minimum_pursuit = float(np.clip(following_cfg.get("min_pursuit_alignment", 0.35), -1.0, 1.0))
     maximum_escape = float(
         np.clip(following_cfg.get("max_leader_escape_alignment", 0.25), -1.0, 1.0)
     )
@@ -1984,9 +1976,7 @@ def _extended_pair_events(
 
     # ``together`` is a close pair state. It does not require a
     # contact threshold, so it can represent the labeled together examples.
-    together_distance_cm = float(
-        social.get("together_max_distance_cm", 8.0)
-    )
+    together_distance_cm = float(social.get("together_max_distance_cm", 8.0))
     stationary_speed_limit = float(
         social.get(
             "together_max_individual_speed_cm_s",
@@ -2098,8 +2088,7 @@ def _extended_pair_events(
             sample_stride=sample_stride,
             score=np.where(
                 together,
-                1.0
-                - np.clip(distance / max(together_distance_cm, 1e-6), 0, 1),
+                1.0 - np.clip(distance / max(together_distance_cm, 1e-6), 0, 1),
                 0.0,
             ),
             actor_id=np.full(n, -1),
@@ -2373,12 +2362,8 @@ def _extended_individual_and_group_events(
     huddle_core_density = np.zeros(frames, dtype=float)
     huddle_mean_speed = np.full(frames, np.inf, dtype=float)
     huddle_high_motion_fraction = np.ones(frames, dtype=float)
-    stationary_speed_limit = max(
-        float(individual_cfg.get("stationary_max_speed_cm_s", 10.0)), 0.0
-    )
-    huddle_max_mean_speed = max(
-        float(group_cfg.get("huddle_max_mean_speed_cm_s", 10.0)), 0.0
-    )
+    stationary_speed_limit = max(float(individual_cfg.get("stationary_max_speed_cm_s", 10.0)), 0.0)
+    huddle_max_mean_speed = max(float(group_cfg.get("huddle_max_mean_speed_cm_s", 10.0)), 0.0)
     huddle_max_high_motion_fraction = float(
         np.clip(group_cfg.get("huddle_max_high_motion_fraction", 0.20), 0.0, 1.0)
     )
@@ -2567,9 +2552,8 @@ def _extended_individual_and_group_events(
     # Apply the resting gate before temporal gap filling so a moving formation
     # cannot be backdated into Huddling; the public event begins only once the
     # close group is already in its low-motion state.
-    resting_huddle = (
-        (huddle_mean_speed <= huddle_max_mean_speed)
-        & (huddle_high_motion_fraction <= huddle_max_high_motion_fraction)
+    resting_huddle = (huddle_mean_speed <= huddle_max_mean_speed) & (
+        huddle_high_motion_fraction <= huddle_max_high_motion_fraction
     )
     for frame in np.flatnonzero(~resting_huddle):
         huddle_members_by_frame[int(frame)] = ()
@@ -2889,9 +2873,7 @@ def _extended_individual_and_group_events(
                     ],
                 )
             ),
-            {"group_locomotion": 3.0, "social_clustering": 5.0, "dispersal": 10.0}[
-                behavior
-            ],
+            {"group_locomotion": 3.0, "social_clustering": 5.0, "dispersal": 10.0}[behavior],
         )
         fill_gap_seconds = max(
             float(behavior_cfg.get("fill_gap_seconds", group_cfg["fill_gap_seconds"])),
@@ -3280,15 +3262,8 @@ def _extract_contact_events(
             states[index] = None
             continue
         state["contact_type_components"] = ";".join(components)
-        state["contact_type"] = (
-            "nose_head_and_nose_tail"
-            if len(components) == 2
-            else components[0]
-        )
-        relevant_distances = [
-            float(state[f"{component}_distance_cm"])
-            for component in components
-        ]
+        state["contact_type"] = "nose_head_and_nose_tail" if len(components) == 2 else components[0]
+        relevant_distances = [float(state[f"{component}_distance_cm"]) for component in components]
         state["contact_distance_cm"] = min(relevant_distances)
 
     def state_key(state: Mapping[str, Any] | None) -> tuple[Any, ...] | None:

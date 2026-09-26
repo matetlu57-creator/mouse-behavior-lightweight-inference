@@ -212,11 +212,7 @@ def test_together_requires_both_pair_members_to_be_stationary():
         source_video=Path("synthetic.mp4"),
         source_fps=10.0,
         sample_stride=1,
-        config={
-            "extended_behavior": {
-                "social": {"together_max_individual_speed_cm_s": 10.0}
-            }
-        },
+        config={"extended_behavior": {"social": {"together_max_individual_speed_cm_s": 10.0}}},
     )
     assert not any(event["behavior"] == "together" for event in moving_events)
 
@@ -333,9 +329,7 @@ def test_social_clustering_ends_when_formation_motion_stops():
     frames = 100
     # The group approaches over six seconds, then remains tightly grouped but
     # stationary. The latter phase belongs to Huddling, not Social clustering.
-    spacing = np.concatenate(
-        (np.full(10, 24.0), np.linspace(24.0, 2.0, 61)[1:], np.full(30, 2.0))
-    )
+    spacing = np.concatenate((np.full(10, 24.0), np.linspace(24.0, 2.0, 61)[1:], np.full(30, 2.0)))
     centers = np.zeros((frames, 3, 2), dtype=float)
     centers[:, 1, 0] = spacing
     centers[:, 2, 0] = spacing * 2.0

@@ -96,9 +96,13 @@ def test_attack_reacquisition_does_not_bridge_visible_or_far_pair():
         "state_reacquisition_max_distance_body_lengths": 2.8,
     }
 
-    assert _bridge_attack_reacquisition_gap(
-        mask, visible, fps=10.0, attack_config=config
-    ).tolist() == mask.tolist()
-    assert _bridge_attack_reacquisition_gap(
-        mask, far_reacquisition, fps=10.0, attack_config=config
-    ).tolist() == mask.tolist()
+    assert (
+        _bridge_attack_reacquisition_gap(mask, visible, fps=10.0, attack_config=config).tolist()
+        == mask.tolist()
+    )
+    assert (
+        _bridge_attack_reacquisition_gap(
+            mask, far_reacquisition, fps=10.0, attack_config=config
+        ).tolist()
+        == mask.tolist()
+    )

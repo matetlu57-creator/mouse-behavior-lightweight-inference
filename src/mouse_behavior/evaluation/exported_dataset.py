@@ -259,7 +259,11 @@ def discover_samples(dataset_root: str | Path) -> list[SampleRecord]:
             annotation_path = sample_dir / "annotation.json"
             metadata_path = sample_dir / "metadata.json"
             tracks_path = sample_dir / "tracks.json"
-            if not annotation_path.is_file() or not metadata_path.is_file() or not tracks_path.is_file():
+            if (
+                not annotation_path.is_file()
+                or not metadata_path.is_file()
+                or not tracks_path.is_file()
+            ):
                 continue
             annotation = _read_json(annotation_path)
             metadata = _read_json(metadata_path)
@@ -312,9 +316,11 @@ def filter_behaviors(
     counts = Counter(record.behavior for record in records)
     retained = {behavior for behavior, count in counts.items() if count >= int(minimum_count)}
     kept = [record for record in records if record.behavior in retained]
-    return kept, dict(sorted(counts.items())), {
-        behavior: counts[behavior] for behavior in sorted(counts) if behavior not in retained
-    }
+    return (
+        kept,
+        dict(sorted(counts.items())),
+        {behavior: counts[behavior] for behavior in sorted(counts) if behavior not in retained},
+    )
 
 
 def split_by_recording_session(
@@ -342,8 +348,14 @@ def split_by_recording_session(
         raise ValueError("session split must produce non-empty train and validation sets")
     train_behaviors = {record.behavior for record in train}
     valid_behaviors = {record.behavior for record in valid}
-    missing_train = set(RETAINED_BEHAVIORS).intersection({record.behavior for record in records}) - train_behaviors
-    missing_valid = set(RETAINED_BEHAVIORS).intersection({record.behavior for record in records}) - valid_behaviors
+    missing_train = (
+        set(RETAINED_BEHAVIORS).intersection({record.behavior for record in records})
+        - train_behaviors
+    )
+    missing_valid = (
+        set(RETAINED_BEHAVIORS).intersection({record.behavior for record in records})
+        - valid_behaviors
+    )
     if missing_train or missing_valid:
         raise ValueError(
             f"each retained behavior needs both splits; train_missing={sorted(missing_train)}, "
@@ -393,10 +405,14 @@ def write_split_manifest(
             "strategy": "recording_session_holdout",
             "train_count": len(train_records),
             "validation_count": len(validation_records),
-            "train_fraction": len(train_records) / max(len(train_records) + len(validation_records), 1),
-            "validation_fraction": len(validation_records) / max(len(train_records) + len(validation_records), 1),
+            "train_fraction": len(train_records)
+            / max(len(train_records) + len(validation_records), 1),
+            "validation_fraction": len(validation_records)
+            / max(len(train_records) + len(validation_records), 1),
             "train_sessions": sorted({record.recording_session for record in train_records}),
-            "validation_sessions": sorted({record.recording_session for record in validation_records}),
+            "validation_sessions": sorted(
+                {record.recording_session for record in validation_records}
+            ),
         },
         "counts": {
             "all_discovered": sum(int(value) for value in counts.values())
@@ -404,7 +420,9 @@ def write_split_manifest(
             "retained": sum(int(value) for value in counts.values()),
             "excluded": sum(int(value) for value in excluded_counts.values()),
             "retained_by_behavior": dict(sorted(counts.items())),
-            "train_by_behavior": dict(sorted(Counter(record.behavior for record in train_records).items())),
+            "train_by_behavior": dict(
+                sorted(Counter(record.behavior for record in train_records).items())
+            ),
             "validation_by_behavior": dict(
                 sorted(Counter(record.behavior for record in validation_records).items())
             ),
@@ -425,9 +443,7 @@ def _safe_mean(values: np.ndarray, axis: int | None = None) -> np.ndarray:
     return np.divide(total, count, out=np.full_like(total, np.nan, dtype=float), where=count > 0)
 
 
-def _huddle_pair_distance_cm(
-    features: ExportedFeatures, parameters: HeuristicParameters
-) -> float:
+def _huddle_pair_distance_cm(features: ExportedFeatures, parameters: HeuristicParameters) -> float:
     """Return the Huddling width-based cutoff; Together has its own pair limit."""
     return max(
         min(
@@ -497,13 +513,13 @@ def load_exported_features(
     body_centers_px = np.ma.median(
         np.ma.masked_where(
             np.broadcast_to(~center_good[..., None], center_points.shape), center_points
-        ), axis=2
+        ),
+        axis=2,
     ).filled(np.nan)
     any_good = np.isfinite(keypoints).all(axis=3)
     fallback_centers_px = np.ma.median(
-        np.ma.masked_where(
-            np.broadcast_to(~any_good[..., None], keypoints.shape), keypoints
-        ), axis=2
+        np.ma.masked_where(np.broadcast_to(~any_good[..., None], keypoints.shape), keypoints),
+        axis=2,
     ).filled(np.nan)
     centers_px = np.where(
         np.isfinite(body_centers_px).all(axis=2, keepdims=True),
@@ -525,17 +541,11 @@ def load_exported_features(
     # Hip span is a better body-width proxy than ear span; ears are fallback
     # evidence only when no reliable hip-width samples exist.
     hip_widths_px = np.linalg.norm(keypoints[:, :, 4] - keypoints[:, :, 5], axis=2)
-    hip_widths_px = hip_widths_px[
-        valid & np.isfinite(hip_widths_px) & (hip_widths_px >= 1.0)
-    ]
+    hip_widths_px = hip_widths_px[valid & np.isfinite(hip_widths_px) & (hip_widths_px >= 1.0)]
     ear_widths_px = np.linalg.norm(keypoints[:, :, 1] - keypoints[:, :, 2], axis=2)
     ear_widths_px = ear_widths_px[valid & np.isfinite(ear_widths_px) & (ear_widths_px >= 1.0)]
     width_samples = hip_widths_px if hip_widths_px.size else ear_widths_px
-    mouse_width_cm = (
-        float(np.median(width_samples) * cm_per_pixel)
-        if width_samples.size
-        else 2.4
-    )
+    mouse_width_cm = float(np.median(width_samples) * cm_per_pixel) if width_samples.size else 2.4
     centers_cm = centers_px * cm_per_pixel
     nose_cm = nose * cm_per_pixel
     tail_cm = tail * cm_per_pixel
@@ -610,8 +620,12 @@ def load_exported_features(
     if pairs:
         nearest_by_track = np.full((frame_count, tracks), np.inf, dtype=np.float32)
         for pair_index, (left, right) in enumerate(zip(pair_i, pair_j)):
-            nearest_by_track[:, left] = np.minimum(nearest_by_track[:, left], pair_distance[:, pair_index])
-            nearest_by_track[:, right] = np.minimum(nearest_by_track[:, right], pair_distance[:, pair_index])
+            nearest_by_track[:, left] = np.minimum(
+                nearest_by_track[:, left], pair_distance[:, pair_index]
+            )
+            nearest_by_track[:, right] = np.minimum(
+                nearest_by_track[:, right], pair_distance[:, pair_index]
+            )
         nearest = nearest_by_track
     mean_nearest = _safe_mean(np.where(np.isfinite(nearest), nearest, np.nan), axis=1)
     mean_nearest = np.asarray(mean_nearest, dtype=np.float32)
@@ -658,7 +672,7 @@ def _bridge_short_false_gaps(mask: np.ndarray, max_gap_frames: int) -> np.ndarra
     for before, after in zip(true_indices[:-1], true_indices[1:]):
         gap = int(after - before - 1)
         if 0 < gap <= int(max_gap_frames):
-            result[before + 1:after] = True
+            result[before + 1 : after] = True
     return result
 
 
@@ -671,7 +685,9 @@ def _duration_score(mask: np.ndarray, fps: float, minimum_seconds: float) -> tup
 def _max_track_duration(mask: np.ndarray, fps: float) -> float:
     if mask.ndim != 2 or not mask.size:
         return 0.0
-    return max((_longest_run(mask[:, index]) for index in range(mask.shape[1])), default=0) / max(fps, 1e-6)
+    return max((_longest_run(mask[:, index]) for index in range(mask.shape[1])), default=0) / max(
+        fps, 1e-6
+    )
 
 
 def _pair_any_duration(mask: np.ndarray, fps: float) -> float:
@@ -707,9 +723,7 @@ def _pair_key(left_id: int, right_id: int) -> str:
     return f"{left},{right}"
 
 
-def _prioritize_attack_over_approach(
-    scores: dict[str, float], multiplier: float
-) -> None:
+def _prioritize_attack_over_approach(scores: dict[str, float], multiplier: float) -> None:
     """Break an Attack/Approach tie without displacing contact labels."""
     if (
         scores.get("approach", 0.0) > 0.0
@@ -754,10 +768,7 @@ def _group_resting_at_onset(
         return False
     start = int(onset[0])
     stop = start + required_frames
-    if (
-        stop > len(grouped)
-        or float(np.mean(grouped[start:stop])) < minimum_group_fraction
-    ):
+    if stop > len(grouped) or float(np.mean(grouped[start:stop])) < minimum_group_fraction:
         return False
 
     slots = tuple(int(slot) for slot in member_slots)
@@ -877,8 +888,7 @@ def _group_episode_scores(
                 if (
                     moving_speeds.size == 0
                     or moving_fraction + 1e-12 < float(minimum_moving_member_fraction)
-                    or float(np.mean(moving_speeds)) + 1e-12
-                    < float(minimum_motion_speed_cm_s)
+                    or float(np.mean(moving_speeds)) + 1e-12 < float(minimum_motion_speed_cm_s)
                 ):
                     continue
             matches = [
@@ -887,7 +897,9 @@ def _group_episode_scores(
                 if index not in matched
             ]
             overlap, index = max(matches, default=(0, -1))
-            if index >= 0 and overlap >= max(2, min(len(component), len(active[index]["last"])) // 2):
+            if index >= 0 and overlap >= max(
+                2, min(len(component), len(active[index]["last"])) // 2
+            ):
                 episode = active[index]
                 matched.add(index)
                 episode["members"].update(component)
@@ -896,18 +908,19 @@ def _group_episode_scores(
                 episode["gap_frames"] = 0
             else:
                 episode = {
-                    "members": set(component), "last": component,
-                    "frames": 1, "max_drop": 0.0, "gap_frames": 0,
-                    "observed_frames": 0, "member_frames": {},
+                    "members": set(component),
+                    "last": component,
+                    "frames": 1,
+                    "max_drop": 0.0,
+                    "gap_frames": 0,
+                    "observed_frames": 0,
+                    "member_frames": {},
                     "formation_members": set(),
                 }
             episode["observed_frames"] += 1
             for slot in component:
                 episode["member_frames"][slot] = episode["member_frames"].get(slot, 0) + 1
-                if (
-                    formation_evidence is not None
-                    and bool(formation_evidence[frame_index, slot])
-                ):
+                if formation_evidence is not None and bool(formation_evidence[frame_index, slot]):
                     episode["formation_members"].add(slot)
             if nearest_drop_cm is not None:
                 episode["max_drop"] = max(
@@ -960,16 +973,16 @@ def predict_features(
     pair_valid = np.isfinite(pair_distance)
     track_ids = [int(value) for value in features.track_ids.tolist()]
     identity_scores: dict[str, dict[str, float]] = {
-        str(track_id): {
-            behavior: 0.0 for behavior in (*INDIVIDUAL_BEHAVIORS, *GROUP_BEHAVIORS)
-        }
+        str(track_id): {behavior: 0.0 for behavior in (*INDIVIDUAL_BEHAVIORS, *GROUP_BEHAVIORS)}
         for track_id in track_ids
     }
     pair_scores: dict[str, dict[str, float]] = {}
 
     stationary = valid & (speed <= parameters.stationary_max_speed_cm_s)
-    walking = valid & (speed >= parameters.walking_min_speed_cm_s) & (
-        speed < min(parameters.walking_max_speed_cm_s, parameters.running_min_speed_cm_s)
+    walking = (
+        valid
+        & (speed >= parameters.walking_min_speed_cm_s)
+        & (speed < min(parameters.walking_max_speed_cm_s, parameters.running_min_speed_cm_s))
     )
     walking_gap_frames = max(
         0, int(np.floor(max(float(parameters.walking_max_stop_gap_s), 0.0) * fps))
@@ -1015,10 +1028,7 @@ def predict_features(
         & (pair_distance < parameters.together_max_distance_cm)
         & (pair_left_speed <= parameters.together_max_individual_speed_cm_s)
         & (pair_right_speed <= parameters.together_max_individual_speed_cm_s)
-        & (
-            pair_left_speed + pair_right_speed
-            <= parameters.together_max_combined_speed_cm_s
-        )
+        & (pair_left_speed + pair_right_speed <= parameters.together_max_combined_speed_cm_s)
     )
     together_durations = _durations_by_column(together, fps)
 
@@ -1040,12 +1050,8 @@ def predict_features(
         >= parameters.attack_min_speed_cm_s
     )
     attack_durations = _durations_by_column(attack, fps)
-    head_contact = pair_valid & (
-        features.pair_nose_head_cm < parameters.contact_distance_cm
-    )
-    tail_contact = pair_valid & (
-        features.pair_nose_tail_cm < parameters.contact_distance_cm
-    )
+    head_contact = pair_valid & (features.pair_nose_head_cm < parameters.contact_distance_cm)
+    tail_contact = pair_valid & (features.pair_nose_tail_cm < parameters.contact_distance_cm)
     nose_head_cumulative = np.sum(head_contact, axis=0, dtype=np.int64) / max(fps, 1e-6)
     nose_tail_cumulative = np.sum(tail_contact, axis=0, dtype=np.int64) / max(fps, 1e-6)
     no_contact_frames = max(1, int(np.ceil(parameters.pair_no_contact_seconds * fps)))
@@ -1084,12 +1090,12 @@ def predict_features(
     following_durations = _durations_by_column(following, fps)
     # Avoiding is a response after a prior close approach followed by sustained
     # opening distance and a fast change in the pair's relative motion.
-    opening = pair_valid & (features.pair_closing_speed_cm_s <= -parameters.approach_min_closing_speed_cm_s)
+    opening = pair_valid & (
+        features.pair_closing_speed_cm_s <= -parameters.approach_min_closing_speed_cm_s
+    )
     opening &= -distance_drop >= parameters.avoiding_min_distance_increase_cm
     avoid_scores = np.zeros(pair_distance.shape[1], dtype=float)
-    for pair_index, (left_slot, right_slot) in enumerate(
-        zip(features.pair_i, features.pair_j)
-    ):
+    for pair_index, (left_slot, right_slot) in enumerate(zip(features.pair_i, features.pair_j)):
         key = _pair_key(track_ids[int(left_slot)], track_ids[int(right_slot)])
         attack_score = _qualifying_score(
             attack_durations[pair_index], parameters.pair_min_duration_s, fps
@@ -1111,7 +1117,9 @@ def predict_features(
                     first_reacquired = int(later_endpoint[0])
                     missing_frames = first_reacquired - last_contact - 1
                     gap_seconds = missing_frames / max(fps, 1e-6)
-                    missing_pair = not np.all(pair_valid[last_contact + 1:first_reacquired, pair_index])
+                    missing_pair = not np.all(
+                        pair_valid[last_contact + 1 : first_reacquired, pair_index]
+                    )
                     if (
                         missing_frames > 0
                         and missing_pair
@@ -1148,7 +1156,10 @@ def predict_features(
         }
         near_before = np.flatnonzero(
             pair_valid[: max(0, len(pair_distance) - 1), pair_index]
-            & (pair_distance[: max(0, len(pair_distance) - 1), pair_index] <= parameters.approach_terminal_distance_cm)
+            & (
+                pair_distance[: max(0, len(pair_distance) - 1), pair_index]
+                <= parameters.approach_terminal_distance_cm
+            )
         )
         if near_before.size:
             first_near = int(near_before[0])
@@ -1162,9 +1173,7 @@ def predict_features(
                 avoid_duration, parameters.avoiding_min_duration_s, fps
             )
         values["avoidance"] = float(avoid_scores[pair_index])
-        _prioritize_attack_over_approach(
-            values, parameters.attack_vs_approach_multiplier
-        )
+        _prioritize_attack_over_approach(values, parameters.attack_vs_approach_multiplier)
         if any(score > 0.0 for score in values.values()):
             pair_scores[key] = values
 
@@ -1181,8 +1190,12 @@ def predict_features(
         & (pair_right_speed <= huddle_speed_limit)
     )
     huddle_groups = _group_episode_scores(
-        huddle_pairs, features.pair_i, features.pair_j, track_ids,
-        fps=fps, minimum_seconds=parameters.huddle_min_duration_s,
+        huddle_pairs,
+        features.pair_i,
+        features.pair_j,
+        track_ids,
+        fps=fps,
+        minimum_seconds=parameters.huddle_min_duration_s,
         max_gap_seconds=parameters.huddle_max_gap_s,
         min_member_support_fraction=parameters.huddle_min_member_support_fraction,
     )
@@ -1241,8 +1254,12 @@ def predict_features(
         & (speed >= parameters.clustering_min_mean_speed_cm_s)
     )
     cluster_groups = _group_episode_scores(
-        cluster_pairs, features.pair_i, features.pair_j, track_ids,
-        fps=fps, minimum_seconds=parameters.clustering_min_duration_s,
+        cluster_pairs,
+        features.pair_i,
+        features.pair_j,
+        track_ids,
+        fps=fps,
+        minimum_seconds=parameters.clustering_min_duration_s,
         nearest_drop_cm=cluster_drop,
         min_nearest_drop_cm=parameters.clustering_min_nearest_neighbor_drop_cm,
         max_gap_seconds=parameters.clustering_max_gap_s,
@@ -1261,8 +1278,11 @@ def predict_features(
         # comes only from observed visual IDs, never from inferred identity.
         moving_groups = _group_episode_scores(
             pair_valid & (pair_distance < parameters.clustering_motion_max_distance_cm),
-            features.pair_i, features.pair_j, track_ids,
-            fps=fps, minimum_seconds=parameters.clustering_min_duration_s,
+            features.pair_i,
+            features.pair_j,
+            track_ids,
+            fps=fps,
+            minimum_seconds=parameters.clustering_min_duration_s,
             max_gap_seconds=parameters.clustering_max_gap_s,
             min_member_support_fraction=0.5,
         )
@@ -1288,12 +1308,14 @@ def predict_features(
             )
             if (
                 len(member_displacements) >= 3
-                and np.mean(member_displacements) >= parameters.clustering_motion_min_displacement_cm
+                and np.mean(member_displacements)
+                >= parameters.clustering_motion_min_displacement_cm
                 and (
                     sum(
                         displacement >= parameters.clustering_motion_min_displacement_cm
                         for displacement in member_displacements
-                    ) >= 2
+                    )
+                    >= 2
                     or loose_group
                 )
             ):
@@ -1304,9 +1326,7 @@ def predict_features(
         **{key: {"social_clustering": score} for key, score in cluster_groups.items()},
     }
     collective_member_ids = {
-        int(track_id)
-        for key in collective_groups
-        for track_id in key.split(",")
+        int(track_id) for key in collective_groups for track_id in key.split(",")
     }
     for slot, track_id in enumerate(track_ids):
         values = identity_scores[str(track_id)]
@@ -1380,16 +1400,16 @@ def classify_target_ids(
         previous = float(candidate_scores.get(behavior, 0.0))
         previous_ids = candidate_target_ids.get(behavior, ())
         if score > previous or (
-            score == previous
-            and score > 0.0
-            and (not previous_ids or len(ids) < len(previous_ids))
+            score == previous and score > 0.0 and (not previous_ids or len(ids) < len(previous_ids))
         ):
             candidate_scores[behavior] = float(score)
             candidate_target_ids[behavior] = ids
 
     if target in INDIVIDUAL_BEHAVIORS:
         if len(target_ids) != 1:
-            raise ValueError(f"{record.behavior} requires exactly one target ID: {record.sample_id}")
+            raise ValueError(
+                f"{record.behavior} requires exactly one target ID: {record.sample_id}"
+            )
         key = str(target_ids[0])
         available = key in identity_scores
         candidate_behaviors = INDIVIDUAL_BEHAVIORS
@@ -1400,7 +1420,9 @@ def classify_target_ids(
         candidate_target_ids.update({behavior: target_ids for behavior in candidate_behaviors})
     elif target in PAIR_BEHAVIORS:
         if len(target_ids) != 2:
-            raise ValueError(f"{record.behavior} requires exactly two target IDs: {record.sample_id}")
+            raise ValueError(
+                f"{record.behavior} requires exactly two target IDs: {record.sample_id}"
+            )
         key = _pair_key(*target_ids)
         available = all(track_id in selected_ids for track_id in target_ids)
         if not selected_ids:
@@ -1418,9 +1440,7 @@ def classify_target_ids(
         available = key in identity_scores
         candidate_behaviors = GROUP_BEHAVIORS
         candidate_scores = {behavior: 0.0 for behavior in candidate_behaviors}
-        candidate_scores["isolation"] = float(
-            identity_scores.get(key, {}).get("isolation", 0.0)
-        )
+        candidate_scores["isolation"] = float(identity_scores.get(key, {}).get("isolation", 0.0))
         candidate_target_ids["isolation"] = target_ids
         has_collective_candidate = False
         for raw_ids, scores in group_scores.items():
@@ -1441,7 +1461,9 @@ def classify_target_ids(
             candidate_scores["isolation"] = 0.0
     elif target in GROUP_BEHAVIORS:
         if len(target_ids) < 3:
-            raise ValueError(f"{record.behavior} requires at least three target IDs: {record.sample_id}")
+            raise ValueError(
+                f"{record.behavior} requires at least three target IDs: {record.sample_id}"
+            )
         available = all(str(track_id) in identity_scores for track_id in target_ids)
         candidate_behaviors = GROUP_BEHAVIORS
         candidate_scores = {behavior: 0.0 for behavior in candidate_behaviors}
@@ -1468,19 +1490,21 @@ def classify_target_ids(
                 )
                 for behavior in candidate_behaviors
             }
-            candidate_target_ids.update(
-                {behavior: target_ids for behavior in candidate_behaviors}
-            )
+            candidate_target_ids.update({behavior: target_ids for behavior in candidate_behaviors})
     else:
         raise ValueError(f"unsupported canonical behavior {target!r}: {record.sample_id}")
 
-    ranked = sorted(candidate_behaviors, key=lambda behavior: (-candidate_scores[behavior], behavior))
+    ranked = sorted(
+        candidate_behaviors, key=lambda behavior: (-candidate_scores[behavior], behavior)
+    )
     predicted = ranked[0] if ranked and candidate_scores[ranked[0]] > 0.0 else None
     predicted_ids = candidate_target_ids.get(predicted, ()) if predicted is not None else ()
     return {
         "target_layer": (
-            "individual" if target in INDIVIDUAL_BEHAVIORS
-            else "social" if target in PAIR_BEHAVIORS
+            "individual"
+            if target in INDIVIDUAL_BEHAVIORS
+            else "social"
+            if target in PAIR_BEHAVIORS
             else "group"
         ),
         "target_ids": list(target_ids),
@@ -1655,11 +1679,7 @@ def group_rule_calibration_rank(metrics: Mapping[str, Any]) -> tuple[float, floa
         for name in ("huddle", "isolation", "social_clustering")
         if int(rows.get(name, {}).get("support", 0)) > 0
     ]
-    macro_f1 = (
-        sum(float(row.get("f1", 0.0)) for row in focus) / len(focus)
-        if focus
-        else 0.0
-    )
+    macro_f1 = sum(float(row.get("f1", 0.0)) for row in focus) / len(focus) if focus else 0.0
     macro_strict = (
         sum(float(row.get("strict_top1_accuracy", 0.0)) for row in focus) / len(focus)
         if focus
@@ -1712,9 +1732,7 @@ def minimum_behavior_accuracy(metrics: Mapping[str, Any]) -> float:
     return min(values, default=0.0)
 
 
-def training_target_reached(
-    metrics: Mapping[str, Any], target_accuracy: float = 0.95
-) -> bool:
+def training_target_reached(metrics: Mapping[str, Any], target_accuracy: float = 0.95) -> bool:
     """Require both aggregate and every-class target-ID accuracy to reach target."""
 
     target = float(target_accuracy)
@@ -1768,23 +1786,29 @@ def config_seed_parameters(config: Mapping[str, Any]) -> HeuristicParameters:
         together_max_individual_speed_cm_s=float(
             social.get("together_max_individual_speed_cm_s", 16.0)
         ),
-        together_max_combined_speed_cm_s=float(social.get("together_max_combined_speed_cm_s", 28.0)),
+        together_max_combined_speed_cm_s=float(
+            social.get("together_max_combined_speed_cm_s", 28.0)
+        ),
         pair_max_distance_cm=float(social.get("pair_max_distance_cm", 5.0)),
         approach_min_distance_drop_cm=float(social.get("approach_min_distance_drop_cm", 1.5)),
         approach_min_closing_speed_cm_s=float(social.get("approach_min_closing_speed_cm_s", 2.0)),
         approach_terminal_distance_cm=float(social.get("approach_terminal_distance_cm", 17.0)),
-        contact_distance_cm=float(config.get("contact_detection", {}).get("nose_head_distance_cm", 3.0)),
+        contact_distance_cm=float(
+            config.get("contact_detection", {}).get("nose_head_distance_cm", 3.0)
+        ),
         contact_min_cumulative_seconds=max(
-            float(config.get("contact_detection", {}).get(
-                "nose_head_min_cumulative_duration_seconds", 0.5
-            )),
+            float(
+                config.get("contact_detection", {}).get(
+                    "nose_head_min_cumulative_duration_seconds", 0.5
+                )
+            ),
             0.5,
         ),
         running_min_duration_s=max(float(individual.get("running_min_duration_seconds", 0.5)), 0.5),
-        attack_min_speed_cm_s=float(dict(social.get("attack_fallback", {})).get("min_raw_actor_speed_cm_s", 8.0)),
-        attack_vs_approach_multiplier=float(
-            social.get("attack_vs_approach_multiplier", 1.5)
+        attack_min_speed_cm_s=float(
+            dict(social.get("attack_fallback", {})).get("min_raw_actor_speed_cm_s", 8.0)
         ),
+        attack_vs_approach_multiplier=float(social.get("attack_vs_approach_multiplier", 1.5)),
         attack_endpoint_distance_cm=float(
             dict(social.get("attack_fallback", {})).get("endpoint_distance_cm", 12.0)
         ),
@@ -1795,7 +1819,10 @@ def config_seed_parameters(config: Mapping[str, Any]) -> HeuristicParameters:
         huddle_width_multiplier=float(group.get("huddle_width_multiplier", 1.0)),
         huddle_max_mean_speed_cm_s=float(group.get("huddle_max_mean_speed_cm_s", 10.0)),
         huddle_min_duration_s=float(
-            max(float(group.get("huddle_min_duration_seconds", group.get("confirm_seconds", 1.0))), 1.0)
+            max(
+                float(group.get("huddle_min_duration_seconds", group.get("confirm_seconds", 1.0))),
+                1.0,
+            )
         ),
         huddle_max_gap_s=float(
             group.get("huddle_fill_gap_seconds", group.get("fill_gap_seconds", 5.0))
@@ -1804,13 +1831,19 @@ def config_seed_parameters(config: Mapping[str, Any]) -> HeuristicParameters:
             group.get("huddle_min_member_support_fraction", 0.25)
         ),
         isolation_distance_cm=float(group.get("isolation_distance_cm", 8.0)),
-        isolation_min_duration_s=max(float(group.get("isolation_min_duration_seconds", 10.0)), 10.0),
+        isolation_min_duration_s=max(
+            float(group.get("isolation_min_duration_seconds", 10.0)), 10.0
+        ),
         clustering_max_distance_cm=float(clustering.get("max_neighbor_distance_cm", 30.0)),
         clustering_initial_max_distance_cm=float(
             clustering.get("initial_max_neighbor_distance_cm", 24.0)
         ),
-        clustering_min_nearest_neighbor_drop_cm=float(clustering.get("min_nearest_neighbor_drop_cm", 2.0)),
-        stationary_min_duration_s=max(float(individual.get("stationary_min_duration_seconds", 1.0)), 1.0),
+        clustering_min_nearest_neighbor_drop_cm=float(
+            clustering.get("min_nearest_neighbor_drop_cm", 2.0)
+        ),
+        stationary_min_duration_s=max(
+            float(individual.get("stationary_min_duration_seconds", 1.0)), 1.0
+        ),
         walking_min_duration_s=max(float(individual.get("walking_min_duration_seconds", 1.0)), 1.0),
         pair_min_duration_s=float(social.get("approach_min_duration_seconds", 0.1)),
         together_min_duration_s=float(social.get("together_min_duration_seconds", 1.0)),
@@ -1821,12 +1854,8 @@ def config_seed_parameters(config: Mapping[str, Any]) -> HeuristicParameters:
         clustering_max_gap_s=float(
             clustering.get("fill_gap_seconds", group.get("fill_gap_seconds", 0.25))
         ),
-        clustering_formation_score_bonus=float(
-            clustering.get("formation_score_bonus", 1.0)
-        ),
-        clustering_min_mean_speed_cm_s=float(
-            clustering.get("min_mean_speed_cm_s", 3.0)
-        ),
+        clustering_formation_score_bonus=float(clustering.get("formation_score_bonus", 1.0)),
+        clustering_min_mean_speed_cm_s=float(clustering.get("min_mean_speed_cm_s", 3.0)),
         clustering_min_moving_member_fraction=float(
             clustering.get("min_moving_member_fraction", 0.5)
         ),

@@ -444,7 +444,9 @@ def _bridge_attack_reacquisition_gap(
         np.inf,
     )
     max_gap_frames = max(
-        int(round(max(float(attack_config.get("state_reacquisition_gap_seconds", 0.0)), 0.0) * fps)),
+        int(
+            round(max(float(attack_config.get("state_reacquisition_gap_seconds", 0.0)), 0.0) * fps)
+        ),
         0,
     )
     max_distance = max(
@@ -456,7 +458,7 @@ def _bridge_attack_reacquisition_gap(
     starts, ends = _boolean_spans(result)
     for end_value in ends:
         end = int(end_value)
-        later_observed = np.flatnonzero(observed[end + 1:])
+        later_observed = np.flatnonzero(observed[end + 1 :])
         if not later_observed.size:
             continue
         reacquired = end + 1 + int(later_observed[0])
@@ -467,7 +469,7 @@ def _bridge_attack_reacquisition_gap(
             and np.isfinite(distance[reacquired])
             and distance[reacquired] <= max_distance
         ):
-            result[end + 1:reacquired + 1] = True
+            result[end + 1 : reacquired + 1] = True
     return result
 
 

@@ -85,11 +85,7 @@ def _safe_name(value: str) -> str:
 def _target_ids(row: dict[str, str]) -> tuple[int, ...]:
     return tuple(
         sorted(
-            {
-                int(value.strip())
-                for value in row.get("mouse_ids", "").split(",")
-                if value.strip()
-            }
+            {int(value.strip()) for value in row.get("mouse_ids", "").split(",") if value.strip()}
         )
     )
 
@@ -242,7 +238,7 @@ def _auxiliary_events_from_evidence(
             continue
         best = _best_positive_score(dict(raw_scores), PAIR_BEHAVIORS)
         if best is not None:
-            add_event(best[0], ids, best[1], "pair", pair_key=','.join(map(str, ids)))
+            add_event(best[0], ids, best[1], "pair", pair_key=",".join(map(str, ids)))
 
     for text_group, raw_scores in dict(evidence.get("group_scores", {})).items():
         try:
@@ -259,9 +255,7 @@ def _auxiliary_events_from_evidence(
     return events, summaries
 
 
-def _error_reason(
-    prediction: dict[str, str], truth_name: str, predicted_name: str
-) -> str:
+def _error_reason(prediction: dict[str, str], truth_name: str, predicted_name: str) -> str:
     target_hit = _is_true(prediction.get("target_id_hit", "False"))
     if not predicted_name or predicted_name == "未识别":
         return f"未识别到{truth_name}"
@@ -344,8 +338,8 @@ def render_row(
     event_rows: list[dict[str, Any]] = auxiliary_events
     if predicted_event is not None:
         event_rows.append(predicted_event)
-    reason = "正确识别" if _is_true(strict) else _error_reason(
-        prediction, truth_name, predicted_name
+    reason = (
+        "正确识别" if _is_true(strict) else _error_reason(prediction, truth_name, predicted_name)
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sidebar_width = sidebar_width_for_frame(width, height)
@@ -402,9 +396,7 @@ def render_row(
                     )
                 color = overlay.color_bgr
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                box_labels.append(
-                    BoxLabel((x1, y1, x2, y2), overlay.text, color)
-                )
+                box_labels.append(BoxLabel((x1, y1, x2, y2), overlay.text, color))
             panel_lines = [
                 f"验证审查｜标签行为：{truth_name}",
                 f"识别行为：{predicted_name}",
@@ -429,9 +421,7 @@ def render_row(
                 valid_ids=valid_ids,
                 panel_width=sidebar_width,
                 empty_event_text=(
-                    "当前帧无行为预测，目标框显示“未识别”"
-                    if predicted in {"", "none"}
-                    else None
+                    "当前帧无行为预测，目标框显示“未识别”" if predicted in {"", "none"} else None
                 ),
             )
             writer.write(frame)
@@ -484,8 +474,8 @@ def _manifest_from_existing(
     truth_name = DISPLAY_NAMES_ZH.get(truth, truth)
     strict = prediction.get("strict_top1_correct", "False")
     target_hit = prediction.get("target_id_hit", "False")
-    reason = "正确识别" if _is_true(strict) else _error_reason(
-        prediction, truth_name, predicted_name
+    reason = (
+        "正确识别" if _is_true(strict) else _error_reason(prediction, truth_name, predicted_name)
     )
     return {
         "sample_id": row["sample_id"],
@@ -520,7 +510,9 @@ def _load_heuristic_parameters(path: Path | None) -> HeuristicParameters | None:
     return HeuristicParameters(**{key: float(value) for key, value in payload.items()})
 
 
-def _select_rows(rows: list[dict[str, str]], max_per_behavior: int, sample_id: str | None) -> list[dict[str, str]]:
+def _select_rows(
+    rows: list[dict[str, str]], max_per_behavior: int, sample_id: str | None
+) -> list[dict[str, str]]:
     if sample_id:
         selected = [row for row in rows if row.get("sample_id") == sample_id]
         if not selected:
@@ -545,9 +537,7 @@ def main() -> int:
     parser.add_argument(
         "--heuristic-parameters",
         type=Path,
-        help=(
-            "训练集冻结的启发式参数 JSON；提供后会为所有可见 ID 生成辅助行为覆盖。"
-        ),
+        help=("训练集冻结的启发式参数 JSON；提供后会为所有可见 ID 生成辅助行为覆盖。"),
     )
     parser.add_argument(
         "--include-auxiliary",
@@ -587,7 +577,9 @@ def main() -> int:
 
     rows = _read_rows(args.dataset_split)
     predictions = {
-        row["sample_id"]: row for row in _read_rows(args.predictions) if row.get("split") == "validation"
+        row["sample_id"]: row
+        for row in _read_rows(args.predictions)
+        if row.get("split") == "validation"
     }
     if args.sample_id:
         # An explicit sample request is a debugging override and should not

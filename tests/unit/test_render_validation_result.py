@@ -43,12 +43,14 @@ def test_missing_prediction_is_explicitly_marked_on_target_only() -> None:
 
 
 def test_strict_top1_error_reason_distinguishes_target_hit() -> None:
-    assert _error_reason(
-        {"target_id_hit": "True"}, "接近", "攻击/被攻击"
-    ) == "目标 ID 已命中，但行为识别为攻击/被攻击（标签为接近）"
-    assert _error_reason(
-        {"target_id_hit": "False"}, "接近", "接近"
-    ) == "行为识别正确，但目标 ID 未命中（标签：接近）"
+    assert (
+        _error_reason({"target_id_hit": "True"}, "接近", "攻击/被攻击")
+        == "目标 ID 已命中，但行为识别为攻击/被攻击（标签为接近）"
+    )
+    assert (
+        _error_reason({"target_id_hit": "False"}, "接近", "接近")
+        == "行为识别正确，但目标 ID 未命中（标签：接近）"
+    )
     assert build_panel_lines([], "none", "当前帧无行为预测，目标框显示“未识别”")[1] == (
         "当前帧无行为预测，目标框显示“未识别”"
     )
@@ -69,8 +71,12 @@ def test_auxiliary_events_cover_non_target_tracks_without_labels() -> None:
     )
 
     assert any(event.get("actor_id") == 6 and event["behavior"] == "walking" for event in events)
-    assert any(event.get("pair_key") == "6,7" and event["behavior"] == "together" for event in events)
-    assert any(event.get("member_ids") == "6,7,8" and event["behavior"] == "huddle" for event in events)
+    assert any(
+        event.get("pair_key") == "6,7" and event["behavior"] == "together" for event in events
+    )
+    assert any(
+        event.get("member_ids") == "6,7,8" and event["behavior"] == "huddle" for event in events
+    )
     assert any(item["ids"] == [6] and item["behavior"] == "walking" for item in summaries)
 
 
@@ -88,7 +94,9 @@ def test_auxiliary_isolation_does_not_replace_target_locomotion_behavior() -> No
     )
 
     assert any(event["behavior"] == "stationary" and event.get("actor_id") == 5 for event in events)
-    assert any(event["behavior"] == "isolation" and event.get("member_ids") == "5" for event in events)
+    assert any(
+        event["behavior"] == "isolation" and event.get("member_ids") == "5" for event in events
+    )
 
 
 def test_social_event_remains_visible_with_group_context_for_shared_members() -> None:
@@ -162,7 +170,12 @@ def test_group_social_and_individual_behavior_are_all_shown_for_same_mouse() -> 
 def test_group_overlay_uses_documented_huddling_first_priority() -> None:
     events = [
         {"behavior": "huddle", "event_scope": "group", "member_ids": "5,6,7", "peak_score": 99.0},
-        {"behavior": "social_clustering", "event_scope": "group", "member_ids": "5,6,7", "peak_score": 50.0},
+        {
+            "behavior": "social_clustering",
+            "event_scope": "group",
+            "member_ids": "5,6,7",
+            "peak_score": 50.0,
+        },
         {"behavior": "isolation", "event_scope": "group", "member_ids": "5", "peak_score": 1.0},
     ]
 

@@ -75,7 +75,9 @@ def _largest_component(
         for component in _components(ids, distances, threshold_cm)
         if len(component) >= int(minimum_size)
     ]
-    return max(candidates, key=lambda values: (len(values), tuple(-item for item in values)), default=())
+    return max(
+        candidates, key=lambda values: (len(values), tuple(-item for item in values)), default=()
+    )
 
 
 def _overlap_is_stable(left: Sequence[int], right: Sequence[int], minimum: int = 2) -> bool:
@@ -267,18 +269,12 @@ def group_dynamic_signals(
             and float(np.mean(moving_speeds)) + 1e-12 >= minimum_clustering_speed
         )
         seed = drop >= minimum_cluster_drop and active_motion
-        if (
-            clustering_active
-            and active_motion
-            and _overlap_is_stable(clustering_members, current)
-        ):
+        if clustering_active and active_motion and _overlap_is_stable(clustering_members, current):
             clustering_members = current
         elif seed:
             clustering_active = True
             clustering_members = current
-            clustering_seed_score = float(
-                np.clip(drop / max(minimum_cluster_drop, 1e-6), 0.0, 1.0)
-            )
+            clustering_seed_score = float(np.clip(drop / max(minimum_cluster_drop, 1e-6), 0.0, 1.0))
         else:
             clustering_active = False
             clustering_members = ()
@@ -297,7 +293,9 @@ def group_dynamic_signals(
         ids = frame_ids[frame]
         distances = frame_distances[frame]
         if dispersal_active:
-            visible_anchor = tuple(member for member in anchor_members if member in set(ids.tolist()))
+            visible_anchor = tuple(
+                member for member in anchor_members if member in set(ids.tolist())
+            )
             if len(visible_anchor) < minimum_group_size:
                 dispersal_active = False
                 anchor_members = ()
@@ -347,9 +345,7 @@ def group_dynamic_signals(
         visible_anchor = tuple(member for member in anchor_members if member in set(ids.tolist()))
         if len(visible_anchor) < minimum_group_size:
             continue
-        current_mean = _mean_nearest_distance(
-            _member_distances(centers, frame, visible_anchor)
-        )
+        current_mean = _mean_nearest_distance(_member_distances(centers, frame, visible_anchor))
         increase = current_mean - anchor_baseline
         if increase < minimum_dispersal_increase:
             continue
