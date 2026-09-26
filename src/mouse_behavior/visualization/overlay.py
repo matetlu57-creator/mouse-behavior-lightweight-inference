@@ -19,6 +19,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from ..preprocessing.constants import (
+    BEHAVIOR_DISPLAY_PRIORITY,
     BEHAVIOR_NAMES_ZH,
     GROUP_BEHAVIORS,
     INDIVIDUAL_BEHAVIORS,
@@ -49,12 +50,16 @@ FOCUS_BEHAVIORS = frozenset(
         "stationary",
         "together",
         "approach",
+        "following",
         "chase",
         "avoidance",
         "attack",
         "nose_head_contact",
         "nose_tail_contact",
         "huddle",
+        "social_clustering",
+        "group_locomotion",
+        "dispersal",
         "isolation",
     }
 )
@@ -63,10 +68,14 @@ FOCUS_NAMES_ZH = {
     "avoidance": "回避/被回避",
     "attack": "攻击/被攻击",
     "approach": "接近/被接近",
+    "following": "跟随/被跟随",
     "together": "一起",
     "nose_head_contact": "鼻头接触",
     "nose_tail_contact": "鼻尾接触",
     "huddle": "扎堆",
+    "social_clustering": "社会聚集",
+    "group_locomotion": "群体同步运动",
+    "dispersal": "群体分散",
     "isolation": "孤立",
     "running": "奔跑",
     "walking": "行走",
@@ -75,6 +84,7 @@ FOCUS_NAMES_ZH = {
 
 ROLE_NAMES_ZH = {
     "approach": {"actor": "主动接近", "target": "被接近", "pair": "接近"},
+    "following": {"actor": "跟随者", "target": "被跟随者", "pair": "跟随"},
     "chase": {"actor": "追逐", "target": "被追逐", "pair": "追逐"},
     "avoidance": {"actor": "回避", "target": "被回避", "pair": "回避"},
     "attack": {"actor": "攻击", "target": "被攻击", "pair": "攻击"},
@@ -87,6 +97,7 @@ UNKNOWN_BEHAVIOR_COLOR_BGR = (170, 170, 170)
 EVENT_COLORS_BGR = {
     "together": (80, 190, 190),
     "approach": {"actor": (0, 165, 255), "target": (255, 200, 80), "pair": (80, 190, 255)},
+    "following": {"actor": (20, 180, 255), "target": (255, 180, 40), "pair": (80, 200, 240)},
     "chase": {"actor": (0, 215, 255), "target": (255, 140, 0), "pair": (80, 190, 255)},
     "avoidance": {"actor": (255, 220, 0), "target": (200, 80, 220), "pair": (220, 160, 0)},
     "attack": {"actor": (0, 0, 255), "target": (255, 0, 255), "pair": (120, 80, 255)},
@@ -95,6 +106,9 @@ EVENT_COLORS_BGR = {
     "nose_head_contact": (80, 220, 120),
     "nose_tail_contact": (220, 160, 60),
     "huddle": (180, 120, 255),
+    "social_clustering": (170, 120, 245),
+    "group_locomotion": (120, 220, 120),
+    "dispersal": (220, 150, 80),
     "isolation": (180, 120, 255),
     "running": (80, 220, 80),
     "walking": (0, 200, 255),
@@ -110,31 +124,10 @@ CATEGORY_NAMES_ZH = {
     "none": "个体行为",
 }
 
-# A frame can legitimately contain several event streams.  The renderer
-# resolves conflicts per mouse with the ethogram hierarchy first, then uses
-# the within-layer behavior order and score as tie-breakers.  The social
-# order starts with approach: it is the pre-contact transition that should
-# remain visible when its evidence window overlaps together, avoidance,
-# contact, chase, or attack.  A group label therefore wins over any social or
-# individual label for its members, even when a pair event has a higher
-# numerical confidence.
-DISPLAY_PRIORITY = {
-    "approach": 140,
-    # Chase and attack remain explicit social channels.  They are below the
-    # approach transition but above the generic together/contact fallbacks so
-    # a reliable aggressive event is not hidden by a contact CSV row.
-    "attack": 130,
-    "chase": 120,
-    "avoidance": 110,
-    "together": 100,
-    "nose_head_contact": 90,
-    "nose_tail_contact": 90,
-    "huddle": 40,
-    "isolation": 40,
-    "running": 30,
-    "walking": 20,
-    "stationary": 10,
-}
+# A mouse may simultaneously have one group, one social, and one individual
+# behavior. These scores select the primary behavior within each layer; they
+# must not erase events from another layer.
+DISPLAY_PRIORITY = BEHAVIOR_DISPLAY_PRIORITY
 
 DISPLAY_CATEGORY_PRIORITY = {
     "group": 3,
@@ -191,6 +184,9 @@ def normalize_focus_behavior(value: Any) -> str | None:
         "接近": "approach",
         "接近/被接近": "approach",
         "接近-被接近": "approach",
+        "跟随": "following",
+        "跟随/被跟随": "following",
+        "跟随-被跟随": "following",
         "追逐": "chase",
         "追逐/被追逐": "chase",
         "追逐-被追逐": "chase",
@@ -205,6 +201,9 @@ def normalize_focus_behavior(value: Any) -> str | None:
         "鼻尾接触": "nose_tail_contact",
         "扎堆": "huddle",
         "扎堆行为": "huddle",
+        "社会聚集": "social_clustering",
+        "群体同步运动": "group_locomotion",
+        "群体分散": "dispersal",
         "孤立": "isolation",
         "孤立行为": "isolation",
     }
@@ -316,7 +315,24 @@ def _deduplicate(events: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             _safe_int(event.get("target_id")),
         )
         previous = best.get(key)
-        if previous is None or event_score(event) > event_score(previous):
+        if previous is None:
+            best[key] = event
+            continue
+        # The frozen target Top-1 event must survive deduplication when an
+        # auxiliary trajectory event has the same behavior and participants.
+        # Render priority is deliberately checked before numerical evidence.
+        try:
+            event_priority = int(event.get("_render_priority", 0) or 0)
+        except (TypeError, ValueError):
+            event_priority = 0
+        try:
+            previous_priority = int(previous.get("_render_priority", 0) or 0)
+        except (TypeError, ValueError):
+            previous_priority = 0
+        if (event_priority, event_score(event)) > (
+            previous_priority,
+            event_score(previous),
+        ):
             best[key] = event
     return list(best.values())
 
@@ -325,11 +341,15 @@ def _display_priority(event: Mapping[str, Any], focus_behavior: str | None = Non
     category = event_category(event)
     category_priority = int(DISPLAY_CATEGORY_PRIORITY.get(category or "", 0))
     behavior_priority = int(DISPLAY_PRIORITY.get(canonical_behavior(event.get("behavior")), 0))
+    try:
+        render_priority = int(event.get("_render_priority", 0) or 0)
+    except (TypeError, ValueError):
+        render_priority = 0
     # ``focus_behavior`` is retained in the public signature for backwards
     # compatibility with existing callers.  It is intentionally ignored so
     # an external review label cannot influence the rendered prediction.
     _ = focus_behavior
-    return category_priority * 1000 + behavior_priority
+    return render_priority + category_priority * 1000 + behavior_priority
 
 
 def _trace_entries(value: Any) -> list[dict[str, Any]]:
@@ -412,39 +432,17 @@ def select_display_events(
     active_events: Iterable[Mapping[str, Any]],
     focus_behavior: str | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Select frame events while preserving orthogonal behavior channels.
-
-    Social/group events are high-level only for the mice that participate in
-    them.  Individual events for other tracked mice remain visible, so a
-    nearby attack does not turn the other 18 mice into an uninformative
-    ``仅追踪`` label.
-    """
+    """Select frame events while preserving co-occurring behavior layers."""
 
     events = _deduplicate(active_events)
-    group_members: set[int] = set()
-    for event in events:
-        if event_category(event) == "group":
-            group_members.update(_event_ids(event))
-
-    # Keep the event stream useful for the sidebar while suppressing lower
-    # layers that are fully covered by a group event. A pair touching one
-    # group member and one outside mouse remains visible for the outside mouse;
-    # build_mouse_overlays() applies the same hierarchy per participant.
-    selected = []
-    for event in events:
-        category = event_category(event)
-        event_ids = set(_event_ids(event))
-        if (
-            category != "group"
-            and group_members
-            and event_ids
-            and event_ids.issubset(group_members)
-        ):
-            continue
-        selected.append(event)
+    selected = events
 
     categories = {event_category(event) for event in selected if event_category(event) is not None}
-    if "group" in categories:
+    if "individual" in categories and len(categories) > 1:
+        layer = "mixed"
+    elif {"group", "social"}.issubset(categories):
+        layer = "social_group"
+    elif "group" in categories:
         layer = "group"
     elif {"social", "individual"}.issubset(categories):
         layer = "mixed"
@@ -527,6 +525,9 @@ def build_mouse_overlays(
         )
         for mouse_id in ids
     }
+    candidates_by_mouse: dict[
+        int, dict[str, list[tuple[tuple[int, float], str, tuple[int, int, int]]]]
+    ] = {mouse_id: {"group": [], "social": [], "individual": []} for mouse_id in ids}
     for event in display_events:
         behavior = canonical_behavior(event.get("behavior"))
         category = event_category(event)
@@ -544,31 +545,50 @@ def build_mouse_overlays(
             for mouse_id in ids:
                 if mouse_id not in group_ids:
                     continue
-                candidate = MouseOverlay(
-                    text=f"{format_mouse_id(mouse_id)}｜群体：{DISPLAY_NAMES_ZH.get(behavior, behavior)}",
-                    color_bgr=_event_color(behavior),
-                    priority=(_display_priority(event, focus_behavior), score),
+                candidates_by_mouse[mouse_id][category].append(
+                    (
+                        (_display_priority(event, focus_behavior), score),
+                        f"群体：{DISPLAY_NAMES_ZH.get(behavior, behavior)}",
+                        _event_color(behavior),
+                    )
                 )
-                if candidate.priority > overlays[mouse_id].priority:
-                    overlays[mouse_id] = candidate
             continue
 
         for mouse_id in event_ids.intersection(ids):
             role = _event_role(event, mouse_id)
             label = _event_label(event, mouse_id)
-            candidate = MouseOverlay(
-                text=f"{format_mouse_id(mouse_id)}｜{label}",
-                color_bgr=_event_color(behavior, role),
-                priority=(_display_priority(event, focus_behavior), score),
+            prefix = "社交：" if category == "social" else "个体："
+            candidates_by_mouse[mouse_id][category].append(
+                (
+                    (_display_priority(event, focus_behavior), score),
+                    f"{prefix}{label}",
+                    _event_color(behavior, role),
+                )
             )
-            if candidate.priority > overlays[mouse_id].priority:
-                overlays[mouse_id] = candidate
+
+    for mouse_id, categories in candidates_by_mouse.items():
+        selected = [
+            max(values, key=lambda item: (item[0], item[1]))
+            for category in ("group", "social", "individual")
+            if (values := categories[category])
+        ]
+        if not selected:
+            continue
+        overlays[mouse_id] = MouseOverlay(
+            text=f"{format_mouse_id(mouse_id)}｜" + "｜".join(item[1] for item in selected),
+            color_bgr=selected[0][2],
+            priority=max(item[0] for item in selected),
+        )
     return overlays
 
 
 def _summary_ids(event: Mapping[str, Any]) -> str:
     actor = _safe_int(event.get("actor_id"))
     target = _safe_int(event.get("target_id"))
+    actor_label = str(event.get("actor_id_label", "") or "").strip()
+    target_label = str(event.get("target_id_label", "") or "").strip()
+    if actor_label and target_label:
+        return f"{actor_label}→{target_label}"
     if actor >= 0 and target >= 0:
         return f"ID{actor}→ID{target}"
     ids = _event_ids(event)
@@ -595,7 +615,11 @@ def _truncate(text: str, max_chars: int = 56) -> str:
     return text[: max_chars - 3] + "..."
 
 
-def build_panel_lines(display_events: Sequence[Mapping[str, Any]], layer: str) -> list[str]:
+def build_panel_lines(
+    display_events: Sequence[Mapping[str, Any]],
+    layer: str,
+    empty_event_text: str | None = None,
+) -> list[str]:
     """Return at most two compact Chinese lines for the top-left status tag."""
 
     first = f"行为层级：{CATEGORY_NAMES_ZH.get(layer, layer)}"
@@ -606,7 +630,7 @@ def build_panel_lines(display_events: Sequence[Mapping[str, Any]], layer: str) -
         if len(display_events) > 5:
             second += f"；另有 {len(display_events) - 5} 项"
         return [first, _truncate(second)]
-    return [first, "当前帧无已判定事件，框上显示“仅追踪”"]
+    return [first, empty_event_text or "当前帧无已判定事件，框上显示“仅追踪”"]
 
 
 def resolve_font_path(font_path: Path | None = None) -> Path | None:
@@ -745,6 +769,7 @@ def draw_behavior_sidebar(
     panel_width: int | None = None,
     focus_behavior: str | None = None,
     focus_active: bool = False,
+    empty_event_text: str | None = None,
 ) -> np.ndarray:
     """Append a separate ID-to-behavior panel to the right of ``frame``.
 
@@ -798,7 +823,7 @@ def draw_behavior_sidebar(
             fill=(255, 190, 80) if not focus_active else (100, 235, 145),
         )
         focus_status_height = detail_size + 5
-    summary_lines = build_panel_lines(display_events, display_layer)
+    summary_lines = build_panel_lines(display_events, display_layer, empty_event_text)
     summary_y = 14 + title_size + detail_size + 15 + focus_status_height
     for index, line in enumerate(summary_lines[:2]):
         draw.text(
@@ -838,10 +863,11 @@ def draw_behavior_sidebar(
             font=body_font,
             fill=_rgb_from_bgr(overlay.color_bgr),
         )
+        max_behavior_chars = max((sidebar_width - 125) // max(detail_size, 1), 1)
         draw.text(
             (105, text_y),
-            _truncate(behavior or "仅追踪", 22),
-            font=body_font,
+            _truncate(behavior or "仅追踪", max_behavior_chars),
+            font=detail_font,
             fill=(245, 245, 245),
         )
 

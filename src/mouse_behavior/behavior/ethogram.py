@@ -12,6 +12,7 @@ import pandas as pd
 from ..parallel_behavior_fsm import ParallelBehaviorFSM
 from ..preprocessing.constants import BEHAVIOR_NAMES_ZH
 from ..utils.rolling import rolling_sum as _rolling_sum
+from .group_dynamics import group_dynamic_signals
 from .social_fsm import build_semantic_pair_signals
 
 LOGGER = logging.getLogger("mouse_behavior.lightweight_behavior_inference")
@@ -665,7 +666,9 @@ def _event_rows_from_mask(
             "pair_key": str(pair_key),
             "actor_id": actor,
             "target_id": target,
-            "role_ambiguous": bool(actor < 0 or target < 0),
+            "role_ambiguous": bool(
+                str(event_scope) == "pair" and (actor < 0 or target < 0)
+            ),
             # analysis_* are the evidence span.  start/end are the public
             # display/export span and may include bounded temporal context.
             "analysis_start_frame": int(start),
@@ -713,17 +716,22 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
     defaults = {
         "enabled": True,
         "individual": {
-            "stationary_max_speed_cm_s": 4.0,
-            "walking_max_speed_cm_s": 18.0,
-            "running_min_speed_cm_s": 18.0,
+            "stationary_max_speed_cm_s": 10.0,
+            "walking_max_speed_cm_s": 85.0,
+            "running_min_speed_cm_s": 85.0,
+            "stationary_min_duration_seconds": 1.0,
+            "walking_min_duration_seconds": 1.0,
+            "running_min_duration_seconds": 0.5,
             "confirm_seconds": 0.30,
             "fill_gap_seconds": 0.20,
             "min_pose_quality": 0.20,
         },
         "social": {
-            "pair_max_distance_cm": 17.0,
+            "pair_max_distance_cm": 5.0,
             "together_max_distance_cm": 8.0,
-            "together_max_combined_speed_cm_s": 28.0,
+            "together_max_individual_speed_cm_s": 16.0,
+            "together_min_duration_seconds": 1.0,
+            "approach_terminal_distance_cm": 17.0,
             "approach_min_distance_drop_cm": 1.5,
             "approach_min_closing_speed_cm_s": 2.0,
             "approach_max_actor_speed_cm_s": 22.0,
@@ -734,6 +742,20 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
             "approach_min_duration_seconds": 0.10,
             "approach_short_event_padding_seconds": 0.10,
             "approach_short_event_max_duration_seconds": 0.35,
+            "following": {
+                "enabled": True,
+                "min_distance_cm": 5.0,
+                "max_distance_cm": 30.0,
+                "min_follower_speed_cm_s": 2.0,
+                "min_leader_speed_cm_s": 2.0,
+                "min_direction_similarity": 0.70,
+                "min_pursuit_alignment": 0.35,
+                "max_leader_escape_alignment": 0.25,
+                "min_follower_leader_speed_ratio": 0.50,
+                "max_follower_leader_speed_ratio": 1.80,
+                "min_duration_seconds": 3.0,
+                "fill_gap_seconds": 0.25,
+            },
             "chase_fallback": {
                 "enabled": True,
                 "max_distance_cm": 12.0,
@@ -878,6 +900,8 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
             "pair_fill_gap_seconds": 0.15,
         },
         "group": {
+            "dynamic_min_group_size": 3,
+            "dynamic_max_neighbor_distance_cm": 30.0,
             # The Beiyi definition uses a strict five-centimetre spatial
             # condition. A profile can override this for a calibrated setup.
             "huddle_distance_cm": 5.0,
@@ -889,16 +913,20 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
             # backwards-compatible full-clique mode for older profiles.
             "huddle_require_clique": False,
             "huddle_min_member_neighbors": 2,
+            "huddle_min_duration_seconds": 1.0,
+            "huddle_fill_gap_seconds": 5.0,
+            "huddle_max_mean_speed_cm_s": 10.0,
+            "huddle_max_high_motion_fraction": 0.20,
             # Local density is the default because a large huddle need not be
             # a complete graph: far diagonal members can be valid group
             # members when each mouse has enough nearby neighbours. Profiles
             # that need the historical all-pairs density can opt into global.
             "huddle_density_mode": "local",
             "huddle_local_neighbor_cap": 4,
-            # A huddle event may tolerate one changing detector ID, but a
-            # later component with no shared physical members is a new event.
+            # Require a strong shared-ID core between adjacent huddle spans;
+            # the same group may be reacquired after a detector dropout.
             "huddle_event_min_shared_members": 2,
-            "huddle_event_min_overlap_fraction": 0.50,
+            "huddle_event_min_overlap_fraction": 0.75,
             # A fight must continue outside the same stable huddle before it
             # may displace huddle membership. This rejects box-jitter attacks
             # that exist only while a dense group is visible.
@@ -907,13 +935,43 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
             # The body-length cap is only a scale-drift guard. A calibrated
             # profile can disable it so mixed body sizes cannot shrink a fixed
             # spatial threshold.
-            "huddle_body_length_cap_enabled": True,
+            "huddle_body_length_cap_enabled": False,
             "huddle_max_pair_distance_body_lengths": 1.25,
-            "isolation_distance_cm": 15.0,
+            "isolation_distance_cm": 20.0,
+            "isolation_min_duration_seconds": 10.0,
             "isolation_neighbor_fraction": 0.15,
             "isolation_min_cluster_size": 3,
             "isolation_min_main_cluster_fraction": 0.60,
             "isolation_max_member_fraction": 0.25,
+            "group_locomotion": {
+                "enabled": True,
+                "max_neighbor_distance_cm": 30.0,
+                "min_speed_cm_s": 2.0,
+                "min_moving_fraction": 0.80,
+                "min_direction_similarity": 0.70,
+                "min_duration_seconds": 3.0,
+                "fill_gap_seconds": 0.25,
+            },
+            "social_clustering": {
+                "enabled": True,
+                "max_neighbor_distance_cm": 30.0,
+                "formation_window_seconds": 2.0,
+                "min_nearest_neighbor_drop_cm": 2.0,
+                # A clustering event is a moving formation process; quiet
+                # stable groups are classified as Huddling instead.
+                "min_mean_speed_cm_s": 3.0,
+                "min_moving_member_fraction": 0.5,
+                "min_duration_seconds": 5.0,
+                "fill_gap_seconds": 0.25,
+            },
+            "dispersal": {
+                "enabled": True,
+                "prior_cluster_neighbor_distance_cm": 15.0,
+                "prior_cluster_min_duration_seconds": 1.0,
+                "min_nearest_neighbor_increase_cm": 5.0,
+                "min_duration_seconds": 10.0,
+                "fill_gap_seconds": 0.50,
+            },
             "confirm_seconds": 0.30,
             "fill_gap_seconds": 0.20,
         },
@@ -1422,6 +1480,34 @@ def _extended_short_clip_pair_events(
     return events
 
 
+def _pair_stationary_mask(pair_df: pd.DataFrame, speed_limit_cm_s: float) -> np.ndarray:
+    """Require both observed pair members to remain within the Static speed band."""
+    if {"mouse_a_behavior_speed_cm_s", "mouse_b_behavior_speed_cm_s"}.issubset(pair_df.columns):
+        actor_column, target_column = (
+            "mouse_a_behavior_speed_cm_s",
+            "mouse_b_behavior_speed_cm_s",
+        )
+    elif {
+        "selected_actor_behavior_speed_cm_s",
+        "selected_target_behavior_speed_cm_s",
+    }.issubset(pair_df.columns):
+        actor_column, target_column = (
+            "selected_actor_behavior_speed_cm_s",
+            "selected_target_behavior_speed_cm_s",
+        )
+    else:
+        return np.zeros(len(pair_df), dtype=bool)
+    actor_speed = pd.to_numeric(pair_df[actor_column], errors="coerce").to_numpy(float)
+    target_speed = pd.to_numeric(pair_df[target_column], errors="coerce").to_numpy(float)
+    limit = max(float(speed_limit_cm_s), 0.0)
+    return (
+        np.isfinite(actor_speed)
+        & np.isfinite(target_speed)
+        & (actor_speed <= limit)
+        & (target_speed <= limit)
+    )
+
+
 def _semantic_extended_pair_events(
     pair_df: pd.DataFrame,
     *,
@@ -1509,24 +1595,23 @@ def _semantic_extended_pair_events(
         pair_df.get("valid_pair", pd.Series(False, index=pair_df.index)), dtype=bool
     )
     distance = pd.to_numeric(pair_df["center_distance_cm"], errors="coerce").to_numpy(float)
-    selected_actor_speed = (
-        pd.to_numeric(pair_df.get("selected_actor_behavior_speed_cm_s", 0.0), errors="coerce")
-        .fillna(0.0)
-        .to_numpy(float)
+    extended_cfg = _extended_behavior_config(config)
+    together_distance_cm = float(
+        social.get("together_max_distance_cm", 8.0)
     )
-    selected_target_speed = (
-        pd.to_numeric(pair_df.get("selected_target_behavior_speed_cm_s", 0.0), errors="coerce")
-        .fillna(0.0)
-        .to_numpy(float)
+    stationary_speed_limit = float(
+        social.get(
+            "together_max_individual_speed_cm_s",
+            dict(extended_cfg.get("individual", {})).get(
+                "stationary_max_speed_cm_s", 10.0
+            ),
+        )
     )
     together = (
         valid
         & np.isfinite(distance)
-        & (distance <= float(social.get("together_max_distance_cm", 8.0)))
-        & (
-            selected_actor_speed + selected_target_speed
-            <= float(social.get("together_max_combined_speed_cm_s", 28.0))
-        )
+        & (distance < together_distance_cm)
+        & _pair_stationary_mask(pair_df, stationary_speed_limit)
     )
     events.extend(
         _event_rows_from_mask(
@@ -1540,7 +1625,7 @@ def _semantic_extended_pair_events(
                 together,
                 1.0
                 - np.clip(
-                    distance / max(float(social.get("together_max_distance_cm", 8.0)), 1e-6),
+                    distance / max(together_distance_cm, 1e-6),
                     0.0,
                     1.0,
                 ),
@@ -1549,7 +1634,7 @@ def _semantic_extended_pair_events(
             actor_id=np.full(len(pair_df), -1),
             target_id=np.full(len(pair_df), -1),
             pair_key=pair_key,
-            min_duration_seconds=float(social.get("together_min_duration_seconds", 0.30)),
+            min_duration_seconds=float(social.get("together_min_duration_seconds", 1.0)),
             fill_gap_seconds=float(social.get("pair_fill_gap_seconds", 0.15)),
             fsm_coordinator=fsm_coordinator,
         )
@@ -1619,6 +1704,171 @@ def _semantic_extended_pair_events(
     return events
 
 
+def _following_events(
+    pair_df: pd.DataFrame,
+    *,
+    enriched: pd.DataFrame | None,
+    source_video: Path,
+    source_fps: float,
+    sample_stride: int,
+    social: Mapping[str, Any],
+    fsm_coordinator: ParallelBehaviorFSM,
+    excluded_events: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Detect sustained, non-escape following and preserve pair roles.
+
+    The actor/target slots already contain stable identities supplied by the
+    trajectory input.  This function only assigns the behavioral roles
+    Follower and Leader; it never repairs or guesses an animal identity.
+    """
+
+    following_cfg = dict(social.get("following", {}))
+    if not bool(following_cfg.get("enabled", True)) or pair_df.empty:
+        return []
+
+    frames = len(pair_df)
+
+    def numeric(column: str, default: float = 0.0) -> np.ndarray:
+        values = pair_df[column] if column in pair_df else pd.Series(default, index=pair_df.index)
+        return pd.to_numeric(values, errors="coerce").fillna(default).to_numpy(float)
+
+    def boolean(column: str, default: bool = False) -> np.ndarray:
+        values = pair_df[column] if column in pair_df else pd.Series(default, index=pair_df.index)
+        return values.fillna(default).astype(bool).to_numpy()
+
+    distance = numeric("center_distance_cm", float("nan"))
+    valid = boolean("valid_pair", True) & np.isfinite(distance)
+    mouse_a = numeric("mouse_a_id", -1).astype(int)
+    mouse_b = numeric("mouse_b_id", -1).astype(int)
+
+    minimum_distance = max(float(following_cfg.get("min_distance_cm", 5.0)), 0.0)
+    maximum_distance = max(
+        float(following_cfg.get("max_distance_cm", 30.0)),
+        minimum_distance,
+    )
+    minimum_follower_speed = max(
+        float(following_cfg.get("min_follower_speed_cm_s", 2.0)),
+        0.0,
+    )
+    minimum_leader_speed = max(
+        float(following_cfg.get("min_leader_speed_cm_s", 2.0)),
+        0.0,
+    )
+    minimum_direction = float(
+        np.clip(following_cfg.get("min_direction_similarity", 0.70), -1.0, 1.0)
+    )
+    minimum_pursuit = float(
+        np.clip(following_cfg.get("min_pursuit_alignment", 0.35), -1.0, 1.0)
+    )
+    maximum_escape = float(
+        np.clip(following_cfg.get("max_leader_escape_alignment", 0.25), -1.0, 1.0)
+    )
+    minimum_speed_ratio = max(
+        float(following_cfg.get("min_follower_leader_speed_ratio", 0.50)),
+        0.0,
+    )
+    maximum_speed_ratio = max(
+        float(following_cfg.get("max_follower_leader_speed_ratio", 1.80)),
+        minimum_speed_ratio,
+    )
+
+    chase_or_attack = np.zeros(frames, dtype=bool)
+    if enriched is not None and len(enriched) == frames:
+        for column in (
+            "weak_standard_raw_chase",
+            "strong_standard_raw_chase",
+            "weak_standard_final_chase",
+            "strong_standard_final_chase",
+            "weak_standard_final_attack",
+            "strong_standard_final_attack",
+        ):
+            if column in enriched:
+                chase_or_attack |= enriched[column].fillna(False).astype(bool).to_numpy()
+    for event in excluded_events or ():
+        if str(event.get("behavior", "")).strip().lower() not in {"chase", "attack"}:
+            continue
+        try:
+            start = int(event.get("analysis_start_frame", event.get("start_frame", 0)))
+            end = int(event.get("analysis_end_frame", event.get("end_frame", start)))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        start = max(start, 0)
+        end = min(max(end, start), frames - 1)
+        if start < frames:
+            chase_or_attack[start : end + 1] = True
+
+    def direction_candidate(prefix: str) -> tuple[np.ndarray, np.ndarray]:
+        follower_speed = numeric(f"{prefix}_actor_behavior_speed_cm_s")
+        leader_speed = numeric(f"{prefix}_target_behavior_speed_cm_s")
+        direction = numeric(f"{prefix}_direction_similarity", -1.0)
+        pursuit = numeric(f"{prefix}_pursuit_alignment", -1.0)
+        escape = numeric(f"{prefix}_target_escape_alignment", 1.0)
+        behind = boolean(f"{prefix}_actor_behind_target")
+        speed_ratio = follower_speed / np.maximum(leader_speed, 1e-6)
+        candidate = (
+            valid
+            & (distance >= minimum_distance)
+            & (distance <= maximum_distance)
+            & (follower_speed >= minimum_follower_speed)
+            & (leader_speed >= minimum_leader_speed)
+            & (speed_ratio >= minimum_speed_ratio)
+            & (speed_ratio <= maximum_speed_ratio)
+            & (direction >= minimum_direction)
+            & (pursuit >= minimum_pursuit)
+            & (escape <= maximum_escape)
+            & behind
+            & ~chase_or_attack
+        )
+        score = np.where(
+            candidate,
+            np.mean(
+                np.column_stack(
+                    (
+                        np.clip((direction + 1.0) / 2.0, 0.0, 1.0),
+                        np.clip((pursuit + 1.0) / 2.0, 0.0, 1.0),
+                        np.clip((1.0 - escape) / 2.0, 0.0, 1.0),
+                    )
+                ),
+                axis=1,
+            ),
+            0.0,
+        )
+        return candidate, score
+
+    follows_ab, score_ab = direction_candidate("a_to_b")
+    follows_ba, score_ba = direction_candidate("b_to_a")
+    choose_ab = follows_ab & (~follows_ba | (score_ab >= score_ba))
+    choose_ba = follows_ba & ~choose_ab
+    mask = choose_ab | choose_ba
+    actor = np.where(choose_ab, mouse_a, np.where(choose_ba, mouse_b, -1))
+    target = np.where(choose_ab, mouse_b, np.where(choose_ba, mouse_a, -1))
+    score = np.where(choose_ab, score_ab, np.where(choose_ba, score_ba, 0.0))
+
+    events = _event_rows_from_mask(
+        mask,
+        behavior="following",
+        level="extended",
+        fps=source_fps / max(sample_stride, 1),
+        source_video=source_video,
+        sample_stride=sample_stride,
+        score=score,
+        actor_id=actor,
+        target_id=target,
+        pair_key=str(pair_df["pair_key"].iloc[0]),
+        min_duration_seconds=max(
+            float(following_cfg.get("min_duration_seconds", 3.0)),
+            3.0,
+        ),
+        fill_gap_seconds=float(following_cfg.get("fill_gap_seconds", 0.25)),
+        event_scope="pair",
+        fsm_coordinator=fsm_coordinator,
+    )
+    for event in events:
+        event["actor_role"] = "follower"
+        event["target_role"] = "leader"
+    return events
+
+
 def _extended_pair_events(
     pair_df: pd.DataFrame,
     *,
@@ -1652,7 +1902,7 @@ def _extended_pair_events(
     )
     semantic_cfg = dict(social.get("semantic_fsm", {}))
     if bool(semantic_cfg.get("enabled", False)):
-        return _semantic_extended_pair_events(
+        semantic_events = _semantic_extended_pair_events(
             pair_df,
             enriched=(enriched if enriched is not None else pd.DataFrame(index=pair_df.index)),
             source_video=source_video,
@@ -1662,6 +1912,19 @@ def _extended_pair_events(
             config=config,
             fsm_coordinator=fsm_coordinator,
         )
+        semantic_events.extend(
+            _following_events(
+                pair_df,
+                enriched=enriched,
+                source_video=source_video,
+                source_fps=source_fps,
+                sample_stride=sample_stride,
+                social=social,
+                fsm_coordinator=fsm_coordinator,
+                excluded_events=semantic_events,
+            )
+        )
+        return semantic_events
     distance = pd.to_numeric(pair_df["center_distance_cm"], errors="coerce").to_numpy(float)
     valid = (
         pair_df.get("valid_pair", pd.Series(True, index=pair_df.index))
@@ -1679,14 +1942,8 @@ def _extended_pair_events(
         .fillna(0)
         .to_numpy(float)
     )
-    combined_speed = actor_speed + target_speed
     drop = (
         pd.to_numeric(pair_df.get("selected_distance_drop_cm", 0.0), errors="coerce")
-        .fillna(0)
-        .to_numpy(float)
-    )
-    closing = (
-        pd.to_numeric(pair_df.get("selected_closing_speed_cm_s", 0.0), errors="coerce")
         .fillna(0)
         .to_numpy(float)
     )
@@ -1725,27 +1982,36 @@ def _extended_pair_events(
     # not masked by contact geometry because doing so would change the existing
     # scientific output contract without labeled-data acceptance evidence.
 
-    # ``together`` is a low-motion, close pair state. It does not require a
+    # ``together`` is a close pair state. It does not require a
     # contact threshold, so it can represent the labeled together examples.
+    together_distance_cm = float(
+        social.get("together_max_distance_cm", 8.0)
+    )
+    stationary_speed_limit = float(
+        social.get(
+            "together_max_individual_speed_cm_s",
+            cfg["individual"].get("stationary_max_speed_cm_s", 10.0),
+        )
+    )
     together = (
         valid
         & np.isfinite(distance)
-        & (distance <= float(social["together_max_distance_cm"]))
-        & (combined_speed <= float(social["together_max_combined_speed_cm_s"]))
+        & (distance < together_distance_cm)
+        & _pair_stationary_mask(pair_df, stationary_speed_limit)
     )
     approach = (
         valid
         & np.isfinite(distance)
-        & (distance <= float(social["pair_max_distance_cm"]))
-        & (drop >= float(social["approach_min_distance_drop_cm"]))
-        & (closing >= float(social["approach_min_closing_speed_cm_s"]))
-        & (selected_actor_speed >= float(social.get("approach_min_actor_speed_cm_s", 0.0)))
-        & (selected_actor_speed <= float(social["approach_max_actor_speed_cm_s"]))
-        & (selected_target_speed <= float(social["approach_max_target_speed_cm_s"]))
         & (
-            (selected_actor_speed - selected_target_speed)
-            >= float(social["approach_min_speed_gap_cm_s"])
+            distance
+            < float(
+                social.get(
+                    "approach_terminal_distance_cm",
+                    social["pair_max_distance_cm"],
+                )
+            )
         )
+        & (drop >= float(social["approach_min_distance_drop_cm"]))
     )
     # Keep the approach-to-together transition: the last approach samples can
     # be close and low-motion after the speed difference collapses.  Contact
@@ -1833,7 +2099,7 @@ def _extended_pair_events(
             score=np.where(
                 together,
                 1.0
-                - np.clip(distance / max(float(social["together_max_distance_cm"]), 1e-6), 0, 1),
+                - np.clip(distance / max(together_distance_cm, 1e-6), 0, 1),
                 0.0,
             ),
             actor_id=np.full(n, -1),
@@ -1983,6 +2249,17 @@ def _extended_pair_events(
                 fsm_coordinator=fsm_coordinator,
             )
         )
+    events.extend(
+        _following_events(
+            pair_df,
+            enriched=enriched,
+            source_video=source_video,
+            source_fps=source_fps,
+            sample_stride=sample_stride,
+            social=social,
+            fsm_coordinator=fsm_coordinator,
+        )
+    )
     return events
 
 
@@ -2016,12 +2293,17 @@ def _extended_individual_and_group_events(
         & (speed <= float(individual_cfg["stationary_max_speed_cm_s"]))
         & (pose_quality >= float(individual_cfg["min_pose_quality"]))
     )
+    running_min_speed_cm_s = float(individual_cfg["running_min_speed_cm_s"])
     walking = (
         valid
         & (speed > float(individual_cfg["stationary_max_speed_cm_s"]))
-        & (speed < float(individual_cfg["running_min_speed_cm_s"]))
+        & (speed <= float(individual_cfg["walking_max_speed_cm_s"]))
+        & (speed <= running_min_speed_cm_s)
     )
-    running = valid & (speed >= float(individual_cfg["running_min_speed_cm_s"]))
+    # The configured Walking upper boundary is inclusive.  A mouse becomes
+    # Running only once its speed is strictly above that boundary; this keeps
+    # the two labels disjoint at the exact calibration cutoff.
+    running = valid & (speed > running_min_speed_cm_s)
     for mouse in range(mice):
         for behavior, mask, score in (
             (
@@ -2089,6 +2371,17 @@ def _extended_individual_and_group_events(
     huddle_core_size = np.zeros(frames, dtype=int)
     huddle_core_fraction = np.zeros(frames, dtype=float)
     huddle_core_density = np.zeros(frames, dtype=float)
+    huddle_mean_speed = np.full(frames, np.inf, dtype=float)
+    huddle_high_motion_fraction = np.ones(frames, dtype=float)
+    stationary_speed_limit = max(
+        float(individual_cfg.get("stationary_max_speed_cm_s", 10.0)), 0.0
+    )
+    huddle_max_mean_speed = max(
+        float(group_cfg.get("huddle_max_mean_speed_cm_s", 10.0)), 0.0
+    )
+    huddle_max_high_motion_fraction = float(
+        np.clip(group_cfg.get("huddle_max_high_motion_fraction", 0.20), 0.0, 1.0)
+    )
     huddle_min_cluster_size = max(int(group_cfg.get("huddle_min_cluster_size", 3)), 3)
     huddle_min_cluster_fraction = max(
         float(group_cfg.get("huddle_min_cluster_fraction", 0.0)),
@@ -2153,14 +2446,14 @@ def _extended_individual_and_group_events(
                 frame_body_scale * max(huddle_max_pair_distance_body_lengths, 0.0),
             )
         nearest = np.min(distances, axis=1)
-        close_fraction[frame] = float(np.mean(nearest <= close_threshold))
+        close_fraction[frame] = float(np.mean(nearest < close_threshold))
 
         # A multi-mouse cage can contain a local huddle while other visible
         # mice remain spread out. First find local connected components, then
         # apply the strict local-core gate below. Thus a valid local
         # three-mouse huddle is retained, while a three-mouse end-to-end chain
         # is not promoted to a group event.
-        adjacency = distances <= close_threshold
+        adjacency = distances < close_threshold
         unseen = set(range(len(ids)))
         components: list[list[int]] = []
         while unseen:
@@ -2181,7 +2474,7 @@ def _extended_individual_and_group_events(
         if len(largest_component) >= 2:
             component_indices = np.asarray(largest_component, dtype=int)
             component_distances = distances[np.ix_(component_indices, component_indices)]
-            edge_count = int(np.sum(component_distances <= close_threshold) // 2)
+            edge_count = int(np.sum(component_distances < close_threshold) // 2)
             possible_edges = len(largest_component) * (len(largest_component) - 1) // 2
             largest_cluster_density[frame] = edge_count / max(possible_edges, 1)
 
@@ -2222,6 +2515,13 @@ def _extended_individual_and_group_events(
             huddle_core_fraction[frame] = len(huddle_core) / max(len(ids), 1)
             huddle_core_density[frame] = core_density
             huddle_members_by_frame[frame] = tuple(sorted(int(ids[index]) for index in huddle_core))
+            core_speeds = speed[frame, np.asarray(huddle_members_by_frame[frame], dtype=int)]
+            finite_core_speeds = core_speeds[np.isfinite(core_speeds)]
+            if finite_core_speeds.size:
+                huddle_mean_speed[frame] = float(np.mean(finite_core_speeds))
+                huddle_high_motion_fraction[frame] = float(
+                    np.mean(finite_core_speeds > stationary_speed_limit)
+                )
         # Isolation is a relationship to the main group, not a requirement
         # that isolated mice make up a fixed fraction of all visible mice.
         # This is important for a 10-mouse scene with one genuinely isolated
@@ -2264,6 +2564,19 @@ def _extended_individual_and_group_events(
         isolated_fraction[frame] = len(isolated_ids) / max(len(ids), 1)
         raw_isolation_members_by_frame[frame] = tuple(sorted(int(item) for item in isolated_ids))
 
+    # Apply the resting gate before temporal gap filling so a moving formation
+    # cannot be backdated into Huddling; the public event begins only once the
+    # close group is already in its low-motion state.
+    resting_huddle = (
+        (huddle_mean_speed <= huddle_max_mean_speed)
+        & (huddle_high_motion_fraction <= huddle_max_high_motion_fraction)
+    )
+    for frame in np.flatnonzero(~resting_huddle):
+        huddle_members_by_frame[int(frame)] = ()
+        huddle_core_size[int(frame)] = 0
+        huddle_core_fraction[int(frame)] = 0.0
+        huddle_core_density[int(frame)] = 0.0
+
     raw_huddle = huddle_core_size >= huddle_min_cluster_size
     raw_huddle &= huddle_core_density >= huddle_min_cluster_density
     if huddle_min_cluster_fraction > 0.0:
@@ -2282,8 +2595,12 @@ def _extended_individual_and_group_events(
         int(round(huddle_min_duration_seconds * analysis_fps)),
         1,
     )
+    huddle_fill_gap_seconds = max(
+        float(group_cfg.get("huddle_fill_gap_seconds", group_cfg.get("fill_gap_seconds", 5.0))),
+        0.0,
+    )
     huddle_fill_gap_frames = max(
-        int(round(float(group_cfg.get("fill_gap_seconds", 0.20)) * analysis_fps)),
+        int(round(huddle_fill_gap_seconds * analysis_fps)),
         0,
     )
     # Conflict resolution must consume the same temporally confirmed huddle
@@ -2348,6 +2665,7 @@ def _extended_individual_and_group_events(
             huddle_core_size[frame] = 0
             huddle_core_fraction[frame] = 0.0
             huddle_core_density[frame] = 0.0
+            huddle_mean_speed[frame] = np.inf
             continue
 
         local_points = centers[frame, remaining_ids]
@@ -2368,7 +2686,7 @@ def _extended_individual_and_group_events(
                 close_threshold,
                 local_body_scale * max(huddle_max_pair_distance_body_lengths, 0.0),
             )
-        local_adjacency = local_distances <= close_threshold
+        local_adjacency = local_distances < close_threshold
         if huddle_require_clique:
             local_core = list(range(len(remaining_ids)))
             required_density = 1.0
@@ -2392,12 +2710,23 @@ def _extended_individual_and_group_events(
             huddle_core_size[frame] = 0
             huddle_core_fraction[frame] = 0.0
             huddle_core_density[frame] = 0.0
+            huddle_mean_speed[frame] = np.inf
             continue
         resolved_members = tuple(sorted(int(remaining_ids[index]) for index in local_core))
         huddle_members_by_frame[frame] = resolved_members
         huddle_core_size[frame] = len(resolved_members)
         huddle_core_fraction[frame] = len(resolved_members) / max(group_size[frame], 1)
         huddle_core_density[frame] = local_density
+        resolved_speeds = speed[frame, np.asarray(resolved_members, dtype=int)]
+        finite_resolved_speeds = resolved_speeds[np.isfinite(resolved_speeds)]
+        huddle_mean_speed[frame] = (
+            float(np.mean(finite_resolved_speeds)) if finite_resolved_speeds.size else np.inf
+        )
+        huddle_high_motion_fraction[frame] = (
+            float(np.mean(finite_resolved_speeds > stationary_speed_limit))
+            if finite_resolved_speeds.size
+            else 1.0
+        )
 
     huddle_members_by_frame = _sustained_huddle_members_by_frame(
         huddle_members_by_frame,
@@ -2415,7 +2744,7 @@ def _extended_individual_and_group_events(
         float(
             group_cfg.get(
                 "isolation_min_duration_seconds",
-                group_cfg.get("confirm_seconds", 0.30),
+                10.0,
             )
         ),
         0.0,
@@ -2481,7 +2810,7 @@ def _extended_individual_and_group_events(
                 mask,
                 member_ids_by_frame,
                 max_gap_frames=max(
-                    int(round(float(group_cfg["fill_gap_seconds"]) * analysis_fps)),
+                    int(round(huddle_fill_gap_seconds * analysis_fps)),
                     0,
                 ),
                 min_shared_members=max(
@@ -2489,7 +2818,7 @@ def _extended_individual_and_group_events(
                     1,
                 ),
                 min_overlap_fraction=float(
-                    group_cfg.get("huddle_event_min_overlap_fraction", 0.50)
+                    group_cfg.get("huddle_event_min_overlap_fraction", 0.75)
                 ),
                 min_member_duration_frames=max(
                     int(round(huddle_min_duration_seconds * analysis_fps)),
@@ -2524,13 +2853,80 @@ def _extended_individual_and_group_events(
                             )
                         )
                     ),
-                    fill_gap_seconds=float(group_cfg["fill_gap_seconds"]),
+                    fill_gap_seconds=(
+                        huddle_fill_gap_seconds
+                        if behavior == "huddle"
+                        else float(group_cfg["fill_gap_seconds"])
+                    ),
                     event_scope="group",
                     member_ids_by_frame=segment_members,
                     fsm_coordinator=fsm_coordinator,
                     fsm_region_id=(
                         f"huddle_lineage_{segment_index}" if behavior == "huddle" else None
                     ),
+                )
+            )
+
+    # Dynamic group behaviors use the same identified trajectory arrays as the
+    # established huddle/isolation rules.  Membership lineage is split when a
+    # different physical group replaces the original one, so a long video
+    # cannot silently merge unrelated cohorts into one event.
+    dynamic = group_dynamic_signals(
+        kin,
+        group_config=group_cfg,
+        analysis_fps=analysis_fps,
+    )
+    for behavior in ("group_locomotion", "social_clustering", "dispersal"):
+        behavior_cfg = dict(group_cfg.get(behavior, {}))
+        if not bool(behavior_cfg.get("enabled", True)):
+            continue
+        minimum_seconds = max(
+            float(
+                behavior_cfg.get(
+                    "min_duration_seconds",
+                    {"group_locomotion": 3.0, "social_clustering": 5.0, "dispersal": 10.0}[
+                        behavior
+                    ],
+                )
+            ),
+            {"group_locomotion": 3.0, "social_clustering": 5.0, "dispersal": 10.0}[
+                behavior
+            ],
+        )
+        fill_gap_seconds = max(
+            float(behavior_cfg.get("fill_gap_seconds", group_cfg["fill_gap_seconds"])),
+            0.0,
+        )
+        mask = np.asarray(dynamic["masks"][behavior], dtype=bool)
+        score = np.asarray(dynamic["scores"][behavior], dtype=float)
+        members_by_frame = list(dynamic["members_by_frame"][behavior])
+        segments = _identity_continuous_huddle_segments(
+            mask,
+            members_by_frame,
+            max_gap_frames=max(int(round(fill_gap_seconds * analysis_fps)), 0),
+            min_shared_members=2,
+            min_overlap_fraction=0.50,
+            min_member_duration_frames=max(int(round(minimum_seconds * analysis_fps)), 1),
+        )
+        for segment_index, (segment_mask, segment_members) in enumerate(segments):
+            events.extend(
+                _event_rows_from_mask(
+                    segment_mask,
+                    behavior=behavior,
+                    level="extended",
+                    fps=analysis_fps,
+                    source_video=source_video,
+                    sample_stride=sample_stride,
+                    score=score,
+                    actor_id=np.full(frames, -1),
+                    target_id=np.full(frames, -1),
+                    pair_key="group",
+                    min_duration_seconds=minimum_seconds,
+                    fill_gap_seconds=fill_gap_seconds,
+                    event_scope="group",
+                    member_ids_by_frame=segment_members,
+                    fsm_coordinator=fsm_coordinator,
+                    fsm_region_id=f"{behavior}_lineage_{segment_index}",
                 )
             )
     return events
@@ -2831,6 +3227,70 @@ def _extract_contact_events(
     fill_gap_frames = int(round(fill_gap_seconds * source_fps / sample_stride))
     _fill_contact_state_gaps(states, fill_gap_frames)
 
+    # Count contact support cumulatively for this exact visual-ID pair. A set
+    # of short touches under the configured total is not emitted as a contact
+    # behavior; when the cumulative gate passes, its individual bouts remain
+    # separately timed for review.
+    component_frames = {"nose_head": 0, "nose_tail": 0}
+    for state in states:
+        if state is None:
+            continue
+        for component in state["contact_type_components"].split(";"):
+            if component in component_frames:
+                component_frames[component] += 1
+    cumulative_seconds = {
+        component: count * sample_stride / source_fps
+        for component, count in component_frames.items()
+    }
+    minimum_cumulative = {
+        "nose_head": max(
+            float(
+                contact_config.get(
+                    "nose_head_min_cumulative_duration_seconds",
+                    contact_config.get("nose_head_min_duration_seconds", 0.5),
+                )
+            ),
+            0.0,
+        ),
+        "nose_tail": max(
+            float(
+                contact_config.get(
+                    "nose_tail_min_cumulative_duration_seconds",
+                    contact_config.get("nose_tail_min_duration_seconds", 0.5),
+                )
+            ),
+            0.0,
+        ),
+    }
+    accepted_components = {
+        component
+        for component, duration in cumulative_seconds.items()
+        if duration >= minimum_cumulative[component]
+    }
+    for index, state in enumerate(states):
+        if state is None:
+            continue
+        components = tuple(
+            component
+            for component in ("nose_head", "nose_tail")
+            if component in accepted_components
+            and component in state["contact_type_components"].split(";")
+        )
+        if not components:
+            states[index] = None
+            continue
+        state["contact_type_components"] = ";".join(components)
+        state["contact_type"] = (
+            "nose_head_and_nose_tail"
+            if len(components) == 2
+            else components[0]
+        )
+        relevant_distances = [
+            float(state[f"{component}_distance_cm"])
+            for component in components
+        ]
+        state["contact_distance_cm"] = min(relevant_distances)
+
     def state_key(state: Mapping[str, Any] | None) -> tuple[Any, ...] | None:
         if state is None:
             return None
@@ -2907,11 +3367,11 @@ def _extract_contact_events(
         component_minimums = []
         if "nose_head" in ordered_components:
             component_minimums.append(
-                float(contact_config.get("nose_head_min_duration_seconds", 0.0))
+                float(contact_config.get("nose_head_min_event_duration_seconds", 0.0))
             )
         if "nose_tail" in ordered_components:
             component_minimums.append(
-                float(contact_config.get("nose_tail_min_duration_seconds", 0.0))
+                float(contact_config.get("nose_tail_min_event_duration_seconds", 0.0))
             )
         min_duration_seconds = max(max(component_minimums, default=0.0), 0.0)
         duration_seconds = (source_end - source_start + 1) / source_fps
