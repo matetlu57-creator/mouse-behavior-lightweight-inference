@@ -844,7 +844,7 @@ def test_non_attacking_members_can_still_form_their_own_huddle() -> None:
 
 def test_isolation_keeps_one_mouse_outside_a_three_mouse_main_cluster():
     lightweight = load_lightweight()
-    frames = 12
+    frames = 330
     valid = np.ones((frames, 10), dtype=bool)
     centers = np.zeros((frames, 10, 2), dtype=float)
     centers[:, 0] = np.array([0.0, 0.0])
@@ -877,7 +877,7 @@ def test_isolation_keeps_one_mouse_outside_a_three_mouse_main_cluster():
                 "group": {
                     "huddle_distance_cm": 9.0,
                     "isolation_distance_cm": 15.0,
-                    "isolation_min_duration_seconds": 0.3,
+                    "isolation_min_duration_seconds": 10.0,
                 }
             }
         },
@@ -890,7 +890,7 @@ def test_isolation_keeps_one_mouse_outside_a_three_mouse_main_cluster():
 
 def test_isolation_does_not_keep_a_short_lived_swapped_member():
     lightweight = load_lightweight()
-    frames = 30
+    frames = 120
     valid = np.ones((frames, 10), dtype=bool)
     centers = np.zeros((frames, 10, 2), dtype=float)
     centers[:, 0] = np.array([0.0, 0.0])
@@ -904,7 +904,7 @@ def test_isolation_does_not_keep_a_short_lived_swapped_member():
     centers[:, 8] = np.array([4.0, 4.0])
     centers[:, 9] = np.array([50.0, 50.0])
     # The true outlier is stable. ID 8 is temporarily displaced for only two
-    # frames, which is shorter than the configured three-frame rule below.
+    # frames, far shorter than the ten-second Isolation minimum.
     centers[10:12, 8] = np.array([50.0, 50.0])
     kin = {
         "valid": valid,
@@ -926,7 +926,7 @@ def test_isolation_does_not_keep_a_short_lived_swapped_member():
                 "group": {
                     "huddle_distance_cm": 9.0,
                     "isolation_distance_cm": 15.0,
-                    "isolation_min_duration_seconds": 0.3,
+                    "isolation_min_duration_seconds": 10.0,
                     "confirm_seconds": 0.1,
                     "fill_gap_seconds": 0.0,
                 }
@@ -996,7 +996,7 @@ def test_isolation_requires_a_majority_main_group() -> None:
 
 def test_isolation_keeps_only_the_strongest_outlier_from_a_half_scene_main_group() -> None:
     lightweight = load_lightweight()
-    frames = 40
+    frames = 120
     valid = np.ones((frames, 10), dtype=bool)
     centers = np.zeros((frames, 10, 2), dtype=float)
     centers[:] = np.asarray(
@@ -1034,7 +1034,7 @@ def test_isolation_keeps_only_the_strongest_outlier_from_a_half_scene_main_group
                 "group": {
                     "huddle_distance_cm": 9.0,
                     "isolation_distance_cm": 15.0,
-                    "isolation_min_duration_seconds": 3.0,
+                    "isolation_min_duration_seconds": 10.0,
                     "isolation_min_main_cluster_fraction": 0.5,
                     "fill_gap_seconds": 0.0,
                 }
