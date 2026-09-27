@@ -70,3 +70,20 @@ execution_semantics。这些字段是运行溯源，不是未经验证的配置�
 
 北医样例汇总中的 video_coverage=1.0 是视频级覆盖指标。没有逐帧行为起止时间和
 参与者真值时，不能据此宣称算法已经达到某个 Precision、Recall、F1 或角色准确率。
+
+### 导出标注集校准产物
+
+`scripts/calibrate_exported_dataset.py` 默认将离线校准结果写入
+`outputs/exported_dataset_calibration/`，包括 `calibration_report.md`、训练/验证指标
+JSON、冻结参数 JSON、调参历史、划分清单和逐样本预测 CSV。验证推理在冻结参数后
+只使用轨迹、FPS 和可见轨迹 ID；标签只在推理完成后用于评分。
+
+- `target_id_accuracy`：目标标签候选包含人工标注 ID 的比例；群体候选可以多包含成员，
+  因此它不是严格的行为与 ID 联合准确率；
+- `strict_top1_accuracy`（总表兼容字段 `strict_target_id_accuracy`）：Top-1 行为必须
+  与标签一致，预测目标 ID 集合还必须与标注集合完全相同；
+- `compatible_top1_accuracy`：在严格 Top-1 基础上，允许同一对 ID 的 Together 与
+  Snout-head 或 Snout-rear_contact 互认；鼻头接触和鼻尾接触之间不互认。
+
+报告同时给出总体和逐行为的 Strict/Compatible Top-1。逐样本结果的 `correct` 保持严格
+口径，`compatible_correct` 单独记录双标签兼容命中。
