@@ -18,6 +18,16 @@ core / pipeline facade
 CSV、JSON、网站导入包和渲染视频
 ~~~
 
+导出标注数据集的离线校准是独立工作流，不进入视频推理运行链：
+
+~~~text
+annotation.json + metadata.json + tracks.json
+          ↓
+evaluation/exported_dataset.py
+          ↓
+训练集调参 → 冻结参数 → 轨迹 ID-only 验证推理 → 评分报告
+~~~
+
 ## 目录边界
 
 - src/mouse_behavior/core/：协调运行流程，不保存检测器实现和阈值细节；
@@ -25,6 +35,7 @@ CSV、JSON、网站导入包和渲染视频
 - src/mouse_behavior/tracking/：缓存规范化、有效检测和轻量身份匹配；
 - src/mouse_behavior/preprocessing/：笼界学习、几何、运动学和候选鼠对筛选；
 - src/mouse_behavior/behavior/：标准证据、追逐/攻击 FSM、扩展行为和鼠对编排；
+- src/mouse_behavior/evaluation/：离线导出标注集特征、训练调参、冻结参数验证和指标汇总；
 - src/mouse_behavior/data/：CSV、JSON 和网站导出数据契约；
 - src/mouse_behavior/io/：运行目录、文件写入和笼界审计输出；
 - src/mouse_behavior/visualization/：行为覆盖层、渲染视频和片段；
@@ -46,6 +57,7 @@ CSV、JSON、网站导入包和渲染视频
 - behavior/standard_fsm.py：标准追逐/攻击状态转移；
 - behavior/ethogram.py：个体、社交、群体和短事件恢复；
 - behavior/pair_analysis.py：鼠对分析编排；
+- evaluation/exported_dataset.py：导出标注集的轨迹特征、训练调参、冻结验证和评分；
 - preprocessing/arena_learning.py：小鼠笼子范围学习；
 - io/arena_boundary.py：笼界 JSON、PNG 和视频审计输出；
 - visualization/rendering.py：结果视频和行为片段渲染。
