@@ -266,13 +266,14 @@ extended_behavior:
     # 该值是 profile 的几何标定参数，不读取视频文件名，也不按目录直接分类。
     huddle_distance_cm: 11.0
     huddle_min_duration_seconds: 1.0
-    isolation_min_duration_seconds: 3.0
+    isolation_min_duration_seconds: 10.0
+    isolation_fill_gap_seconds: 0.2
     # Isolation means one or at most two mice separated from a meaningful
     # majority group. A random three-mouse component in a scattered cage is
     # not a group reference and must not suppress social/individual labels.
     # At least half of the visible mice must form the main group. Among mice
     # outside that group, only the strongest spatial outlier is allowed to
-    # enter the 3-second per-ID isolation confirmation.
+    # enter the 10-second per-ID isolation confirmation.
     isolation_min_main_cluster_fraction: 0.50
     huddle_min_cluster_size: 3
     huddle_min_cluster_fraction: 0.0

@@ -734,15 +734,18 @@ def _write_report(
         "`target_id_accuracy` asks whether a candidate for the labeled behavior contains the annotated IDs; "
         "group candidates may include additional IDs. `strict_target_id_accuracy` requires the labeled behavior "
         "to rank first within its layer and the predicted ID set to exactly equal the annotation. "
+        "Compatible Top-1 additionally credits Together versus Snout-head/Snout-rear contact for the exact same pair; "
+        "the two contact labels are never interchangeable. "
         "The primary target-ID metric is recall-like rather than conventional mutually-exclusive multiclass accuracy. "
         "After the hard accuracy constraint is met, macro F1 penalizes rules that fire on target IDs belonging to other labels.",
         "",
-        "| Split | Samples | Target-ID accuracy | Macro target-ID accuracy | Minimum behavior accuracy | Macro F1 | Strict Top-1 | Exact ID set | Prediction coverage | ID availability |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Split | Samples | Target-ID accuracy | Macro target-ID accuracy | Minimum behavior accuracy | Macro F1 | Strict Top-1 | Compatible Top-1 | Exact ID set | Prediction coverage | ID availability |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         f"| train | {training_metrics['n_samples']} | {training_metrics['target_id_accuracy']:.3f} | "
         f"{training_metrics['macro_target_id_accuracy']:.3f} | {minimum_behavior_accuracy(training_metrics):.3f} | "
         f"{training_metrics['macro_f1']:.3f} | "
         f"{training_metrics['strict_target_id_accuracy']:.3f} | "
+        f"{training_metrics['compatible_top1_accuracy']:.3f} | "
         f"{training_metrics['exact_target_id_set_accuracy']:.3f} | "
         f"{training_metrics['prediction_coverage']:.3f} | {training_metrics['target_id_availability_rate']:.3f} |",
     ]
@@ -752,6 +755,7 @@ def _write_report(
             f"| validation | {validation_metrics['n_samples']} | {validation_metrics['target_id_accuracy']:.3f} | "
             f"{validation_metrics['macro_target_id_accuracy']:.3f} | {minimum_behavior_accuracy(validation_metrics):.3f} | "
             f"{validation_metrics['macro_f1']:.3f} | {validation_metrics['strict_target_id_accuracy']:.3f} | "
+            f"{validation_metrics['compatible_top1_accuracy']:.3f} | "
             f"{validation_metrics['exact_target_id_set_accuracy']:.3f} | "
             f"{validation_metrics['prediction_coverage']:.3f} | {validation_metrics['target_id_availability_rate']:.3f} |"
         )
@@ -781,8 +785,8 @@ def _write_report(
                 "",
                 f"## {split_name} per behavior",
                 "",
-                "| Behavior | Support | Correct | Accuracy | Precision | F1 | Strict Top-1 | Strict accuracy | Exact ID set |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+                "| Behavior | Support | Correct | Accuracy | Precision | F1 | Strict Top-1 | Strict accuracy | Compatible Top-1 | Exact ID set |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for behavior, values in metrics["per_behavior"].items():
@@ -790,6 +794,7 @@ def _write_report(
                 f"| {behavior} | {values['support']} | {values['correct']} | {values['accuracy']:.3f} | "
                 f"{values['precision']:.3f} | {values['f1']:.3f} | "
                 f"{values['strict_top1_correct']} | {values['strict_top1_accuracy']:.3f} | "
+                f"{values['compatible_top1_correct']} ({values['compatible_top1_accuracy']:.3f}) | "
                 f"{values['exact_id_set_accuracy']:.3f} |"
             )
     lines.extend(

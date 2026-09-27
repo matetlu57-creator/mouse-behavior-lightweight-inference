@@ -197,6 +197,7 @@ class HeuristicParameters:
     isolation_distance_cm: float = 8.0
     # Isolation is a sustained spatial relation, not a one-frame outlier.
     isolation_min_duration_s: float = 10.0
+    isolation_max_gap_s: float = 0.2
     clustering_max_distance_cm: float = 30.0
     clustering_initial_max_distance_cm: float = 24.0
     clustering_min_nearest_neighbor_drop_cm: float = 2.0
@@ -711,6 +712,36 @@ def _durations_by_column(mask: np.ndarray, fps: float) -> np.ndarray:
         if starts.size:
             longest[column] = int(np.max(ends - starts))
     return longest.astype(float) / max(float(fps), 1e-6)
+
+
+def _isolation_cumulative_durations(
+    evidence_mask: np.ndarray,
+    unknown_mask: np.ndarray,
+    fps: float,
+    max_gap_s: float,
+) -> np.ndarray:
+    """Count observed isolation frames per episode across brief ID dropouts."""
+
+    evidence = np.asarray(evidence_mask, dtype=bool)
+    unknown = np.asarray(unknown_mask, dtype=bool)
+    if evidence.ndim != 2 or unknown.shape != evidence.shape:
+        raise ValueError("isolation evidence and unknown masks must have matching 2D shapes")
+    gap_limit = max(int(round(max_gap_s * fps)), 0)
+    best = np.zeros(evidence.shape[1], dtype=np.int64)
+    for column in range(evidence.shape[1]):
+        observed = evidence[:, column]
+        connected = observed.copy()
+        if gap_limit:
+            positions = np.flatnonzero(observed)
+            for before, after in zip(positions[:-1], positions[1:]):
+                start, end = int(before) + 1, int(after)
+                if 0 < end - start <= gap_limit and np.all(unknown[start:end, column]):
+                    connected[start:end] = True
+        padded = np.r_[False, connected, False].astype(np.int8)
+        changes = np.diff(padded)
+        for start, end in zip(np.flatnonzero(changes == 1), np.flatnonzero(changes == -1)):
+            best[column] = max(best[column], int(np.count_nonzero(observed[start:end])))
+    return best.astype(float) / max(float(fps), 1e-6)
 
 
 def _qualifying_score(duration: float, minimum_seconds: float, fps: float) -> float:
@@ -1235,7 +1266,10 @@ def predict_features(
         & (valid_count >= 2)[:, None]
         & (features.nearest_distance_cm >= parameters.isolation_distance_cm)
     )
-    isolation_durations = _durations_by_column(isolated, fps)
+    isolation_unknown = ~valid | (valid_count < 2)[:, None]
+    isolation_durations = _isolation_cumulative_durations(
+        isolated, isolation_unknown, fps, parameters.isolation_max_gap_s
+    )
 
     cluster_window = max(int(round(parameters.clustering_window_s * fps)), 1)
     cluster_pairs = pair_valid & (pair_distance < parameters.clustering_max_distance_cm)
@@ -1499,6 +1533,14 @@ def classify_target_ids(
     )
     predicted = ranked[0] if ranked and candidate_scores[ranked[0]] > 0.0 else None
     predicted_ids = candidate_target_ids.get(predicted, ()) if predicted is not None else ()
+    exact_ids_correct = tuple(sorted(predicted_ids)) == target_ids
+    strict_correct = predicted == target and exact_ids_correct
+    pair_contact_labels = {"nose_head_contact", "nose_tail_contact"}
+    dual_label_alternative = len(target_ids) == 2 and (
+        (target == "together" and predicted in pair_contact_labels)
+        or (target in pair_contact_labels and predicted == "together")
+    )
+    compatible_correct = bool(exact_ids_correct and (strict_correct or dual_label_alternative))
     return {
         "target_layer": (
             "individual"
@@ -1512,12 +1554,13 @@ def classify_target_ids(
         "candidate_scores": candidate_scores,
         "predicted_behavior": predicted,
         "predicted_target_ids": list(predicted_ids),
-        "exact_ids_correct": tuple(sorted(predicted_ids)) == target_ids,
+        "exact_ids_correct": exact_ids_correct,
         "target_hit": candidate_scores.get(target, 0.0) > 0.0,
         "behavior_correct": predicted == target,
         # A matching group label with additional visual IDs is not a joint
         # behavior-and-ID hit, even when it contains every annotated member.
-        "correct": predicted == target and tuple(sorted(predicted_ids)) == target_ids,
+        "correct": strict_correct,
+        "compatible_correct": compatible_correct,
     }
 
 
@@ -1540,6 +1583,7 @@ def evaluate_target_classifications(
             "support": 0,
             "correct": 0,
             "strict_top1_correct": 0,
+            "compatible_top1_correct": 0,
             "exact_id_set_correct": 0,
             "predicted": 0,
             "false_positive": 0,
@@ -1548,6 +1592,7 @@ def evaluate_target_classifications(
     }
     correct = 0
     strict_correct = 0
+    compatible_correct = 0
     covered = 0
     available = 0
     confusion: Counter[tuple[str, str]] = Counter()
@@ -1559,6 +1604,7 @@ def evaluate_target_classifications(
                 "support": 0,
                 "correct": 0,
                 "strict_top1_correct": 0,
+                "compatible_top1_correct": 0,
                 "exact_id_set_correct": 0,
                 "predicted": 0,
                 "false_positive": 0,
@@ -1576,6 +1622,7 @@ def evaluate_target_classifications(
                     "support": 0,
                     "correct": 0,
                     "strict_top1_correct": 0,
+                    "compatible_top1_correct": 0,
                     "exact_id_set_correct": 0,
                     "predicted": 0,
                     "false_positive": 0,
@@ -1593,6 +1640,9 @@ def evaluate_target_classifications(
         if result["correct"]:
             strict_correct += 1
             per_behavior[target]["strict_top1_correct"] += 1
+        if bool(result.get("compatible_correct", result["correct"])):
+            compatible_correct += 1
+            per_behavior[target]["compatible_top1_correct"] += 1
         if bool(result.get("exact_ids_correct", False)):
             per_behavior[target]["exact_id_set_correct"] += 1
     total = len(rows)
@@ -1632,6 +1682,7 @@ def evaluate_target_classifications(
             "recall": recall,
             "f1": f1,
             "strict_top1_accuracy": value["strict_top1_correct"] / value["support"],
+            "compatible_top1_accuracy": value["compatible_top1_correct"] / value["support"],
             "exact_id_set_accuracy": value["exact_id_set_correct"] / value["support"],
         }
     macro_f1 = float(
@@ -1644,6 +1695,8 @@ def evaluate_target_classifications(
         "target_id_accuracy": correct / total if total else 0.0,
         "macro_target_id_accuracy": macro_accuracy,
         "strict_target_id_accuracy": strict_correct / total if total else 0.0,
+        "strict_top1_accuracy": strict_correct / total if total else 0.0,
+        "compatible_top1_accuracy": compatible_correct / total if total else 0.0,
         "exact_target_id_set_accuracy": (
             sum(values["exact_id_set_correct"] for values in per_behavior.values()) / total
             if total
@@ -1834,6 +1887,7 @@ def config_seed_parameters(config: Mapping[str, Any]) -> HeuristicParameters:
         isolation_min_duration_s=max(
             float(group.get("isolation_min_duration_seconds", 10.0)), 10.0
         ),
+        isolation_max_gap_s=max(float(group.get("isolation_fill_gap_seconds", 0.2)), 0.0),
         clustering_max_distance_cm=float(clustering.get("max_neighbor_distance_cm", 30.0)),
         clustering_initial_max_distance_cm=float(
             clustering.get("initial_max_neighbor_distance_cm", 24.0)

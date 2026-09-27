@@ -84,6 +84,6 @@ def test_beiyi_profile_carries_document_duration_rules() -> None:
     assert group["huddle_body_length_cap_enabled"] is False
     assert group["huddle_resolve_attack_conflicts"] is True
     assert group["huddle_attack_independent_seconds"] == 2.0
-    assert group["isolation_min_duration_seconds"] == 3.0
+    assert group["isolation_min_duration_seconds"] == 10.0
     assert config["contact_detection"]["nose_head_min_duration_seconds"] == 1.0
     assert config["contact_detection"]["nose_tail_min_duration_seconds"] == 0.5
