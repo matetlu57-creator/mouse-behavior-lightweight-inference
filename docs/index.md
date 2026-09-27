@@ -19,6 +19,7 @@ docs/ 负责安装、配置、架构、算法、输出格式和开发流程。
 
 ~~~text
 src/mouse_behavior/   可复用 Python 模块和稳定接口
+  evaluation/         离线导出标注集调参和验证评分
 scripts/              CLI、批处理、验证和校准入口
 configs/              default、profiles 和 experiments
 tests/                unit、integration、regression、e2e
