@@ -144,6 +144,7 @@ def _sustained_member_ids_by_frame(
         for frame in range(len(sustained))
     ]
 
+
 def _huddle_core_indices(
     adjacency: np.ndarray,
     component: Iterable[int],
