@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Enforce Isolation for at least 10 seconds of observed distance evidence, bridging only brief ID dropouts (up to 0.2 seconds); missing frames do not count and observed-near frames break the episode.
+- Report strict and same-pair dual-label Top-1 together. Dual credit is limited to Together versus either contact label; head and rear contact remain distinct.
+
+
 All notable changes to this project are recorded here. The project follows
 semantic-versioning conventions for releases; Git branches and tags are the
 source of truth for historical versions.

@@ -87,18 +87,23 @@ def _sustained_member_ids_by_frame(
     mice: int,
     min_duration_frames: int,
     max_gap_frames: int,
+    eligible_gap_by_frame: np.ndarray | None = None,
 ) -> list[tuple[int, ...]]:
-    """Keep group members whose own state lasts long enough.
+    """Keep members with enough observed evidence, bridging only eligible gaps.
 
-    Group masks are evaluated at the video level, but membership can flicker
-    when a detector briefly swaps or drops one mouse. Unioning every member
-    seen during the whole event therefore labels a transient outlier as
-    isolated. This helper applies the isolation duration rule per logical ID,
-    bridges only the configured short gaps, and returns stable members for
-    downstream rendering/export.
+    Isolation may span a brief detector dropout for the same visual ID, but
+    neither missing frames nor measured-nearby frames count toward its minimum
+    duration. Other group behaviors retain their historical span semantics.
     """
 
     membership = np.zeros((max(int(frames), 0), max(int(mice), 0)), dtype=bool)
+    eligible_gap = (
+        np.ones_like(membership)
+        if eligible_gap_by_frame is None
+        else np.asarray(eligible_gap_by_frame, dtype=bool)
+    )
+    if eligible_gap.shape != membership.shape:
+        raise ValueError("eligible gaps must match the frame/identity shape")
     for frame, values in enumerate(members_by_frame):
         if frame >= len(membership):
             break
@@ -118,19 +123,27 @@ def _sustained_member_ids_by_frame(
         positions = np.flatnonzero(state)
         if positions.size > 1 and gap_limit:
             for left, right in zip(positions[:-1], positions[1:]):
-                if int(right - left - 1) <= gap_limit:
-                    state[int(left) : int(right) + 1] = True
+                gap_start, gap_end = int(left) + 1, int(right)
+                if (
+                    0 < gap_end - gap_start <= gap_limit
+                    and np.all(eligible_gap[gap_start:gap_end, mouse_id])
+                ):
+                    state[gap_start:gap_end] = True
         starts = np.flatnonzero(state & np.r_[True, ~state[:-1]])
         ends = np.flatnonzero(state & np.r_[~state[1:], True])
         for start, end in zip(starts, ends):
-            if int(end - start + 1) >= minimum:
+            observed_frames = (
+                int(end - start + 1)
+                if eligible_gap_by_frame is None
+                else int(np.count_nonzero(membership[start : end + 1, mouse_id]))
+            )
+            if observed_frames >= minimum:
                 sustained[int(start) : int(end) + 1, mouse_id] = True
 
     return [
         tuple(int(mouse_id) for mouse_id in np.flatnonzero(sustained[frame]))
         for frame in range(len(sustained))
     ]
-
 
 def _huddle_core_indices(
     adjacency: np.ndarray,
@@ -2412,13 +2425,8 @@ def _extended_individual_and_group_events(
     # prevents a short ID swap from changing ID 00 isolation into a false
     # ID 09 isolation label.
     isolation_min_duration_seconds = max(
-        float(
-            group_cfg.get(
-                "isolation_min_duration_seconds",
-                group_cfg.get("confirm_seconds", 0.30),
-            )
-        ),
-        0.0,
+        float(group_cfg.get("isolation_min_duration_seconds", 10.0)),
+        10.0,
     )
     isolation_members_by_frame = _sustained_member_ids_by_frame(
         raw_isolation_members_by_frame,
@@ -2429,9 +2437,20 @@ def _extended_individual_and_group_events(
             1,
         ),
         max_gap_frames=max(
-            int(round(float(group_cfg.get("fill_gap_seconds", 0.20)) * analysis_fps)),
+            int(
+                round(
+                    float(
+                        group_cfg.get(
+                            "isolation_fill_gap_seconds",
+                            group_cfg.get("fill_gap_seconds", 0.20),
+                        )
+                    )
+                    * analysis_fps
+                )
+            ),
             0,
         ),
+        eligible_gap_by_frame=~valid | (group_size < 2)[:, None],
     )
     isolation_actor_by_frame = np.full(frames, -1, dtype=int)
     for frame, members in enumerate(isolation_members_by_frame):
