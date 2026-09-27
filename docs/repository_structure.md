@@ -262,6 +262,22 @@ version 1.0 的完整视频导入包。它负责：
 logging_config.configure_logging() 配置级别和 handler。运行状态、阶段耗时和可
 恢复降级使用 logging，不在高频循环里使用 print() 输出调试信息。
 
+### 3.13 evaluation：离线导出标注集校准和评分
+
+位置：src/mouse_behavior/evaluation/
+
+- __init__.py：评估边界的模块说明；
+- exported_dataset.py：读取导出标注样本、构造轨迹特征、调优启发式参数、运行冻结参数
+  的验证推理并计算总体/逐行为指标。
+
+此包与视频推理的运行时行为模块分离。验证预测阶段不读取标签或人工目标 ID；只有在
+预测冻结后，评估器才按标注 ID 选取对应的个体/鼠对候选，或选取包含全部标注成员的群体
+候选，再计算目标条件化指标。因此 Strict Top-1 不是从全视频端到端发现目标 ID 的准确率；
+它要求候选 Top-1 行为正确且预测 ID 集合与标注集合完全相同。Compatible Top-1 仅对同一对
+ID 的 Together 与任一鼻部接触标签提供兼容分，鼻头与鼻尾标签不互换。逐样本 CSV 的
+`correct` 是目标行为规则命中标记，严格联合 Top-1 在 `strict_top1_correct`；双标签
+兼容率只在汇总指标中提供。
+
 ## 四、脚本和模块的区别
 
 scripts/ 只放命令行和批处理入口，算法实现应放在 src/mouse_behavior/。
@@ -281,6 +297,8 @@ scripts/ 只放命令行和批处理入口，算法实现应放在 src/mouse_beh
 - scripts/rerun_beiyi_lightweight_rules.py：重新运行轻量规则并生成验证结果；
 - scripts/validate_beiyi_extended_ethogram.py：检查扩展行为标签在样例中的出现；
 - scripts/calibrate_standard_behavior.py：使用标注事件做阈值或指标校准；
+- scripts/calibrate_exported_dataset.py：按 recording session 划分导出标注集，只用训练集调参，
+  冻结参数后对验证集轨迹运行预测并生成 Top-1 报告；
 - scripts/sweep_standard_behavior.py：参数扫描；
 - scripts/compare_parallel_fsm_validation.py：比较并行 FSM 验证输出。
 

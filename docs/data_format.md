@@ -70,3 +70,28 @@ execution_semantics。这些字段是运行溯源，不是未经验证的配置�
 
 北医样例汇总中的 video_coverage=1.0 是视频级覆盖指标。没有逐帧行为起止时间和
 参与者真值时，不能据此宣称算法已经达到某个 Precision、Recall、F1 或角色准确率。
+
+### 导出标注集校准产物
+
+`scripts/calibrate_exported_dataset.py` 默认将离线校准结果写入
+`outputs/exported_dataset_calibration/`，包括 `calibration_report.md`、训练/验证指标
+JSON、冻结参数 JSON、调参历史、划分清单和逐样本预测 CSV。冻结参数后的推理只使用
+轨迹、FPS 和轨迹 ID；标签及标注目标 ID 只在预测完成后用于评分。
+
+这些 Top-1 是**目标条件化**指标，不是从整段视频中端到端发现目标 ID 的准确率：
+评分器在预测后用标注 ID 选取对应个体/鼠对候选；群体行为则只在包含全部标注成员的
+候选群体中排序。严格命中要求 Top-1 行为与标签相同，且预测 ID 集合与标注集合完全
+一致。
+
+- `target_id_accuracy`：目标标签在标注 ID 对应候选中的规则命中率（目标行为分数大于
+  0）；群体候选允许包含额外成员，因此它不是严格 Top-1；
+- `strict_top1_accuracy`（总表兼容字段 `strict_target_id_accuracy`）：目标条件化的
+  行为与精确 ID 集合联合命中率；
+- `compatible_top1_accuracy`：在相同目标条件下，仅允许同一对 ID 的 Together 与
+  Snout-head 或 Snout-rear_contact 互认；鼻头接触和鼻尾接触之间不互认。
+
+指标 JSON 和报告提供总体及逐行为的 Strict/Compatible Top-1。逐样本 CSV 中，
+`correct` 表示目标行为规则有命中（对应 `target_id_hit`），不能直接当作 Top-1；
+`behavior_top1_correct` 只检查行为，`strict_top1_correct` 检查行为与 ID 联合命中，
+`exact_ids_correct` 单独检查 ID 集合。逐样本 CSV 不含双标签兼容命中列；兼容准确率
+只在汇总指标和报告中提供。
