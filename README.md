@@ -108,8 +108,10 @@ YOLO Pose 缓存时，应先使用上游缓存生成脚本完成预推理。
 本 profile 中统一按至少 1 秒确认：接近、回避、攻击和鼻头接触至少 1 秒；规范
 明确的时长仍按原定义执行，即奔跑至少 0.5 秒，行走、静止、一起、扎堆至少
 1 秒，追逐至少 2 秒，鼻尾接触至少 0.5 秒。孤立行为是当前项目的明确例外，
-按至少 3 秒确认。核心证据达不到门槛时不会进入正式行为 CSV、渲染或网站导出，
-即使显示区间因复核需要包含前后文，也不把前后文计入行为持续时间。
+按至少 10 秒累计直接观测证据确认。同一目标 ID 的未知或缺失状态最长 0.2 秒可
+用于续接孤立过程，但缺失帧不计入 10 秒；观测到目标与同伴距离低于孤立阈值时，
+本次过程终止。核心证据达不到门槛时不会进入正式行为 CSV、渲染或网站导出，即使
+显示区间因复核需要包含前后文，也不把前后文计入行为持续时间.
 
 攻击事件还有两个跨帧可靠性门：至少需要两个分析样本在短时间窗口内共同支持，
 并且核心证据至少持续 1 秒。单帧或不足 1 秒的攻击候选不会进入行为 CSV，也不会
@@ -227,6 +229,7 @@ tools/                    仓库检查、构建检查和输出比较
 - src/mouse_behavior/preprocessing/：笼界、几何、运动学和候选鼠对特征；
 - src/mouse_behavior/tracking/：Pose 缓存规范化和轻量轨迹匹配；
 - src/mouse_behavior/behavior/：标准证据、追逐/攻击 FSM、扩展行为和鼠对编排；
+- src/mouse_behavior/evaluation/：导出标注集特征、训练集调参、冻结验证和评估指标；
 - src/mouse_behavior/visualization/：渲染视频、行为标签和行为片段；
 - src/mouse_behavior/annotation_website_export.py：网站导入数据适配器；
 - scripts/：只做参数解析、批处理和验证，不复制算法实现。
@@ -274,6 +277,12 @@ mouse_ids。
 - tests/integration/：CSV、网站导出、渲染和仓库结构契约；
 - tests/regression/：历史输出、性能和最小旧实现夹具；
 - tests/e2e/：CLI 和端到端冒烟测试。
+
+导出标注集的离线校准由 `scripts/calibrate_exported_dataset.py` 启动，默认结果写入
+`outputs/exported_dataset_calibration/`。脚本只用训练集标签调参；参数冻结后，验证推理
+只读取轨迹、FPS 和轨迹 ID，标签仅在推理结束后用于评分。Strict Top-1 要求行为和目标
+ID 集合都完全正确；兼容 Top-1 仅对同一对目标 ID 的 Together 与 Snout-head/Snout-rear
+接触互认，Snout-head 与 Snout-rear 之间不互认。
 
 北医样例的视频级覆盖只能证明示例中出现了期望类别；持续时间审计还会优先读取
 事件的 `core_duration_s`，不把渲染前后文算作行为证据。由于目录是视频级分类而
