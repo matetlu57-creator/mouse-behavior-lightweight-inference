@@ -6,7 +6,7 @@ source of truth for historical versions.
 
 ## [Unreleased]
 
-- Enforce Isolation for at least 10 seconds of observed distance evidence, bridging only brief ID dropouts (up to 0.2 seconds); missing frames do not count and observed-near frames break the episode.
+- Enforce Isolation using at least 10 seconds of observed distance evidence; bridge only brief unknown/ID-dropout gaps (up to 0.2 seconds), never count missing frames, and let measured-near frames interrupt accumulation (short qualified event gaps may still be merged by event post-processing).
 - Report strict and same-pair dual-label Top-1 together. Dual credit is limited to Together versus either contact label; head and rear contact remain distinct.
 - Align the README, algorithm and data-format guides with the Isolation timing, dual-label metric and evaluation-module boundary.
 
