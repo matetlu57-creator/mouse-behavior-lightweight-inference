@@ -280,9 +280,10 @@ mouse_ids。
 
 导出标注集的离线校准由 `scripts/calibrate_exported_dataset.py` 启动，默认结果写入
 `outputs/exported_dataset_calibration/`。脚本只用训练集标签调参；参数冻结后，验证推理
-只读取轨迹、FPS 和轨迹 ID，标签仅在推理结束后用于评分。Strict Top-1 要求行为和目标
-ID 集合都完全正确；兼容 Top-1 仅对同一对目标 ID 的 Together 与 Snout-head/Snout-rear
-接触互认，Snout-head 与 Snout-rear 之间不互认。
+只读取轨迹、FPS 和轨迹 ID，标签及标注目标 ID 在预测完成后才用于评分。Strict/Compatible
+Top-1 是目标条件化指标：评分时按标注 ID 选取对应候选再排名，并非从全视频端到端发现
+目标 ID。Strict 要求行为和 ID 集合完全匹配；兼容 Top-1 仅允许同一对 ID 的 Together
+与 Snout-head/Snout-rear 接触互认，鼻头与鼻尾接触之间不互认。
 
 北医样例的视频级覆盖只能证明示例中出现了期望类别；持续时间审计还会优先读取
 事件的 `core_duration_s`，不把渲染前后文算作行为证据。由于目录是视频级分类而
