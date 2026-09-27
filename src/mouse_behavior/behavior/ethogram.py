@@ -124,9 +124,8 @@ def _sustained_member_ids_by_frame(
         if positions.size > 1 and gap_limit:
             for left, right in zip(positions[:-1], positions[1:]):
                 gap_start, gap_end = int(left) + 1, int(right)
-                if (
-                    0 < gap_end - gap_start <= gap_limit
-                    and np.all(eligible_gap[gap_start:gap_end, mouse_id])
+                if 0 < gap_end - gap_start <= gap_limit and np.all(
+                    eligible_gap[gap_start:gap_end, mouse_id]
                 ):
                     state[gap_start:gap_end] = True
         starts = np.flatnonzero(state & np.r_[True, ~state[:-1]])

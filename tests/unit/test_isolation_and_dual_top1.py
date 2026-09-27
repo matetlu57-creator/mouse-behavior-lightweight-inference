@@ -100,9 +100,7 @@ def test_dual_top1_accepts_together_contact_but_not_head_rear_substitution() -> 
 
     tail_prediction = {
         **prediction,
-        "pair_scores": {
-            "1,2": {**together_scores, "together": 0.0, "nose_tail_contact": 1.0}
-        },
+        "pair_scores": {"1,2": {**together_scores, "together": 0.0, "nose_tail_contact": 1.0}},
     }
     assert classify_target_ids(head_record, tail_prediction)["compatible_correct"] is False
 

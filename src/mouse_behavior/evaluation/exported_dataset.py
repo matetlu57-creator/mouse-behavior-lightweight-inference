@@ -1540,9 +1540,7 @@ def classify_target_ids(
         (target == "together" and predicted in pair_contact_labels)
         or (target in pair_contact_labels and predicted == "together")
     )
-    compatible_correct = bool(
-        exact_ids_correct and (strict_correct or dual_label_alternative)
-    )
+    compatible_correct = bool(exact_ids_correct and (strict_correct or dual_label_alternative))
     return {
         "target_layer": (
             "individual"
@@ -1889,9 +1887,7 @@ def config_seed_parameters(config: Mapping[str, Any]) -> HeuristicParameters:
         isolation_min_duration_s=max(
             float(group.get("isolation_min_duration_seconds", 10.0)), 10.0
         ),
-        isolation_max_gap_s=max(
-            float(group.get("isolation_fill_gap_seconds", 0.2)), 0.0
-        ),
+        isolation_max_gap_s=max(float(group.get("isolation_fill_gap_seconds", 0.2)), 0.0),
         clustering_max_distance_cm=float(clustering.get("max_neighbor_distance_cm", 30.0)),
         clustering_initial_max_distance_cm=float(
             clustering.get("initial_max_neighbor_distance_cm", 24.0)
