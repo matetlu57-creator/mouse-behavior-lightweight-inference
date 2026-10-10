@@ -93,8 +93,21 @@ def test_render_aligns_window_preserves_missing_id_and_refuses_overwrite(tmp_pat
         assert check.get(cv2.CAP_PROP_FRAME_COUNT) == 10
         ok, first = check.read()
         assert ok
-        # Raw crop must come from source frame 2 (intensity 20), not frame 0.
-        assert 15 < np.median(first[150:400, 800:1170]) < 25
+        # Compare decoded source frames instead of fixed luminance: lossy codec
+        # color conversion varies across FFmpeg/OpenCV builds.
+        source = cv2.VideoCapture(str(raw))
+        try:
+            source_medians = []
+            for frame_index in (0, 2):
+                source.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                source_ok, source_frame = source.read()
+                assert source_ok
+                source_medians.append(float(np.median(source_frame)))
+        finally:
+            source.release()
+        rendered_median = float(np.median(first[150:400, 800:1170]))
+        assert source_medians[1] - source_medians[0] >= 5
+        assert abs(rendered_median - source_medians[1]) < abs(rendered_median - source_medians[0])
     finally:
         check.release()
     row["clip"] = '</script><script>alert("x")</script>'
