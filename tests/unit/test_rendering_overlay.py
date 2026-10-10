@@ -7,6 +7,7 @@ from mouse_behavior.visualization.overlay import (
     build_panel_lines,
     draw_behavior_sidebar,
     focus_behavior_name_zh,
+    load_font,
     normalize_focus_behavior,
     normalize_contact_events,
     resolve_event_for_frame,
@@ -27,18 +28,22 @@ def _event(behavior: str, *, actor: int = -1, target: int = -1, pair: str = "") 
     }
 
 
+def test_font_loader_reuses_font_objects_across_video_frames() -> None:
+    assert load_font(None, 16) is load_font(None, 16)
+
+
 def test_social_event_is_scoped_to_participants_and_keeps_individual_behavior() -> None:
     selected, layer = select_display_events(
         [
-            _event("running", actor=0, pair="mouse_0"),
+            _event("locomotion", actor=0, pair="mouse_0"),
             _event("approach", actor=1, target=2, pair="1_2"),
         ]
     )
 
     assert layer == "mixed"
-    assert {event["behavior"] for event in selected} == {"approach", "running"}
+    assert {event["behavior"] for event in selected} == {"approach", "locomotion"}
     overlays = build_mouse_overlays(selected, layer, [0, 1, 2])
-    assert overlays[0].text == "ID 00｜个体：奔跑"
+    assert overlays[0].text == "ID 00｜个体：移动"
     assert overlays[1].text == "ID 01｜社交：主动接近"
     assert overlays[2].text == "ID 02｜社交：被接近"
     assert "按参与ID分别显示" in build_panel_lines(selected, layer)[0]
@@ -67,23 +72,23 @@ def test_group_event_shows_specific_behavior_for_known_members() -> None:
 def test_group_behavior_preserves_social_and_individual_for_huddle_members() -> None:
     selected, layer = select_display_events(
         [
-            _event("running", actor=0, pair="mouse_0"),
+            _event("locomotion", actor=0, pair="mouse_0"),
             _event("attack", actor=0, target=1, pair="0_1"),
             {
                 **_event("huddle", pair="group"),
                 "member_ids": [0, 1, 2],
             },
-            _event("walking", actor=3, pair="mouse_3"),
+            _event("locomotion", actor=3, pair="mouse_3"),
         ]
     )
 
     overlays = build_mouse_overlays(selected, layer, [0, 1, 2, 3])
 
     assert layer == "mixed"
-    assert overlays[0].text == "ID 00｜群体：扎堆｜社交：攻击｜个体：奔跑"
+    assert overlays[0].text == "ID 00｜群体：扎堆｜社交：攻击｜个体：移动"
     assert overlays[1].text == "ID 01｜群体：扎堆｜社交：被攻击"
     assert overlays[2].text == "ID 02｜群体：扎堆"
-    assert overlays[3].text == "ID 03｜个体：行走"
+    assert overlays[3].text == "ID 03｜个体：移动"
     assert any(event["behavior"] == "attack" for event in selected)
 
 
@@ -141,7 +146,8 @@ def test_approach_is_highest_social_display_priority() -> None:
     events = [
         _event("attack", actor=1, target=2, pair="1_2"),
         _event("chase", actor=1, target=2, pair="1_2"),
-        _event("avoidance", actor=2, target=1, pair="1_2"),
+        # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+        # _event("avoidance", actor=2, target=1, pair="1_2"),
         _event("together", pair="1_2"),
         _event("nose_head_contact", actor=1, target=2, pair="1_2"),
         _event("approach", actor=1, target=2, pair="1_2"),
@@ -191,12 +197,12 @@ def test_contact_events_are_adapted_to_directional_social_labels() -> None:
 
 
 def test_individual_behavior_is_visible_when_no_social_or_group_event_is_active() -> None:
-    selected, layer = select_display_events([_event("running", actor=0, pair="mouse_0")])
+    selected, layer = select_display_events([_event("locomotion", actor=0, pair="mouse_0")])
 
     overlays = build_mouse_overlays(selected, layer, [0, 1])
 
     assert layer == "individual"
-    assert overlays[0].text == "ID 00｜个体：奔跑"
+    assert overlays[0].text == "ID 00｜个体：移动"
     assert overlays[1].text == "ID 01｜仅追踪"
 
 
@@ -250,7 +256,8 @@ def test_render_focus_is_external_display_context_and_persistent_heading() -> No
     assert normalize_focus_behavior("追逐-被追逐") == "chase"
     assert normalize_focus_behavior("追逐/被追逐") == "chase"
     assert normalize_focus_behavior("attack") == "attack"
-    assert focus_behavior_name_zh("avoidance") == "回避/被回避"
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复：暂停标签回退为原值而非中文名
+    assert focus_behavior_name_zh("avoidance") == "avoidance"
     assert normalize_focus_behavior("接近-被接近") == "approach"
     assert normalize_focus_behavior("鼻头接触") == "nose_head_contact"
     assert normalize_focus_behavior("孤立行为") == "isolation"

@@ -419,6 +419,60 @@ def _boolean_spans(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return starts, ends
 
 
+def _bridge_attack_reacquisition_gap(
+    mask: np.ndarray,
+    pair_df: pd.DataFrame,
+    *,
+    fps: float,
+    attack_config: Mapping[str, Any],
+) -> np.ndarray:
+    """Bridge a missing-box interval only after a real attack seed.
+
+    The pair is fixed by the input pair dataframe; this helper never searches
+    for or assigns a replacement identity. The first observed pair frame after
+    a dropout must be nearby, otherwise the old attack bout remains closed.
+    """
+
+    result = np.asarray(mask, dtype=bool).reshape(-1).copy()
+    if not result.size or "bbox_pair_observed" not in pair_df:
+        return result
+    observed = _numeric_column(pair_df, "bbox_pair_observed", 0.0).astype(bool)
+    observed &= _numeric_column(pair_df, "bbox_pair_valid", 0.0).astype(bool)
+    distance = _numeric_column(
+        pair_df,
+        "bbox_center_distance_body_lengths",
+        np.inf,
+    )
+    max_gap_frames = max(
+        int(
+            round(max(float(attack_config.get("state_reacquisition_gap_seconds", 0.0)), 0.0) * fps)
+        ),
+        0,
+    )
+    max_distance = max(
+        float(attack_config.get("state_reacquisition_max_distance_body_lengths", 2.8)),
+        0.0,
+    )
+    if max_gap_frames == 0:
+        return result
+    starts, ends = _boolean_spans(result)
+    for end_value in ends:
+        end = int(end_value)
+        later_observed = np.flatnonzero(observed[end + 1 :])
+        if not later_observed.size:
+            continue
+        reacquired = end + 1 + int(later_observed[0])
+        missing_frames = reacquired - end - 1
+        if (
+            missing_frames > 0
+            and missing_frames <= max_gap_frames
+            and np.isfinite(distance[reacquired])
+            and distance[reacquired] <= max_distance
+        ):
+            result[end + 1 : reacquired + 1] = True
+    return result
+
+
 def _bbox_coherent_translation_bouts(
     pair_df: pd.DataFrame,
     attack_mask: np.ndarray,
@@ -865,7 +919,7 @@ def _contact_mask(
         _numeric_column(pair_df, "a_to_b_nose_body_distance_cm", np.inf),
         _numeric_column(pair_df, "b_to_a_nose_body_distance_cm", np.inf),
     )
-    generic_threshold = float(contact_config.get("distance_cm", 3.0))
+    generic_threshold = float(contact_config.get("distance_cm", 4.0125))
     head_threshold = float(contact_config.get("nose_head_distance_cm", generic_threshold))
     try:
         head_tolerance = max(
@@ -893,7 +947,7 @@ def _nose_head_contact_mask(
         _numeric_column(pair_df, "a_to_b_nose_head_distance_cm", np.inf),
         _numeric_column(pair_df, "b_to_a_nose_head_distance_cm", np.inf),
     )
-    generic_threshold = float(contact_config.get("distance_cm", 3.0))
+    generic_threshold = float(contact_config.get("distance_cm", 4.0125))
     head_threshold = float(contact_config.get("nose_head_distance_cm", generic_threshold))
     try:
         multiplier = max(
@@ -1136,11 +1190,11 @@ def build_semantic_pair_signals(
     min_similarity = float(chase_cfg.get("min_direction_similarity", 0.45))
     min_directional_score = float(chase_cfg.get("min_directional_score", 0.35))
     min_speed_gap = float(chase_cfg.get("min_actor_speed_gap_ratio", -0.15))
-    min_combined_speed = float(chase_cfg.get("min_combined_speed_cm_s", 3.0))
-    min_follow_actor_speed = float(chase_cfg.get("min_follow_actor_speed_cm_s", 3.0))
-    min_follow_target_speed = float(chase_cfg.get("min_follow_target_speed_cm_s", 1.0))
-    min_chase_actor_speed = float(chase_cfg.get("min_actor_speed_cm_s", 3.0))
-    min_chase_target_speed = float(chase_cfg.get("min_target_speed_cm_s", 1.0))
+    min_combined_speed = float(chase_cfg.get("min_combined_speed_cm_s", 4.0125))
+    min_follow_actor_speed = float(chase_cfg.get("min_follow_actor_speed_cm_s", 4.0125))
+    min_follow_target_speed = float(chase_cfg.get("min_follow_target_speed_cm_s", 1.3375))
+    min_chase_actor_speed = float(chase_cfg.get("min_actor_speed_cm_s", 4.0125))
+    min_chase_target_speed = float(chase_cfg.get("min_target_speed_cm_s", 1.3375))
     min_chase_target_speed_fraction = max(
         float(chase_cfg.get("min_target_speed_fraction_of_actor", 0.0)),
         0.0,
@@ -1577,6 +1631,9 @@ def build_semantic_pair_signals(
             min_fraction=float(avoidance_cfg.get("boundary_hold_min_fraction", 0.02)),
         )
         avoidance_mask |= boundary_recovery & valid
+    # [SUSPENDED-STEP3 2026-10-04] Avoiding 暂停（用户决策）：语义通道掩码强制置空，
+    # 既不再产出事件，也不再抑制 approach；恢复时删除下面一行。
+    avoidance_mask = np.zeros_like(avoidance_mask)
 
     chase_actor, chase_target = _stabilize_roles(
         chase_mask,
@@ -1683,7 +1740,7 @@ def build_semantic_pair_signals(
             ba["target_deformation"],
         ]
     )
-    min_raw_speed = float(attack_cfg.get("min_raw_speed_cm_s", 8.0))
+    min_raw_speed = float(attack_cfg.get("min_raw_speed_cm_s", 10.7))
     min_target_turn = float(attack_cfg.get("min_target_turn_angle_deg", 35.0))
     min_pose_deformation = float(attack_cfg.get("min_pose_deformation", 0.12))
     min_impact_pursuit = float(attack_cfg.get("min_impact_pursuit_alignment", 0.35))
@@ -1800,7 +1857,7 @@ def build_semantic_pair_signals(
         )
         impact_evidence = bbox_contact_dynamic | reaction_signature_ab | reaction_signature_ba
     elif require_action_signature and has_action_kinematics:
-        min_impact_acceleration = float(attack_cfg.get("min_impact_acceleration_cm_s2", 1500.0))
+        min_impact_acceleration = float(attack_cfg.get("min_impact_acceleration_cm_s2", 2006.25))
         lunge_ab = impact_ab & (np.abs(ab["actor_acceleration"]) >= min_impact_acceleration)
         lunge_ba = impact_ba & (np.abs(ba["actor_acceleration"]) >= min_impact_acceleration)
         reaction_fraction_window = max(
@@ -2135,6 +2192,15 @@ def build_semantic_pair_signals(
             )
         attack_mask = recovered
         attack_state_bridge = attack_mask & ~attack_seed
+
+    before_reacquisition_bridge = attack_mask.copy()
+    attack_mask = _bridge_attack_reacquisition_gap(
+        attack_mask,
+        pair_df,
+        fps=analysis_fps,
+        attack_config=attack_cfg,
+    )
+    attack_state_bridge |= attack_mask & ~before_reacquisition_bridge
 
     # Keep the parallel FSM evidence channels independent here.  ``attack_mask``
     # is still provisional: the temporal reliability gate or the group layer

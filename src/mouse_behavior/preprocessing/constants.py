@@ -7,9 +7,11 @@ PROJECT_NAME = "mouse-behavior-lightweight-inference"
 SOCIAL_BEHAVIORS = (
     "together",
     "approach",
-    "following",
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "following",
     "chase",
-    "avoidance",
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "avoidance",
     "attack",
     "nose_head_contact",
     "nose_tail_contact",
@@ -21,7 +23,7 @@ GROUP_BEHAVIORS = (
     "dispersal",
     "isolation",
 )
-INDIVIDUAL_BEHAVIORS = ("running", "walking", "stationary")
+INDIVIDUAL_BEHAVIORS = ("locomotion", "stationary", "grooming", "rearing")
 EXTENDED_BEHAVIORS = SOCIAL_BEHAVIORS + GROUP_BEHAVIORS + INDIVIDUAL_BEHAVIORS
 BEHAVIOR_LAYERS = {
     "individual": INDIVIDUAL_BEHAVIORS,
@@ -43,22 +45,28 @@ BEHAVIOR_DISPLAY_PRIORITY = {
     "approach": 190,
     "together": 180,
     "chase": 170,
-    "avoidance": 160,
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "avoidance": 160,
     "attack": 150,
     "nose_head_contact": 140,
     "nose_tail_contact": 130,
-    "following": 120,
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "following": 120,
     # Individual labels have no biological precedence over one another.
-    "running": 55,
-    "walking": 55,
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
+    "locomotion": 55,
     "stationary": 55,
+    "grooming": 55,
+    "rearing": 55,
 }
 BEHAVIOR_NAMES_ZH = {
     "together": "一起",
     "approach": "接近",
-    "following": "跟随",
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "following": "跟随",
     "chase": "追逐",
-    "avoidance": "回避",
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "avoidance": "回避",
     "attack": "攻击",
     "nose_head_contact": "鼻头接触",
     "nose_tail_contact": "鼻尾接触",
@@ -67,9 +75,11 @@ BEHAVIOR_NAMES_ZH = {
     "group_locomotion": "群体同步运动",
     "dispersal": "群体分散",
     "isolation": "孤立",
-    "running": "奔跑",
-    "walking": "行走",
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
+    "locomotion": "移动",
     "stationary": "静止",
+    "grooming": "理毛",
+    "rearing": "站立攀爬",
 }
 
 KP_NOSE = 0

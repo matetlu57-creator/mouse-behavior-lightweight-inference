@@ -1,1 +1,1 @@
-"""Regression and microbenchmark helpers for the optimized mouse pipeline."""
+"""Test package for stable intra-suite imports."""

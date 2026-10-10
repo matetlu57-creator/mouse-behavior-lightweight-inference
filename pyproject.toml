@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mouse-behavior-lightweight-inference"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reusable modules and CLI tools for mouse behavior analysis"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,15 +12,18 @@ dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
     "PyYAML>=6.0",
-    "scipy>=1.10",
     "opencv-python>=4.8",
     "Pillow>=10.0",
     "tqdm>=4.65",
+    "ultralytics==8.4.115",
 ]
+
+[project.optional-dependencies]
+calibration = ["scikit-learn>=1.5"]
+review = ["imageio-ffmpeg>=0.6,<0.7"]
 
 [project.scripts]
 mouse-behavior-lightweight = "mouse_behavior.lightweight_behavior_inference:main"
-mouse-behavior-full = "mouse_behavior.full_pipeline.high_recall:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -38,10 +41,6 @@ target-version = "py310"
 line-length = 100
 extend-exclude = [
     "tests/regression/fixtures/legacy_v138",
-    # The packaged full pipeline is a mechanically relocated, regression-tested
-    # legacy implementation.  Formatting it is a separate behavior-risking task.
-    "src/mouse_behavior/full_pipeline/extractor_base.py",
-    "src/mouse_behavior/full_pipeline/high_recall.py",
 ]
 
 [tool.ruff.lint]

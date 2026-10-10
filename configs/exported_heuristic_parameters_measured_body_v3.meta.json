@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "parameter_file": "exported_heuristic_parameters_measured_body_v3.json",
+  "parameters_sha256": "16b86a861ae1e79f343f7dcde572a0867db82fe461d75785f0c9b0ce2c3af630",
+  "status": "migrated_seed_requires_calibration",
+  "scale": {
+    "schema_version": 1,
+    "reference_body_length_cm": 10.7,
+    "reference_body_width_cm": 4.1467,
+    "migrated_from_body_length_cm": 8.0,
+    "migrated_from_body_width_cm": 3.0,
+    "migration_factor": 1.3375,
+    "status": "migrated_seed_requires_calibration"
+  },
+  "source": "current default.yaml and current dataclass defaults",
+  "semantics": "Static allows left/right head exploration; speed measures torso translation.",
+  "historical_parameter_files_preserved": {
+    "exported_heuristic_parameters.json": "c61c70992cd9cae47fc559a6a14fa491e58cadb279a521a0a45d803a304845d9",
+    "exported_heuristic_parameters_behavior_rules_v2.json": "cb8e3fa3b91d135f53092574598b1865fe9abc6bcc76e89960a08135ad18d68e"
+  },
+  "inactive_legacy_fields_not_used_for_gating": [
+    "together_max_individual_speed_cm_s",
+    "together_max_combined_speed_cm_s",
+    "huddle_max_mean_speed_cm_s",
+    "together_mean_max_speed_cm_s",
+    "approach_min_distance_drop_cm"
+  ]
+}

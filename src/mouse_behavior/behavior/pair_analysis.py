@@ -200,11 +200,13 @@ def _stitch_identity_bridged_events(
     # merge unrelated evasion candidates.  The Beiyi profile enables it after
     # validating the short rider/occlusion examples; generic profiles keep the
     # conservative historical default.
-    semantic = config.get("extended_behavior", {})
-    social = semantic.get("social", {}) if isinstance(semantic, Mapping) else {}
-    semantic_fsm = social.get("semantic_fsm", {}) if isinstance(social, Mapping) else {}
-    if isinstance(semantic_fsm, Mapping) and bool(semantic_fsm.get("bridge_avoidance", False)):
-        bridge_behaviors.add("avoidance")
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # semantic = config.get("extended_behavior", {})
+    # social = semantic.get("social", {}) if isinstance(semantic, Mapping) else {}
+    # semantic_fsm = social.get("semantic_fsm", {}) if isinstance(social, Mapping) else {}
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复：avoidance 桥接同步暂停
+    # if isinstance(semantic_fsm, Mapping) and bool(semantic_fsm.get("bridge_avoidance", False)):
+    #     bridge_behaviors.add("avoidance")
     candidates: list[int] = []
     for index, event in enumerate(events):
         recovery = str(event.get("event_recovery", ""))

@@ -43,11 +43,11 @@ REQUIRED_PATHS = (
     "SECURITY.md",
     "pyproject.toml",
     "src/mouse_behavior",
+    "src/mouse_behavior/identity",
+    "src/mouse_behavior/tracking",
     "scripts",
     "scripts/run_quality.py",
-    "scripts/run_full_behavior_pipeline.py",
     "scripts/validate_repository.py",
-    "src/mouse_behavior/full_pipeline",
     "tests",
     "tests/unit",
     "tests/integration",
@@ -102,9 +102,19 @@ TEXT_SUFFIXES = {
 }
 
 
-def tracked_files(root: Path) -> list[str]:
+def repository_files(root: Path) -> list[str]:
+    """Return tracked and not-ignored untracked files from the working tree."""
+
     result = subprocess.run(
-        ["git", "-C", str(root), "ls-files"],
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -188,7 +198,7 @@ def check(root: Path) -> list[str]:
     for relative in REQUIRED_PATHS:
         if not (root / relative).exists():
             errors.append(f"missing required path: {relative}")
-    for relative in tracked_files(root):
+    for relative in repository_files(root):
         path = Path(relative)
         absolute = root / path
         allowed_lfs_artifact = is_allowed_lfs_artifact(root, relative, absolute)

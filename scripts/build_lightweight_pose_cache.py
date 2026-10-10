@@ -22,13 +22,23 @@ def main() -> int:
         default=REPO_ROOT / "weights" / "pose" / "best.pt",
         help="七关键点 YOLO Pose 权重；不使用 OBB",
     )
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="兼容参数；跟踪为保证状态连续始终逐帧提交",
+    )
     parser.add_argument("--chunk-frames", type=int, default=300)
     parser.add_argument("--imgsz", type=int, default=768)
     parser.add_argument("--conf", type=float, default=0.15)
     parser.add_argument("--iou", type=float, default=0.50)
     parser.add_argument("--max-det", type=int, default=100)
     parser.add_argument("--device", default="0")
+    parser.add_argument(
+        "--tracker",
+        default="bytetrack.yaml",
+        help="Ultralytics 内置或自定义 tracker YAML",
+    )
     parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
@@ -53,6 +63,7 @@ def main() -> int:
         iou=args.iou,
         max_det=args.max_det,
         device=args.device,
+        tracker=args.tracker,
     )
     return 0
 

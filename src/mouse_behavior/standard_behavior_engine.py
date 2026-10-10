@@ -24,6 +24,11 @@ from typing import Any, Dict, Mapping, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from .preprocessing.scale_resolution import (
+    default_scale_config,
+    resolve_reference_body_cm,
+    scale_block_of,
+)
 from .behavior.standard_evidence import (
     _PROVIDER_SUFFIXES,
     _EVIDENCE_BASE_COLUMNS,
@@ -124,8 +129,8 @@ def apply_standard_behavior_engine(
     response_seconds = float(config.get("features", {}).get("response_lookback_seconds", 0.30))
     common_engine = dict(engine_cfg)
     common_engine["response_lookback_seconds"] = response_seconds
-    common_engine["reference_body_length_cm"] = float(
-        config.get("scale", {}).get("assumed_mouse_body_length_cm", 8.0)
+    common_engine["reference_body_length_cm"] = resolve_reference_body_cm(
+        scale_block_of(config) or default_scale_config()
     )
 
     row_count = len(output)
@@ -138,9 +143,9 @@ def apply_standard_behavior_engine(
             "radius_cm",
             max(
                 float(config["chase"]["weak"]["max_distance_cm"]),
-                float(config["attack"]["weak"].get("body_center_contact_distance_cm", 6.0)),
+                float(config["attack"]["weak"].get("body_center_contact_distance_cm", 8.025)),
             )
-            + float(interaction_cfg.get("buffer_cm", 5.0)),
+            + float(interaction_cfg.get("buffer_cm", 6.6875)),
         )
     )
 
@@ -442,7 +447,7 @@ def apply_standard_behavior_engine(
         role_conf = np.where(attack_dominates, attack_role_conf, chase_role_conf)
 
         contact_types = np.full(row_count, "", dtype=object)
-        contact_threshold = float(attack_cfg.get("contact_distance_cm", 3.0))
+        contact_threshold = float(attack_cfg.get("contact_distance_cm", 4.0125))
         head_contact = compute_row_mask & (head_distance <= contact_threshold)
         tail_contact = compute_row_mask & (tail_distance <= contact_threshold)
         body_contact = compute_row_mask & (body_distance <= contact_threshold)

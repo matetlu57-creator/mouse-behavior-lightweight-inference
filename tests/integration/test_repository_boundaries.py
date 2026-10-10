@@ -8,7 +8,7 @@ from mouse_behavior.io.paths import RunDirectories
 
 
 def test_version_is_available_from_one_canonical_module() -> None:
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.2.0"
 
 
 def test_event_schema_reports_missing_columns() -> None:

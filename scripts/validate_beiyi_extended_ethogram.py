@@ -43,14 +43,18 @@ LABELS = {
     ("社交行为", "1.一起"): "together",
     ("社交行为", "2.接近-被接近"): "approach",
     ("社交行为", "3.追逐-被追逐"): "chase",
-    ("社交行为", "4.回避-被回避"): "avoidance",
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # ("社交行为", "4.回避-被回避"): "avoidance",
     ("社交行为", "5.攻击行为"): "attack",
     ("社交行为", "6.鼻头接触"): "nose_head",
     ("社交行为", "7.鼻尾接触"): "nose_tail",
     ("群体行为", "1.扎堆行为"): "huddle",
     ("群体行为", "2.孤立行为"): "isolation",
-    ("个体行为", "1.奔跑"): "running",
-    ("个体行为", "2.行走"): "walking",
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
+    # The Beiyi sheet still ships two separate individual-motion directories; both
+    # now resolve to the single merged canonical label.
+    ("个体行为", "1.奔跑"): "locomotion",
+    ("个体行为", "2.行走"): "locomotion",
     ("个体行为", "3.静止"): "stationary",
 }
 
@@ -61,13 +65,14 @@ UNSPECIFIED_MIN_DURATION_SECONDS = 1.0
 # applies the project's conservative one-second minimum policy.  Isolation is
 # the explicit project override for the current Beiyi examples: three seconds.
 DURATION_RULES_SECONDS: dict[str, float | None] = {
-    "running": 0.5,
-    "walking": 1.0,
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion: merged floor equals locomotion_min_duration_seconds.
+    "locomotion": 0.5,
     "stationary": 1.0,
     "together": 1.0,
     "approach": UNSPECIFIED_MIN_DURATION_SECONDS,
     "chase": 2.0,
-    "avoidance": UNSPECIFIED_MIN_DURATION_SECONDS,
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "avoidance": UNSPECIFIED_MIN_DURATION_SECONDS,
     "attack": UNSPECIFIED_MIN_DURATION_SECONDS,
     "nose_head": UNSPECIFIED_MIN_DURATION_SECONDS,
     "nose_tail": 0.5,

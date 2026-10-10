@@ -1,1 +1,1 @@
-"""Isolated algorithm and utility tests."""
+"""Test package for stable intra-suite imports."""
