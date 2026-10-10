@@ -1,0 +1,5 @@
+start_frame,end_frame,visual_track_id,animal_id,identity_confidence
+0,249,17,RFID-A,0.99
+0,249,23,RFID-B,0.98
+250,600,31,RFID-A,0.97
+250,600,23,RFID-B,0.98

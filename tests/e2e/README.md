@@ -1,5 +1,5 @@
-# End-to-end tests
+# End-to-end fixtures
 
-This layer covers user-visible command entry points without requiring private
-videos, model weights, or detector caches. Real-data scientific validation is
-recorded separately under `docs/validation/`.
+Real video plus RFID end-to-end validation belongs here once an experiment-specific,
+redistributable sample is supplied. Unit and integration tests use synthetic tracklets
+and do not claim hardware-level mTrack accuracy.

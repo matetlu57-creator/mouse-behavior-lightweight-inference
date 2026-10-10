@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 
 from .. import adaptive_arena_boundary as arena_boundary
+from ..identity.labels import identity_label
+from ..identity.mtrack import load_identity_map
 from ..preprocessing.constants import (
     BEHAVIOR_NAMES_ZH,
     EXTENDED_BEHAVIORS,
@@ -20,7 +22,7 @@ from ..preprocessing.constants import (
     SKELETON_EDGES,
 )
 from ..preprocessing.pair_features import _boolean_runs
-from ..tracking.cache import _cache_total_frames, _track_cache
+from ..tracking.cache import _cache_total_frames, load_trajectory_cache
 from ..io.csv import _write_csv
 from .overlay import (
     BoxLabel,
@@ -52,6 +54,7 @@ def render_behavior_video(
     contact_events_path: Path | None = None,
     font_path: Path | None = None,
     focus_behavior: str | None = None,
+    identity_map_path: Path | None = None,
 ) -> Path:
     """Render exactly one annotated MP4 for one source video.
 
@@ -84,51 +87,24 @@ def render_behavior_video(
             require_video_match=True,
         )
         arena_polygon = np.asarray(boundary.polygon, dtype=np.float64)
-    bbox_occlusion_max_gap_frames = 0
-    initial_min_detection_score = 0.0
-    recent_assignment_gate = 3.2
-    reacquisition_assignment_gate = 5.0
-    reacquisition_after_missed_frames = 3
     metadata_path = events_path.parent / "lightweight_analysis_metadata.json"
     if metadata_path.exists():
         try:
             with metadata_path.open("r", encoding="utf-8") as handle:
                 metadata = json.load(handle)
-            tracking_metadata = metadata.get("tracking", {})
-            if isinstance(tracking_metadata, dict):
-                bbox_occlusion_max_gap_frames = max(
-                    int(tracking_metadata.get("bbox_occlusion_max_gap_frames", 0)),
-                    0,
-                )
-                initial_min_detection_score = max(
-                    float(tracking_metadata.get("initial_min_detection_score", 0.0)),
-                    0.0,
-                )
-                recent_assignment_gate = max(
-                    float(tracking_metadata.get("recent_assignment_gate", 3.2)),
-                    0.1,
-                )
-                reacquisition_assignment_gate = max(
-                    float(tracking_metadata.get("reacquisition_assignment_gate", 5.0)),
-                    0.1,
-                )
-                reacquisition_after_missed_frames = max(
-                    int(tracking_metadata.get("reacquisition_after_missed_frames", 3)),
-                    0,
-                )
+            if identity_map_path is None and metadata.get("identity_map"):
+                identity_map_path = Path(str(metadata["identity_map"]))
         except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
-            LOGGER.warning("[render] unable to read tracking settings: %s", metadata_path)
-    tracks, tracking_stats = _track_cache(
+            LOGGER.warning("[render] unable to read identity settings: %s", metadata_path)
+    identity_map = load_identity_map(identity_map_path) if identity_map_path is not None else None
+    tracks, _tracking_stats = load_trajectory_cache(
         cache_dir,
         total_cache_frames,
         expected_mice,
+        identity_map=identity_map,
         arena_polygon=arena_polygon,
-        bbox_occlusion_max_gap_frames=bbox_occlusion_max_gap_frames,
-        initial_min_detection_score=initial_min_detection_score,
-        recent_assignment_gate=recent_assignment_gate,
-        reacquisition_assignment_gate=reacquisition_assignment_gate,
-        reacquisition_after_missed_frames=reacquisition_after_missed_frames,
     )
+    identity_labels = tuple(str(value) for value in tracks["identity_labels"])
 
     event_frame_map: list[list[dict[str, Any]]] = [[] for _ in range(total_cache_frames)]
     if not events_path.exists():
@@ -215,6 +191,17 @@ def render_behavior_video(
                 valid_ids,
                 focus_behavior=normalized_focus,
             )
+            for logical_id, overlay in tuple(mouse_overlays.items()):
+                display_identity = identity_label(logical_id, identity_labels)
+                if display_identity is None:
+                    continue
+                mouse_overlays[logical_id] = MouseOverlay(
+                    text=overlay.text.replace(
+                        format_mouse_id(logical_id), display_identity, 1
+                    ),
+                    color_bgr=overlay.color_bgr,
+                    priority=overlay.priority,
+                )
             box_labels: list[BoxLabel] = []
 
             for logical_id in range(expected_mice):
@@ -236,7 +223,8 @@ def render_behavior_video(
                 overlay = mouse_overlays.get(
                     logical_id,
                     MouseOverlay(
-                        text=f"{format_mouse_id(logical_id)}｜仅追踪",
+                        text=identity_label(logical_id, identity_labels)
+                        or format_mouse_id(logical_id),
                         color_bgr=(170, 170, 170),
                         priority=(0, 0.0),
                     ),

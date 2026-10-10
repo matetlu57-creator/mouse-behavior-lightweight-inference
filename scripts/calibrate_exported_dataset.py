@@ -63,10 +63,12 @@ TUNING_GRID: dict[str, tuple[float, ...]] = {
     # and distance thresholds observationally equivalent during refinement.
     "stationary_min_duration_s": (1.0,),
     "stationary_max_speed_cm_s": (2.5, 4.0, 6.0, 8.0, 12.0, 20.0),
-    "walking_min_duration_s": (1.0,),
-    "walking_max_stop_gap_s": (0.0, 0.15, 0.25, 0.5, 1.0),
-    "walking_min_speed_cm_s": (0.0, 0.5, 1.0, 2.0, 4.0),
-    "walking_max_speed_cm_s": (18.0, 24.0, 40.0, 80.0, 160.0),
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
+    # Locomotion is the negative definition of Static (speed above the static
+    # ceiling), so the former walking/running speed band no longer exists and
+    # only the duration floor plus the stop-gap bridge stay tunable.
+    "locomotion_min_duration_s": (0.5,),
+    "locomotion_stop_gap_s": (0.0, 0.15, 0.25, 0.5, 1.0),
     "together_max_distance_cm": (6.0, 8.0, 12.0, 20.0, 40.0),
     "together_max_individual_speed_cm_s": (8.0, 10.0, 12.0),
     "pair_min_duration_s": (0.0, 0.05, 0.1, 0.2, 0.4),
@@ -133,6 +135,19 @@ TWO_COLLECTIVE_RULE_GRID: dict[str, tuple[float, ...]] = {
     "clustering_initial_max_distance_cm": (16.0, 20.0, 24.0, 28.0),
     "clustering_min_mean_speed_cm_s": (2.0, 3.0, 4.0),
     "clustering_min_moving_member_fraction": (1.0 / 3.0, 0.5, 2.0 / 3.0),
+    # New body-scale formation and compact-steady-state features. These
+    # settings are searched on training clips only; the protected-result gate
+    # rejects any candidate that changes non-Huddling/Clustering predictions.
+    "social_nnd_drop_bw_min": (0.10, 0.20, 0.35, 0.50),
+    "social_radius_drop_bw_min": (0.10, 0.20, 0.35, 0.50),
+    "social_inward_fraction_min": (0.35, 0.45, 0.55, 0.67),
+    "social_active_fraction_min": (0.25, 0.35, 0.50, 0.67),
+    "huddle_nnd_bw_max": (1.50, 2.00, 2.50, 3.00),
+    "huddle_radius_bw_max": (2.00, 2.50, 3.00, 4.00),
+    "huddle_low_motion_fraction_min": (0.50, 0.60, 0.70, 0.80),
+    "huddle_contact_density_min": (0.10, 0.25, 0.40, 0.55),
+    "huddle_proximity_density_min": (0.40, 0.60, 0.75, 0.90),
+    "huddle_graph_stability_min": (0.30, 0.50, 0.70, 0.85),
 }
 
 GROUP_RULE_BEHAVIORS = {"huddle", "isolation", "social_clustering"}
@@ -197,6 +212,7 @@ def _prediction_rows_loaded(
     parameters: HeuristicParameters,
     *,
     split: str,
+    collective_debug_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, (record, features) in enumerate(loaded, start=1):
@@ -204,6 +220,19 @@ def _prediction_rows_loaded(
         # annotation mouse_ids are passed to predict_features.
         prediction = predict_features(features, parameters)
         target_result = classify_target_ids(record, prediction)
+        if collective_debug_rows is not None:
+            for debug in prediction.get("collective_feature_debug", ()):
+                collective_debug_rows.append(
+                    {
+                        "split": split,
+                        "sample_id": record.sample_id,
+                        "label_behavior_after_prediction": record.canonical_behavior,
+                        "label_target_ids_after_prediction": ",".join(
+                            str(value) for value in record.mouse_ids
+                        ),
+                        **debug,
+                    }
+                )
         rows.append(
             {
                 "split": split,
@@ -222,6 +251,9 @@ def _prediction_rows_loaded(
                 "behavior_top1_correct": bool(target_result["behavior_correct"]),
                 "correct": bool(target_result["target_hit"]),
                 "strict_top1_correct": bool(target_result["correct"]),
+                "compatible_top1_correct": bool(target_result["compatible_correct"]),
+                "compatible_labels": ",".join(target_result["compatible_labels"]),
+                "compatible_credit": target_result["compatible_credit"],
                 "exact_ids_correct": bool(target_result["exact_ids_correct"]),
                 "candidate_scores": json.dumps(
                     target_result["candidate_scores"], ensure_ascii=False, sort_keys=True
@@ -274,8 +306,7 @@ def _bootstrap_candidates(initial: HeuristicParameters) -> list[HeuristicParamet
     moderate = replace(
         initial,
         stationary_max_speed_cm_s=8.0,
-        walking_min_speed_cm_s=0.5,
-        walking_max_speed_cm_s=80.0,
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
         together_max_distance_cm=20.0,
         together_max_combined_speed_cm_s=100.0,
         pair_max_distance_cm=40.0,
@@ -289,13 +320,13 @@ def _bootstrap_candidates(initial: HeuristicParameters) -> list[HeuristicParamet
         huddle_max_gap_s=3.0,
         attack_endpoint_distance_cm=12.0,
         attack_reacquisition_max_gap_s=5.0,
-        walking_max_stop_gap_s=0.5,
+        locomotion_stop_gap_s=0.5,
         isolation_distance_cm=35.0,
         isolation_min_duration_s=10.0,
         clustering_max_distance_cm=30.0,
         clustering_min_nearest_neighbor_drop_cm=1.0,
         stationary_min_duration_s=1.0,
-        walking_min_duration_s=1.0,
+        locomotion_min_duration_s=0.5,
         pair_min_duration_s=0.05,
         group_min_duration_s=0.1,
         approach_window_s=0.1,
@@ -306,8 +337,7 @@ def _bootstrap_candidates(initial: HeuristicParameters) -> list[HeuristicParamet
     sensitive = replace(
         moderate,
         stationary_max_speed_cm_s=8.0,
-        walking_min_speed_cm_s=2.0,
-        walking_max_speed_cm_s=40.0,
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
         together_max_distance_cm=40.0,
         together_max_combined_speed_cm_s=100.0,
         pair_max_distance_cm=40.0,
@@ -321,13 +351,13 @@ def _bootstrap_candidates(initial: HeuristicParameters) -> list[HeuristicParamet
         huddle_max_gap_s=5.0,
         attack_endpoint_distance_cm=16.0,
         attack_reacquisition_max_gap_s=8.0,
-        walking_max_stop_gap_s=0.5,
+        locomotion_stop_gap_s=0.5,
         isolation_distance_cm=30.0,
         isolation_min_duration_s=10.0,
         clustering_max_distance_cm=40.0,
         clustering_min_nearest_neighbor_drop_cm=0.5,
         stationary_min_duration_s=1.0,
-        walking_min_duration_s=1.0,
+        locomotion_min_duration_s=0.5,
         pair_min_duration_s=0.0,
         group_min_duration_s=0.0,
         approach_window_s=0.1,
@@ -419,7 +449,7 @@ def _tune_group_rules(
     seed = replace(
         initial,
         stationary_min_duration_s=max(initial.stationary_min_duration_s, 1.0),
-        walking_min_duration_s=max(initial.walking_min_duration_s, 1.0),
+        locomotion_min_duration_s=max(initial.locomotion_min_duration_s, 0.5),
         huddle_min_duration_s=max(initial.huddle_min_duration_s, 1.0),
         isolation_min_duration_s=max(initial.isolation_min_duration_s, 10.0),
         clustering_min_duration_s=max(initial.clustering_min_duration_s, 5.0),
@@ -702,6 +732,7 @@ def _write_report(
     target_train_accuracy: float,
     target_validation_accuracy: float,
     validation_was_previously_observed: bool,
+    max_passes: int,
 ) -> None:
     training_met = training_target_reached(training_metrics, target_train_accuracy)
     lines = [
@@ -715,7 +746,11 @@ def _write_report(
         f"- Validation samples: {manifest['split']['validation_count']} ({manifest['split']['validation_fraction']:.3f})",
         f"- Training acceptance: aggregate and every-behavior target-ID accuracy >= {target_train_accuracy:.1%}.",
         f"- Training acceptance result: {'PASS' if training_met else 'FAIL'}.",
-        "- Parameter search used training samples only; validation parameters were frozen before evaluation.",
+        (
+            "- Parameter search used training samples only; validation parameters were frozen before evaluation."
+            if max_passes > 0
+            else "- No parameter search was run (max passes = 0); the supplied parameters were frozen before validation."
+        ),
         f"- At most {max_tracks} most persistent visual IDs were evaluated per clip; this run retained every annotated validation target ID.",
         "- Blind inference receives only tracks, clip FPS, and the IDs present in tracks.json; labels and annotated target IDs are joined only after prediction.",
         "- Scoring is target-conditioned only after trajectory-only predictions are frozen: individual labels rank the target ID's individual behaviors, pair labels rank that exact pair, and group labels rank one event candidate containing every annotated member ID.",
@@ -734,8 +769,10 @@ def _write_report(
         "`target_id_accuracy` asks whether a candidate for the labeled behavior contains the annotated IDs; "
         "group candidates may include additional IDs. `strict_target_id_accuracy` requires the labeled behavior "
         "to rank first within its layer and the predicted ID set to exactly equal the annotation. "
-        "Compatible Top-1 additionally credits Together versus Snout-head/Snout-rear contact for the exact same pair; "
-        "the two contact labels are never interchangeable. "
+        "`compatible_top1_accuracy` additionally accepts only Together versus nose-head or "
+        "nose-rear contact on the exact same visual-ID pair. A predicted contact has already "
+        "passed its cumulative 0.5 s gate; a simultaneous Together bout is not required. "
+        "This scoring allowance never replaces strict Top-1. "
         "The primary target-ID metric is recall-like rather than conventional mutually-exclusive multiclass accuracy. "
         "After the hard accuracy constraint is met, macro F1 penalizes rules that fire on target IDs belonging to other labels.",
         "",
@@ -794,7 +831,7 @@ def _write_report(
                 f"| {behavior} | {values['support']} | {values['correct']} | {values['accuracy']:.3f} | "
                 f"{values['precision']:.3f} | {values['f1']:.3f} | "
                 f"{values['strict_top1_correct']} | {values['strict_top1_accuracy']:.3f} | "
-                f"{values['compatible_top1_correct']} ({values['compatible_top1_accuracy']:.3f}) | "
+                f"{values['compatible_top1_accuracy']:.3f} | "
                 f"{values['exact_id_set_accuracy']:.3f} |"
             )
     lines.extend(
@@ -865,6 +902,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional subset of the two-group parameter grid for a focused pass.",
     )
     parser.add_argument(
+        "--collective-feature-rules",
+        action="store_true",
+        help="Enable shared CLU/HUD handcrafted features before two-group-only training.",
+    )
+    parser.add_argument(
         "--validation-sessions",
         default=None,
         help="Comma-separated source session filenames; omit to use the audited 4-session holdout.",
@@ -889,6 +931,8 @@ def main() -> int:
         raise ValueError("--max-passes cannot be negative")
     if args.two_group_parameters and not args.two_group_only:
         raise ValueError("--two-group-parameters requires --two-group-only")
+    if args.collective_feature_rules and not args.two_group_only:
+        raise ValueError("--collective-feature-rules requires --two-group-only")
     for name, value in (
         ("--target-train-accuracy", args.target_train_accuracy),
         ("--target-validation-accuracy", args.target_validation_accuracy),
@@ -927,6 +971,8 @@ def main() -> int:
     config = load_config(args.config)
     config_seed = config_seed_parameters(config)
     seed = _load_initial_parameters(args.initial_parameters, config_seed)
+    if args.collective_feature_rules:
+        seed = replace(seed, collective_feature_rules_enabled=1.0)
     train_cache = _load_feature_cache(train_records, max_tracks=args.max_tracks)
     history: list[dict[str, Any]] = []
     if args.two_group_only:
@@ -1042,10 +1088,17 @@ def main() -> int:
     (args.output_dir / "training_metrics.json").write_text(
         json.dumps(training_metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    collective_debug_rows: list[dict[str, Any]] = []
     _write_csv(
         args.output_dir / "train_predictions.csv",
-        _prediction_rows_loaded(train_cache, tuned, split="train"),
+        _prediction_rows_loaded(
+            train_cache,
+            tuned,
+            split="train",
+            collective_debug_rows=collective_debug_rows,
+        ),
     )
+    _write_csv(args.output_dir / "feature_debug.csv", collective_debug_rows)
     training_met = training_target_reached(training_metrics, args.target_train_accuracy)
     if not training_met and not (args.group_rules_only or args.two_group_only):
         _write_report(
@@ -1060,6 +1113,7 @@ def main() -> int:
             target_train_accuracy=args.target_train_accuracy,
             target_validation_accuracy=args.target_validation_accuracy,
             validation_was_previously_observed=args.validation_was_previously_observed,
+            max_passes=args.max_passes,
         )
         LOGGER.error(
             "training gate failed: overall=%.4f minimum_behavior=%.4f; validation was not run",
@@ -1081,8 +1135,14 @@ def main() -> int:
     )
     _write_csv(
         args.output_dir / "validation_predictions.csv",
-        _prediction_rows_loaded(validation_cache, tuned, split="validation"),
+        _prediction_rows_loaded(
+            validation_cache,
+            tuned,
+            split="validation",
+            collective_debug_rows=collective_debug_rows,
+        ),
     )
+    _write_csv(args.output_dir / "feature_debug.csv", collective_debug_rows)
     _write_report(
         args.output_dir / "calibration_report.md",
         manifest=manifest,
@@ -1095,6 +1155,7 @@ def main() -> int:
         target_train_accuracy=args.target_train_accuracy,
         target_validation_accuracy=args.target_validation_accuracy,
         validation_was_previously_observed=args.validation_was_previously_observed,
+        max_passes=args.max_passes,
     )
     LOGGER.info("training metrics: %s", json.dumps(training_metrics, ensure_ascii=False))
     LOGGER.info("validation metrics: %s", json.dumps(validation_metrics, ensure_ascii=False))

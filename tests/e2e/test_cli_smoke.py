@@ -5,7 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -27,12 +26,6 @@ def test_package_and_script_help_are_runnable() -> None:
             str(ROOT / "scripts" / "run_lightweight_behavior_inference.py"),
             "--help",
         ],
-        [sys.executable, "-m", "mouse_behavior.full_pipeline", "--help"],
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "run_full_behavior_pipeline.py"),
-            "--help",
-        ],
     )
     for command in commands:
         completed = subprocess.run(
@@ -48,26 +41,3 @@ def test_package_and_script_help_are_runnable() -> None:
         )
         assert completed.returncode == 0, completed.stderr
         assert "usage:" in completed.stdout.lower()
-
-
-def test_full_pipeline_package_import_is_lazy() -> None:
-    command = [
-        sys.executable,
-        "-c",
-        (
-            "import sys; import mouse_behavior.full_pipeline; "
-            "assert 'mouse_behavior.full_pipeline.high_recall' not in sys.modules"
-        ),
-    ]
-    completed = subprocess.run(
-        command,
-        cwd=ROOT,
-        env=_pythonpath_environment(),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=60,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr

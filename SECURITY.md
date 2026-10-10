@@ -1,17 +1,5 @@
-# Security policy
+# Security and privacy
 
-This project processes local animal-behavior videos and model outputs. Do not
-commit videos, pose caches, model weights, credentials, API tokens, or private
-annotations. The repository ignore rules and repository check script are
-intended as guardrails, not as a substitute for reviewing `git diff` before a
-push.
+Do not report suspected vulnerabilities through a public issue. Send a private report to the repository maintainers with reproduction steps, affected revisions, and impact; the maintainers should publish a security contact before making this repository public.
 
-If you discover a security issue in the code or repository configuration,
-please avoid posting private data in a public issue. Contact the repository
-maintainer through a private GitHub channel and include the affected commit,
-the smallest reproducible description, and a proposed mitigation when
-possible.
-
-This policy does not promise that public sample data is de-identified. Treat
-all local datasets and annotation exports as sensitive unless their owner has
-explicitly approved publication.
+Mouse videos, experimental metadata, and RFID/EPC identifiers may be sensitive research data. Keep them outside Git, redact them from logs and screenshots, and use experiment-local access controls. Never commit credentials, private keys, API tokens, or raw RFID exports.

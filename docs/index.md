@@ -1,52 +1,59 @@
-# 文档总索引
+# Architecture and data contracts
 
-这里是项目的长期维护文档入口。根目录的 README.md 负责项目概览和最短运行路径；
-docs/ 负责安装、配置、架构、算法、输出格式和开发流程。
+## Responsibility boundary
 
-## 推荐阅读顺序
+The system has three explicit layers:
 
-1. [快速开始](quickstart.md)
-2. [安装与环境](installation.md)
-3. [配置说明](configuration.md)
-4. [仓库架构](architecture.md)
-5. [完整仓库结构说明](repository_structure.md)
-6. [算法说明](algorithms.md)
-7. [输出格式](data_format.md)
-8. [测试与开发](development/testing.md)
-9. [代码审查与性能基线](code_review.md)
+1. Ultralytics reads video frames and emits Pose detections with a persistent `visual_track_id`.
+2. An external mTrack/RFID process associates visual tracklets with stable `animal_id` values and exports the normalized CSV contract.
+3. `mouse_behavior` validates those inputs, constructs trajectory arrays, computes kinematics, and emits behavior events.
 
-## 目录职责
+The behavior layer must not assign identities from spatial order, nearest position, coat brightness, pose similarity, or motion. Visual-only analysis is supported for diagnostics and is marked provisional.
 
-~~~text
-src/mouse_behavior/   可复用 Python 模块和稳定接口
-  evaluation/         离线导出标注集调参和验证评分
-scripts/              CLI、批处理、验证和校准入口
-configs/              default、profiles 和 experiments
-tests/                unit、integration、regression、e2e
-docs/                 用户文档和开发文档
-examples/             最小可运行 API 与配置示例
-tools/                仓库检查、构建检查和结果比较
-.github/              CI、Issue 模板和 PR 模板
-~~~
+## Tracked Pose cache
 
-根目录不包含新的 Python 模块或命令行包装器。历史版本由 Git commit、branch 和
-tag 管理，并行开发使用仓库外 worktree；不要复制 v2、final2 或其他版本目录。
-只有回归测试必需的旧实现才保留在 tests/regression/fixtures/。
+Each gzip-pickled cache chunk contains a list of frame records. A record has:
 
-## 常用入口
+- `frame`: zero-based source-video frame index;
+- `timestamp_seconds`: source-video timestamp;
+- `pose_detections`: tracked Pose detections.
 
-- [贡献规范](../CONTRIBUTING.md)：branch、worktree、模块化、logging、pytest 和
-  AI 协作约定；
-- [配置说明](configuration.md)：默认配置、profile 和实验配置；
-- [统一质量门](../scripts/run_quality.py)：格式、lint、类型、测试、覆盖率和构建
-  检查的统一入口；
-- [仓库检查器](../scripts/validate_repository.py)：检查目录边界、敏感文件和大文件；
-- [GitHub Actions](../.github/workflows/test.yml)：push 和 pull request 的 CI。
+Each usable detection contains `visual_track_id`, `bbox_xyxy`, `box_conf`, seven `keypoints_px`, seven `keypoint_conf`, and `pose_quality`. `yolo_results_status.json` must declare `status=complete`, a matching `total_frames`/`next_frame`, and `trajectory_schema_version >= 1`. Older caches without visual IDs are rejected and must be rebuilt.
 
-## 设计原则
+## Identity CSV
 
-- 可复用逻辑进入 src/，脚本只负责入口编排；
-- 行为证据、显示上下文和网站导出边界明确区分；
-- 日志使用 Python logging，不在可复用模块中使用 print()；
-- 每次算法变更都要有 pytest 回归和真实样例验证记录；
-- 视频、缓存、私人标注和未登记模型权重不进入 Git；默认 Pose 权重通过 Git LFS 管理。
+The adapter accepts exact-frame rows or inclusive frame intervals. Required concepts are a non-negative visual track ID, a non-empty animal ID, and either one frame or a start/end range. Confidence is optional and defaults to 1.0. Conflicting overlapping mappings are rejected.
+
+In RFID mode, a detection without a matching assignment is counted as unresolved and excluded. If two visual detections map to the same animal in one frame, only the highest confidence-weighted detection is retained and the conflict is reported in trajectory statistics.
+
+## Internal arrays and outputs
+
+Vectorized behavior algorithms use integer slot indices for array efficiency. `tracks.identity_labels[slot]` is the authoritative label for that slot. The arrays also expose frame-level `visual_track_ids` and `identity_confidence`, plus `visual_track_ids_by_slot` for auditability.
+
+Event tables add label fields next to numeric actor/target/contact/member slots. Website track export contains `track_id` (array slot), `visual_track_id`, `animal_id`, `identity_source`, and `identity_confidence`. Consumers must use `animal_id` for biological identity and treat `track_id` only as an internal row/slot key.
+
+## Modules
+
+- `pose_cache.py`: sequential Ultralytics `model.track(..., persist=True)` cache creation.
+- `tracking/cache.py`: validation and trajectory-array normalization; no tracker implementation.
+- `identity/mtrack.py`: normalized mTrack/RFID CSV adapter.
+- `identity/labels.py`: label annotation for behavior records.
+- `behavior/` and `preprocessing/`: behavior features, FSMs, and event extraction.
+- `evaluation/exported_dataset.py` is the stable compatibility façade for exported
+  dataset analysis. Its implementation is separated into `exported_dataset_models.py`,
+  `exported_dataset_records.py`, `exported_dataset_features.py`,
+  `exported_dataset_temporal.py`, `exported_dataset_collective.py`,
+  `exported_dataset_prediction.py`, `exported_dataset_metrics.py`, and
+  `exported_dataset_config.py`; provenance hashes cover the façade and all eight modules.
+  Its historical target-ID hit metrics are conditional on annotated IDs, not joint Top-1.
+- `evaluation/blind_top1.py` and `evaluation/train_only_tuning.py`: independent
+  behavior-plus-visual-ID prediction, exact scoring, and train-session-only
+  parameter optimization. See [the blind calibration protocol](train-only-blind-calibration.md).
+  This diagnostic path does not replace the production Ultralytics + mTrack/RFID flow.
+- `evaluation/calibrated_rule_ranker.py` and `scripts/calibrate_existing_split.py`:
+  supervised calibration of weighted heuristic trajectory evidence on the existing
+  training split, followed by frozen-model evaluation on the existing validation
+  split. No extra test set or training-accuracy gate is required. Training-internal
+  recording holdouts select regularization; validation labels only score locked predictions.
+- [`behavior-definitions.md`](behavior-definitions.md): operational definitions, duration gates, roles, and output semantics for the extended ethogram.
+- `visualization/`: rendering and annotation-package export.

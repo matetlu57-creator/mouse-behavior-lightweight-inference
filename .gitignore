@@ -1,90 +1,38 @@
-# Python bytecode and local test state
+# Python and local environments
 __pycache__/
 *.py[cod]
-*.pyo
+.venv/
+node_modules/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
-# Local environments and packaging artifacts
-.venv/
-venv/
-env/
+.coverage
+htmlcov/
 *.egg-info/
+
+# Generated analysis data
+outputs/
+output/
+artifacts/
 build/
 dist/
-artifacts/
-.coverage
-coverage.xml
-htmlcov/
-
-# Video, model, detector cache, and large binary data
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.wmv
-*.webm
-*.pt
-*.pth
-*.onnx
-*.engine
-*.weights
-*.pkl
-*.pickle
-*.npz
-*.npy
-*.db
-*.sqlite
-*.sqlite3
+tools/video_review_viewer/public/review-data*.json
 yolo_precompute/
 *_precompute/
 
-# Keep repository documentation/placeholders while excluding local datasets
-# and generated output directories. The canonical public Pose weight is
-# intentionally re-included below and stored through Git LFS.
-data/*
-!data/README.md
-outputs/*
-!outputs/.gitkeep
-weights/*
-!weights/README.md
-!weights/pose/
-weights/pose/*
-!weights/pose/README.md
-!weights/pose/best.pt
-
-# Generated analysis outputs
-output/
-results/
-正式分析结果/
-四类视频/
-four_class_clips/
-lightweight_behavior_events.csv
-lightweight_pair_summary.csv
-lightweight_top_evidence.csv
-lightweight_analysis_metadata.json
-.lightweight_runtime_config.yaml
+# Local runtime logs and temporary files
 *.log
 *.tmp
+*.bak
 
-# Local backup folders created by installation scripts
-backup_before_*/
-
-# Windows and editor files
-Thumbs.db
-Desktop.ini
-.vscode/
-.idea/
-
-# Credentials and private material
-.env
-.env.*
-*.pem
-*.key
-*.p12
-*.pfx
-secrets.*
-credentials.*
-
-# The public inference models are downloaded from the repository Release when needed.
+# Large local inputs and unregistered model artifacts
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.onnx
+*.engine
+weights/*
+!weights/pose/
+weights/pose/*
+!weights/pose/best.pt

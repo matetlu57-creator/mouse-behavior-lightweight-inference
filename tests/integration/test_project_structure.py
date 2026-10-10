@@ -32,9 +32,6 @@ def test_reusable_modules_live_in_package():
         "src/mouse_behavior/io/arena_boundary.py",
         "src/mouse_behavior/visualization/overlay.py",
         "src/mouse_behavior/visualization/rendering.py",
-        "src/mouse_behavior/full_pipeline/extractor_base.py",
-        "src/mouse_behavior/full_pipeline/high_recall.py",
-        "scripts/run_full_behavior_pipeline.py",
     ):
         assert (ROOT / relative).is_file(), relative
 
@@ -82,7 +79,6 @@ def test_repository_root_contains_no_python_entrypoints():
         "build_lightweight_pose_cache.py",
         "calibrate_standard_behavior.py",
         "rerun_beiyi_lightweight_rules.py",
-        "run_full_behavior_pipeline.py",
         "sweep_standard_behavior.py",
         "validate_beiyi_extended_ethogram.py",
     ):

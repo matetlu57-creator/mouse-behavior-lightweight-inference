@@ -21,7 +21,7 @@ $InstallArgs += $ProjectDir
 & $Python @InstallArgs
 if ($LASTEXITCODE -ne 0) { throw "Package installation failed with exit code $LASTEXITCODE" }
 
-& $Python -c "import mouse_behavior; import mouse_behavior.full_pipeline"
+& $Python -c "import mouse_behavior; import mouse_behavior.identity; import mouse_behavior.tracking"
 if ($LASTEXITCODE -ne 0) { throw "Installed package import verification failed" }
 
 if ($InstallBundledConfig) {
@@ -30,4 +30,4 @@ if ($InstallBundledConfig) {
 
 Write-Host "Mouse behavior package installation completed."
 Write-Host "Lightweight CLI: mouse-behavior-lightweight"
-Write-Host "Full pipeline CLI: mouse-behavior-full"
+Write-Host "Pose tracking cache builder: python scripts/build_lightweight_pose_cache.py --help"

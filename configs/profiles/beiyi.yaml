@@ -7,26 +7,10 @@ repository:
 adaptive_arena:
   enabled: false
   mode: disabled
-detector_first:
-  arena_mask:
-    enabled: false
 lightweight_behavior_inference:
   sample_stride: 1
   render_video: false
   extract_four_class_clips: false
-  tracking:
-    # Short Beiyi clips can contain low-confidence mirror detections outside
-    # the cage.  Do not allocate a permanent logical ID from such a candidate;
-    # an initially hidden real mouse can still claim the free ID as soon as a
-    # sufficiently reliable detection appears.  This is not an arena polygon
-    # and does not classify videos from their folder names.
-    initial_min_detection_score: 0.50
-    # 短片中一次遮挡后不允许丢失轨迹跨越半个笼子抢占无关检测框。
-    # 普通轨迹与重连轨迹使用相同的有限门；真正重新出现的目标仍可在
-    # 原位置附近恢复，过远检测留给持续可见的 ID 或空闲 ID。
-    recent_assignment_gate: 3.20
-    reacquisition_assignment_gate: 3.20
-    reacquisition_after_missed_frames: 3
 
 # 对齐规范中的持续时间。规范没有给出固定时长的行为，在本 profile 中统一
 # 使用至少 1 秒的可靠性门。当前北医样例的真实厘米尺度和速度/距离换算仍
@@ -50,7 +34,8 @@ extended_behavior:
     # 10 cm. The default profile is intentionally stricter at 8 cm; Beiyi uses
     # the documented boundary while retaining the full one-second duration
     # and low-motion gates.
-    together_max_distance_cm: 10.0
+    together_max_distance_cm: 8.025
+    together_min_distance_cm: 4.0125  # # [STEP6 2026-10-05] 与文档 v4 统一
     approach_min_duration_seconds: 1.0
     avoidance_min_duration_seconds: 1.0
     attack_min_duration_seconds: 1.0
@@ -90,10 +75,10 @@ extended_behavior:
         min_directional_score: 0.35
         min_actor_speed_gap_ratio: -0.15
         min_follow_speed_gap_ratio: 0.10
-        min_follow_actor_speed_cm_s: 3.0
-        min_follow_target_speed_cm_s: 1.0
-        min_actor_speed_cm_s: 3.0
-        min_target_speed_cm_s: 1.0
+        min_follow_actor_speed_cm_s: 4.0125
+        min_follow_target_speed_cm_s: 1.3375
+        min_actor_speed_cm_s: 4.0125
+        min_target_speed_cm_s: 1.3375
         min_target_speed_fraction_of_actor: 0.15
         # 分位数只能说明“对该鼠对相对较近”，不能阻止跨笼同向运动误报。
         # 追逐必须保持在 2.5 个检测体长内，不依赖未标定的厘米尺度。
@@ -130,7 +115,7 @@ extended_behavior:
         follow_distance_quantile: 0.85
         follow_context_seconds: 1.0
         follow_min_relative_distance_drop: 0.08
-        min_combined_speed_cm_s: 3.0
+        min_combined_speed_cm_s: 4.0125
         hold_seconds: 0.50
         hold_min_fraction: 0.25
         # 追逐3只有约1秒的明确可见时段，因此北医 profile 使用1秒
@@ -149,7 +134,7 @@ extended_behavior:
         turn_window_seconds: 0.75
         min_turn_fraction: 0.30
         distance_trend_seconds: 0.50
-        min_evader_speed_cm_s: 1.0
+        min_evader_speed_cm_s: 1.3375
         min_relative_distance_increase: 0.10
         hold_seconds: 0.75
         # 当发起接近的一方骑跨/遮挡后消失时，只有“先接近、后急转、
@@ -180,7 +165,7 @@ extended_behavior:
         # box motion as its primary channel; pose evidence is only additive.
         min_attack_score: 0.82
         min_dynamic_score: 0.82
-        min_raw_speed_cm_s: 12.0
+        min_raw_speed_cm_s: 16.05
         min_target_turn_angle_deg: 35.0
         min_pose_deformation: 0.12
         use_bbox_motion: true
@@ -221,7 +206,7 @@ extended_behavior:
         # 关键点动作证据只作为辅助；攻击的主要动作证据来自重叠框的
         # 快速位移、面积变化或前后框 IoU 突变。
         require_action_signature: true
-        min_impact_acceleration_cm_s2: 1500.0
+        min_impact_acceleration_cm_s2: 2006.25
         reaction_turn_window_seconds: 0.75
         min_reaction_turn_fraction: 0.15
         min_contact_frames: 2
@@ -249,23 +234,26 @@ extended_behavior:
         state_pre_hold_seconds: 1.50
         state_min_seed_seconds: 0.50
         state_max_distance_body_lengths: 2.80
+        # A real attack seed may bridge a longer full detector dropout, but
+        # only until the same tracked pair is first observed nearby again.
+        state_reacquisition_gap_seconds: 5.0
+        state_reacquisition_max_distance_body_lengths: 2.80
         fill_gap_seconds: 0.50
       identity_bridge_seconds: 0.50
       # 回避也允许在短暂遮挡后拼接同一事件，但仍要求前后片段有共同
       # 身份证据和相邻时间关系，不会把无关 pair 合并。
       bridge_avoidance: true
       # One bridge may represent one detector ID hand-off. Do not let a
-      # shared-ID chain absorb several unrelated pairs in a crowded cage.
+    # shared-ID chain absorb several unrelated pairs in a crowded cage.
       max_identity_bridge_participants: 3
       max_identity_bridge_segments: 2
   group:
-    # 四个北医 huddle 正向样例的稳定三鼠核心，其帧级最大中心距离约为
-    # 10.35、6.94、7.22、7.42 cm。以覆盖四个样例的最大稳定距离为基线，
-    # 取 11 cm 作为统一的局部邻接阈值；同一大型 huddle 的对角成员不要求
-    # 彼此也小于 11 cm。
-    # 该值是 profile 的几何标定参数，不读取视频文件名，也不按目录直接分类。
-    huddle_distance_cm: 11.0
-    huddle_min_duration_seconds: 1.0
+    huddle_distance_cm: 8.025
+    huddle_nose_distance_cm: 4.0125
+    huddle_min_duration_seconds: 5.0  # # [STEP6 2026-10-05] 与文档 v4 统一
+    huddle_fill_gap_seconds: 5.0
+    huddle_event_min_overlap_fraction: 0.75
+    isolation_distance_cm: 26.75
     isolation_min_duration_seconds: 10.0
     isolation_fill_gap_seconds: 0.2
     # Isolation means one or at most two mice separated from a meaningful
@@ -273,7 +261,7 @@ extended_behavior:
     # not a group reference and must not suppress social/individual labels.
     # At least half of the visible mice must form the main group. Among mice
     # outside that group, only the strongest spatial outlier is allowed to
-    # enter the 10-second per-ID isolation confirmation.
+    # enter the ten-second per-ID isolation confirmation.
     isolation_min_main_cluster_fraction: 0.50
     huddle_min_cluster_size: 3
     huddle_min_cluster_fraction: 0.0
@@ -290,13 +278,13 @@ extended_behavior:
     # 不读取视频名或标签目录。
     huddle_resolve_attack_conflicts: true
     huddle_attack_independent_seconds: 2.0
-    # 北医的 11 cm 是固定的 profile 空间阈值。关闭体长二次上限，避免
-    # 白鼠/黑鼠体型混合时由中位体长把 11 cm 错误缩小；该兼容字段保留。
+    # The document's 5 cm neighborhood boundary is used directly. This legacy
+    # cap stays disabled so body-size estimates cannot silently shrink it.
     huddle_body_length_cap_enabled: false
     huddle_max_pair_distance_body_lengths: 1.75
 contact_detection:
-  nose_head_min_duration_seconds: 1.0
-  nose_tail_min_duration_seconds: 0.5
+  nose_head_min_cumulative_duration_seconds: 0.5
+  nose_tail_min_cumulative_duration_seconds: 0.5
   # 这是关键点几何抖动容错，不是把未知的真实厘米尺度写死。北医短片中
   # 鼻头距离在阈值附近时允许有限放宽，并只桥接同一几何状态的短缺口。
   nose_head_distance_multiplier: 1.5
