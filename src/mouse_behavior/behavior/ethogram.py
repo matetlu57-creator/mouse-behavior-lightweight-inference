@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -14,7 +15,7 @@ from ..preprocessing.constants import BEHAVIOR_NAMES_ZH
 # from ..utils.rolling import rolling_sum as _rolling_sum
 from .group_dynamics import group_dynamic_signals
 from .social_fsm import build_semantic_pair_signals
-from .static_rule import bounded_stationary_mask, bridge_gaps_outside_static
+from .individual_rules import DEFAULT_INDIVIDUAL_CONFIG, individual_rule_masks
 
 LOGGER = logging.getLogger("mouse_behavior.lightweight_behavior_inference")
 
@@ -734,15 +735,19 @@ def _extended_behavior_config(config: Mapping[str, Any]) -> dict[str, Any]:
     defaults = {
         "enabled": True,
         "individual": {
-            "stationary_max_speed_cm_s": 13.375,
-            "stationary_transient_max_duration_seconds": 0.20,
-            "stationary_transient_max_displacement_cm": 1.3375,
-            "stationary_max_center_radius_cm": 1.3375,
+            "stationary_max_speed_cm_s": 0.66875,
+            "motion_speed_threshold_cm_s": 4.0,
+            "stationary_transient_max_duration_seconds": 1.0,
+            "stationary_detection_gap_max_seconds": 1.0,
+            "stationary_transient_max_displacement_cm": 4.0,
+            "stationary_max_center_radius_cm": 4.0,
+            "stationary_min_projected_body_length_ratio": 0.55,
             # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
             # "walking_max_speed_cm_s": 85.0,
             "running_min_speed_cm_s": 113.6875,
             "stationary_min_duration_seconds": 1.0,
             "locomotion_min_duration_seconds": 0.5,
+            "locomotion_stop_gap_seconds": 1.0,
             # "walking_min_duration_seconds": 1.0,
             # "running_min_duration_seconds": 0.5,
             "confirm_seconds": 0.30,
@@ -2317,7 +2322,6 @@ def _extended_individual_and_group_events(
     group_cfg = dict(cfg["group"])
     valid = np.asarray(kin["valid"], dtype=bool)
     speed = np.asarray(kin["behavior_speed"], dtype=float)
-    pose_quality = np.asarray(kin["pose_quality"], dtype=float)
     centers = np.asarray(kin["centers_cm"], dtype=float)
     keypoints = (
         np.asarray(kin["keypoints_cm"], dtype=float) if "keypoints_cm" in kin else None
@@ -2327,37 +2331,24 @@ def _extended_individual_and_group_events(
     events: list[dict[str, Any]] = []
     fsm_coordinator = ParallelBehaviorFSM(dict(config.get("parallel_behavior_fsm", {})))
 
-    stationary = (
-        valid
-        & (speed <= float(individual_cfg["stationary_max_speed_cm_s"]))
-        & (pose_quality >= float(individual_cfg["min_pose_quality"]))
+    individual_config = replace(
+        DEFAULT_INDIVIDUAL_CONFIG,
+        motion_speed_threshold_cm_s=float(individual_cfg.get(
+            'motion_speed_threshold_cm_s', individual_cfg['stationary_max_speed_cm_s'])),
+        static_min_duration_s=float(individual_cfg['stationary_min_duration_seconds']),
+        locomotion_min_duration_s=float(individual_cfg['locomotion_min_duration_seconds']),
+        static_max_radius_cm=float(individual_cfg['stationary_max_center_radius_cm']),
+        static_transient_max_s=float(individual_cfg['stationary_transient_max_duration_seconds']),
+        static_detection_gap_max_s=float(individual_cfg.get('stationary_detection_gap_max_seconds', 1.0)),
+        static_transient_max_displacement_cm=float(individual_cfg['stationary_transient_max_displacement_cm']),
+        locomotion_pause_max_s=float(individual_cfg.get('locomotion_stop_gap_seconds', 1.0)),
     )
-    stationary = bounded_stationary_mask(
-        stationary,
-        centers,
-        valid & (pose_quality >= float(individual_cfg["min_pose_quality"])),
-        fps=analysis_fps,
-        max_gap_s=float(individual_cfg["stationary_transient_max_duration_seconds"]),
-        max_transient_displacement_cm=float(
-            individual_cfg["stationary_transient_max_displacement_cm"]
-        ),
-        max_center_radius_cm=float(individual_cfg["stationary_max_center_radius_cm"]),
-    )
-    # Static permits head turns and limited head exploration. Only bounded,
-    # observed torso-center excursions are absorbed; posture evidence stays a
-    # separate, human-reviewed signal.
-    running_min_speed_cm_s = float(individual_cfg["running_min_speed_cm_s"])
-    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）：移动掩码 = 速度高于静止上限；理毛/站立攀爬证据门待 Step 5-A 启用。
-    locomotion = (
-        valid
-        & (speed > float(individual_cfg["stationary_max_speed_cm_s"]))
-        & ~stationary
-    )
-    locomotion = bridge_gaps_outside_static(
-        locomotion,
-        stationary,
-        max_gap_frames=int(round(float(individual_cfg["fill_gap_seconds"]) * analysis_fps)),
-    )
+    individual = individual_rule_masks(centers, valid, analysis_fps, keypoints_cm=keypoints,
+                                       reference_body_cm=float(kin.get('reference_body_cm', 7.918)),
+                                       config=individual_config)
+    stationary = individual.masks['stationary']
+    locomotion = individual.masks['locomotion']
+    running_min_speed_cm_s = float(individual_cfg['running_min_speed_cm_s'])
     for mouse in range(mice):
         for behavior, mask, score in (
             (
@@ -2367,7 +2358,10 @@ def _extended_individual_and_group_events(
                     0.0,
                     1.0
                     - speed[:, mouse]
-                    / max(float(individual_cfg["stationary_max_speed_cm_s"]), 1e-6),
+                    / max(float(individual_cfg.get(
+                        "motion_speed_threshold_cm_s",
+                        individual_cfg["stationary_max_speed_cm_s"],
+                    )), 1e-6),
                 ),
             ),
             (
@@ -2379,6 +2373,10 @@ def _extended_individual_and_group_events(
                     1.0,
                 ),
             ),
+            ("grooming", individual.masks["grooming"][:, mouse],
+             individual.masks["grooming"][:, mouse].astype(float)),
+            ("rearing", individual.masks["rearing"][:, mouse],
+             individual.masks["rearing"][:, mouse].astype(float)),
         ):
             events.extend(
                 _event_rows_from_mask(
@@ -2395,13 +2393,14 @@ def _extended_individual_and_group_events(
                     min_duration_seconds=float(
                         individual_cfg.get(
                             f"{behavior}_min_duration_seconds",
-                            individual_cfg["confirm_seconds"],
+                            {"grooming": individual_config.grooming_min_duration_s,
+                             "rearing": individual_config.rearing_min_duration_s}.get(behavior, individual_cfg["confirm_seconds"]),
                         )
                     ),
                     # Gaps were already recovered only when they do not overlap
                     # the Static mask, so the FSM cannot bridge across a Static bout.
                     fill_gap_seconds=(
-                        0.0 if behavior in {"stationary", "locomotion"} else
+                        0.0 if behavior in individual.masks else
                         float(individual_cfg["fill_gap_seconds"])
                     ),
                     event_scope="individual",
@@ -2423,7 +2422,7 @@ def _extended_individual_and_group_events(
     huddle_core_density = np.zeros(frames, dtype=float)
     huddle_mean_speed = np.full(frames, np.inf, dtype=float)
     huddle_high_motion_fraction = np.ones(frames, dtype=float)
-    stationary_speed_limit = max(float(individual_cfg.get("stationary_max_speed_cm_s", 13.375)), 0.0)
+    stationary_speed_limit = max(float(individual_cfg.get("stationary_max_speed_cm_s", 0.66875)), 0.0)
     # # [STEP6 2026-10-05] Huddling 删除全部速度门（用户决策）
     # huddle_max_mean_speed / huddle_max_high_motion_fraction 读取已删除
     huddle_min_cluster_size = max(int(group_cfg.get("huddle_min_cluster_size", 3)), 3)

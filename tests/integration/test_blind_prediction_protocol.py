@@ -67,6 +67,7 @@ def test_frozen_inference_precedes_separate_label_scoring(tmp_path: Path) -> Non
     inference = subprocess.run(
         [
             sys.executable, str(REPO_ROOT / "scripts/predict_exported_blind.py"),
+            "--historical-model",
             "--blind-manifest", str(unlabeled), "--model-dir", str(model_dir),
             "--output-dir", str(predictions_dir),
         ],
@@ -100,6 +101,7 @@ def test_frozen_inference_precedes_separate_label_scoring(tmp_path: Path) -> Non
     tampered = subprocess.run(
         [
             sys.executable, str(REPO_ROOT / "scripts/predict_exported_blind.py"),
+            "--historical-model",
             "--blind-manifest", str(unlabeled), "--model-dir", str(model_dir),
             "--output-dir", str(blocked_dir),
         ],

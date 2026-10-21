@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable
 import numpy as np
 from mouse_behavior.preprocessing.scale_resolution import LEGACY_REFERENCE_BODY_CM
+from .requested_thresholds_v27 import ISOLATION_DISTANCE_CM
 
 RETAINED_BEHAVIORS = (
     "Approach",
@@ -18,9 +19,11 @@ RETAINED_BEHAVIORS = (
     "Dispersal",
     # "Following",
     "Group locomotion",
+    "Grooming",
     "Huddling",
     "Isolation",
     "Locomotion",
+    "Rearing",
     "Snout-head_contact",
     "Snout-rear_contact",
     "Social clustering",
@@ -39,9 +42,11 @@ LABEL_TO_CANONICAL = {
     "Dispersal": "dispersal",
     # "Following": "following",
     "Group locomotion": "group_locomotion",
+    "Grooming": "grooming",
     "Huddling": "huddle",
     "Isolation": "isolation",
     "Locomotion": "locomotion",
+    "Rearing": "rearing",
     "Snout-head_contact": "nose_head_contact",
     "Snout-rear_contact": "nose_tail_contact",
     "Social clustering": "social_clustering",
@@ -216,10 +221,11 @@ class ExportedFeatures:
 class HeuristicParameters:
     """Tunable parameters for the exported-track calibration adapter."""
 
-    stationary_max_speed_cm_s: float = 13.375
-    stationary_transient_max_duration_s: float = 0.2
-    stationary_transient_max_displacement_cm: float = 1.3375
-    stationary_max_center_radius_cm: float = 1.3375
+    stationary_max_speed_cm_s: float = 0.66875
+    stationary_transient_max_duration_s: float = 1.0
+    stationary_transient_max_displacement_cm: float = 4.0
+    stationary_max_center_radius_cm: float = 4.0
+    stationary_min_projected_body_length_ratio: float = 0.55
     # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
     # walking_min_speed_cm_s: float = 10.0
     # walking_max_speed_cm_s: float = 85.0
@@ -230,7 +236,7 @@ class HeuristicParameters:
     # running_min_directionality: float = 0.55
     # running_min_duration_s: float = 0.5
     # # [STEP6 2026-10-05] 社交/群体参数按文档 v4 + 用户覆盖落地
-    together_max_distance_cm: float = 8.025
+    together_max_distance_cm: float = 7.0
     together_min_distance_cm: float = 4.0125
     # [STEP6 2026-10-05] Together: 旧低速度语义注释废弃（速度门已从掩码删除）：
     # Together is a low-motion pair state; brief movement is allowed, but
@@ -251,10 +257,9 @@ class HeuristicParameters:
     # [STEP6 2026-10-05] Approach: 语义改为接触截断下限——nose_nearest 必须 > 该值才视为仍在接近（17→2 cm）。
     approach_terminal_distance_cm: float = 2.675
     contact_distance_cm: float = 2.675
-    # Nose-contact labels require at least this much cumulative observed
-    # contact time for the same visual-ID pair; brief repeated touches below
-    # the threshold do not become a standalone contact behavior.
-    contact_min_cumulative_seconds: float = 0.5
+    # A single contiguous, directed keypoint-contact bout qualifies at 0.2 s.
+    # Disconnected bouts are never summed to manufacture a continuous event.
+    contact_min_cumulative_seconds: float = 0.2
     attack_min_speed_cm_s: float = 10.7
     approach_min_actor_speed_cm_s: float = 4.0125
     # # [STEP6 2026-10-05] 社交/群体参数按文档 v4 + 用户覆盖落地：轻度攻击=攻击下限（鼻加速度 OR 门）
@@ -292,7 +297,7 @@ class HeuristicParameters:
     # following_min_direction_similarity: float = 0.70
     # following_min_duration_s: float = 3.0
     pair_no_contact_seconds: float = 0.5
-    huddle_distance_cm: float = 8.025
+    huddle_distance_cm: float = 10.0
     huddle_nose_distance_cm: float = 4.0125
     huddle_width_multiplier: float = 2.0
     # # [STEP6 2026-10-05] 社交/群体参数按文档 v4 + 用户覆盖落地：Huddling 删除全部速度门
@@ -314,7 +319,7 @@ class HeuristicParameters:
     group_motion_window_s: float = 0.0
     # A single mouse is isolated only when its nearest visible companion is
     # beyond this threshold.
-    isolation_distance_cm: float = 26.75
+    isolation_distance_cm: float = ISOLATION_DISTANCE_CM
     # Count observed isolation within an episode; a short loss of the same ID
     # may connect its evidence without adding unobserved time.
     isolation_min_duration_s: float = 10.0
@@ -395,13 +400,32 @@ class HeuristicParameters:
     huddle_soft_score_min: float = 0.60
     huddle_attack_speed_p90_max_cm_s: float = 60.1875
     huddle_attack_relative_motion_max_cm_s: float = 40.125
-    group_locomotion_max_distance_cm: float = 33.4375
+    group_locomotion_max_distance_cm: float = 30.0
     group_locomotion_min_direction_similarity: float = 0.70
     group_locomotion_min_moving_fraction: float = 0.60
     group_locomotion_min_duration_s: float = 3.0
     dispersal_start_distance_cm: float = 20.0625
     dispersal_min_distance_increase_cm: float = 6.6875
     dispersal_min_duration_s: float = 5.0
+    # Appended for positional compatibility; production defaults stay legacy.
+    confirmed_rules_v1: float = 0.0
+    # Social heuristic v2: spatial direction, true displacement, and
+    # acceleration plus detector reacquisition separate pair behaviors.
+    approach_min_facing_cosine: float = 0.5
+    approach_min_motion_toward_cosine: float = 0.0
+    chase_min_chaser_speed_cm_s: float = 53.5
+    chase_min_chaser_facing_cosine: float = 0.5
+    chase_min_chaser_toward_cosine: float = 0.5
+    chase_min_net_displacement_cm: float = 10.7
+    chase_min_directed_support_s: float = 0.2
+    attack_min_nose_acceleration_toward_cm_s2: float = 500.0
+    attack_min_box_reacquisitions_per_s: float = 0.5
+    attack_box_max_gap_s: float = 0.5
+    attack_reacquisition_context_s: float = 0.5
+    attack_min_event_duration_s: float = 0.033
+    # Individual Static/Locomotion boundary; kept separate from the legacy
+    # stationary ceiling still consumed by group scoring.
+    individual_motion_speed_threshold_cm_s: float = 4.0
 
     def as_dict(self) -> dict[str, float]:
         return {key: float(value) for key, value in asdict(self).items()}

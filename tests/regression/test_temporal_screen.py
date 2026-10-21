@@ -73,10 +73,10 @@ def test_approach_ends_before_contact_and_together_excludes_approach_phase():
 
 def test_social_clustering_is_formation_before_huddle_not_whole_group_travel():
     f = features(n=100, mice=3)
-    f.centers_cm[:, 0, 0] = np.maximum(20.-np.arange(100)*2., 0.)
+    f.centers_cm[:, 0, 0] = np.maximum(40.-np.arange(100), 0.)
     f.centers_cm[:, 2, 0] = 1.
-    f.velocity_cm_s[1:11, 0, 0] = -20.
-    f.speed_cm_s[1:11, 0] = 20.
+    f.velocity_cm_s[1:41, 0, 0] = -10.
+    f.speed_cm_s[1:41, 0] = 10.
     f.pair_distance_cm = np.linalg.norm(f.centers_cm[:, f.pair_i]-f.centers_cm[:, f.pair_j], axis=2)
     compact, formation = group_phase_masks(f, [0, 1, 2], HeuristicParameters())
     onset = np.flatnonzero(compact)[0]
@@ -91,6 +91,8 @@ def test_social_clustering_is_formation_before_huddle_not_whole_group_travel():
 
 def test_posture_probe_requires_body_static_and_human_head_turn_negative_wins():
     f = features(mice=2)
+    f.centers_cm[20:, 1, 0] = np.arange(1, 21) * 3.
+    f.velocity_cm_s[20:, 1, 0] = 30.
     f.speed_cm_s[20:, 1] = 30.
     episodes = [{"track_id": 101, "candidate": "grooming", "start_frame": 0, "end_frame": 40}]
     audit = [{"track_id": "101", "observed_behavior": "static", "decision": "confirmed",
@@ -128,10 +130,10 @@ def test_contiguous_windows_half_open_and_fractional_fps_boundary():
 
 def test_cropped_contact_cannot_borrow_duration_from_separate_touch():
     f = features()
-    f.pair_nose_head_cm[0:3] = 1.
-    f.pair_nose_head_cm[10:13] = 1.
+    f.pair_nose_head_cm[0:1] = 1.
+    f.pair_nose_head_cm[10:11] = 1.
     plans, _ = screen_record(record("Snout-head_contact", f), f, HeuristicParameters())
-    assert plans == []  # 0.6 s overall, but each standalone bout is only 0.3 s.
+    assert plans == []  # Two 0.1 s touches cannot satisfy the 0.2 s bout minimum.
 
 
 def test_static_dataset_cli_probes_use_actual_audit_contract(tmp_path):

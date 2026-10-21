@@ -70,12 +70,14 @@ def _group_geometry(features: ExportedFeatures, slots: list[int], params: Heuris
 
 
 def group_phase_masks(features: ExportedFeatures, slots: list[int], params: HeuristicParameters,
-                      policy: ScreenPolicy | None = None):
+                      policy: ScreenPolicy | None = None, *,
+                      measured_motion: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None):
     policy = policy or ScreenPolicy()
     compact, visible = _group_geometry(features, slots, params)
     formation = np.zeros(len(features.valid), dtype=bool)
     continuing = np.zeros(len(features.valid), dtype=bool)
-    centers, velocity, speed = body_motion(features, policy)
+    centers, velocity, speed = (body_motion(features, policy)
+                                if measured_motion is None else measured_motion)
     still = features.valid & (speed <= policy.quiet_speed_cm_s)
     # Formation is an actual moving actor directed toward at least two other
     # stationary targets. Merely sharing a loose component is insufficient.

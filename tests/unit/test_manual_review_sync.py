@@ -1065,10 +1065,13 @@ def test_static_review_page_explains_head_turn_policy_in_plain_chinese(review):
     page = (store.package/'index.html').read_text(encoding='utf-8')
     article = page.split(f'<article data-id="{card["review_id"]}"', 1)[1].split('</article>', 1)[0]
 
-    assert '静止判定提示：持续至少1秒，身体中心活动范围半径不超过1.3375 cm' in page
-    assert '不超过0.2秒且位移不超过1.3375 cm的短暂挪动' in page
-    assert '鼻尾投影长度降到参考体长的78%以下' in page
-    assert '候选说明：身体中心活动范围半径不超过1.3375 cm；允许不超过0.2秒、位移不超过1.3375 cm的短暂挪动' in article
+    assert '静止判定提示：持续至少1秒，体心距片段中位位置不超过4 cm' in page
+    assert '短暂挪动最多1秒且偏移不超过4 cm' in page
+    assert '1.3375 cm' not in page
+    assert '0.2秒' not in page
+    assert '短鼻尾二维投影本身不会取消符合中心静止边界的静止资格' in page
+    assert '顶视投影不能证明真实抬身高度' in page
+    assert '候选说明：静止判定持续至少1秒，体心距片段中位位置不超过4 cm；允许不超过1秒、偏移不超过4 cm的短暂挪动' in article
     assert 'data-track-path="dataset/Static/example/tracks.json"' in article
     assert 'data-target-ids="1,2"' in article and 'class="tracking-overlay"' in article
     assert 'body_static_head_turn_allowed' not in article

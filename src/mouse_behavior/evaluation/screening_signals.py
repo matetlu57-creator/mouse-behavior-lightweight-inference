@@ -110,6 +110,32 @@ def supported_episodes(seed, support, frames):
     return result
 
 
+def observed_run_motion(positions: np.ndarray, fps: float, policy: ScreenPolicy):
+    """Motion within one entirely observed run, including short reacquisitions.
+
+    Use the existing window/lag when supported. Short runs use the largest
+    available odd window and a shorter measured lag; two observations suffice
+    for a displacement, while a singleton has unknown motion. No operand comes
+    from the far side of a missing interval.
+    """
+    positions = np.asarray(positions, float)
+    if positions.ndim < 2 or positions.shape[-1] != 2 or not np.isfinite(positions).all():
+        raise ValueError("observed run positions must be finite (...,2) coordinates")
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError("fps must be finite and positive")
+    count = len(positions)
+    velocity = np.full_like(positions, np.nan)
+    if count < 2:
+        return positions.copy(), velocity, np.linalg.norm(velocity, axis=-1)
+    desired = max(1, int(fps * policy.motion_window_s) | 1)
+    window = min(desired, count if count % 2 else count - 1)
+    centers = smooth(positions, window)
+    lag = min(max(1, round(fps * policy.motion_window_s)), count // 2)
+    velocity[lag:] = (centers[lag:] - centers[:-lag]) * fps / lag
+    velocity[:lag] = velocity[lag:lag * 2]
+    return centers, velocity, np.linalg.norm(velocity, axis=-1)
+
+
 def body_motion(features: ExportedFeatures, policy: ScreenPolicy):
     if features.collective_keypoints_cm is None:
         return features.centers_cm, features.velocity_cm_s, features.speed_cm_s
@@ -147,7 +173,8 @@ def pursuit_similarity(centers, velocity, speed, left, right, fps, policy, width
 
 
 def pair_phases(features: ExportedFeatures, pair: int, params: HeuristicParameters,
-                policy: ScreenPolicy):
+                policy: ScreenPolicy, *, accept_observed_endpoint: bool = False,
+                measured_motion: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None):
     """Contact includes snout-to-torso surface; its safety margin is never bridged."""
     left, right = int(features.pair_i[pair]), int(features.pair_j[pair])
     slots = [left, right]
@@ -196,7 +223,8 @@ def pair_phases(features: ExportedFeatures, pair: int, params: HeuristicParamete
     for offset in range(1, guard + 1):
         guarded[:-offset] |= unsafe[offset:]
         guarded[offset:] |= unsafe[:-offset]
-    centers, velocity, speed = body_motion(features, policy)
+    centers, velocity, speed = (body_motion(features, policy)
+                                if measured_motion is None else measured_motion)
     distance = smooth(features.pair_distance_cm[:, pair], features.fps * policy.motion_window_s)
     lag = max(1, round(features.fps * policy.motion_window_s))
     closing = np.zeros(len(valid))
@@ -237,6 +265,15 @@ def pair_phases(features: ExportedFeatures, pair: int, params: HeuristicParamete
             start = onset
             # A completed approach must actually reach the requested boundary.
             # A clip ending far away or losing motion/geometry stays for review.
+            if (accept_observed_endpoint and end == len(valid)
+                    and geometry_known[end - 1] and motion_known[end - 1]
+                    and not guarded[end - 1]
+                    and abs(nearest[end - 1] - policy.approach_stop_distance_cm)
+                    <= policy.approach_endpoint_tolerance_cm):
+                # The measured final frame is sufficient at an already cropped
+                # input boundary. No fabricated successor or extra duration.
+                approach[start:end] = True
+                continue
             if not (end < len(valid) and geometry_known[end]
                     and nearest[end] <= max(clearance, policy.approach_stop_distance_cm)):
                 continue
@@ -311,7 +348,8 @@ def pair_phases(features: ExportedFeatures, pair: int, params: HeuristicParamete
             "attack": attack, "strict_attack": strict_attack, "attack_seed": attack_seed, "chasing": chasing,
             "together": together, "quiet": quiet, "nearest_surface_cm": nearest,
             "nearest_keypoint_cm": keypoint_nearest, "pursuit_similarity": direction,
-            "speed_cm_s": speed, "centers_cm": centers, "velocity_cm_s": velocity}
+            "speed_cm_s": speed, "centers_cm": centers, "velocity_cm_s": velocity,
+            "geometry_known": geometry_known, "head_active": head_active}
 
 
 def posture_evidence(features: ExportedFeatures, policy: ScreenPolicy, *, arena_quad_cm=None):

@@ -126,8 +126,7 @@ def test_bounded_brief_body_excursion_stays_static_in_both_adapters(tmp_path):
     features = replace(features, centers_cm=modified_centers, speed_cm_s=modified_speed)
     temporal = predict_features(features, config_seed_parameters(cfg), temporal_only=True)
 
-    assert not temporal["individual_masks"]["stationary"][0, 0]
-    assert temporal["individual_masks"]["stationary"][1:, 0].all()
+    assert temporal["individual_masks"]["stationary"][:, 0].all()
     assert not temporal["individual_masks"]["locomotion"][:, 0].any()
 
 
@@ -141,24 +140,26 @@ def test_measured_body_parameter_boundaries_and_unchanged_time():
         assert thresholds.motion.static_max_center_radius_cm == pytest.approx(1.3375)
         assert thresholds.motion.static_max_transient_duration_s == pytest.approx(.2)
         assert thresholds.motion.static_max_transient_displacement_cm == pytest.approx(1.3375)
-        assert params.stationary_transient_max_duration_s == pytest.approx(.2)
-        assert params.stationary_transient_max_displacement_cm == pytest.approx(1.3375)
-        assert params.stationary_max_center_radius_cm == pytest.approx(1.3375)
+        # The legacy hierarchical adapter keeps its serialized thresholds;
+        # current exported inference owns the approved 4 cm / 1 s policy.
+        assert params.stationary_transient_max_duration_s == pytest.approx(1.)
+        assert params.stationary_transient_max_displacement_cm == pytest.approx(4.)
+        assert params.stationary_max_center_radius_cm == pytest.approx(4.)
         assert thresholds.social.together_min_distance_cm == pytest.approx(4.0125)
-        assert thresholds.social.together_max_distance_cm == pytest.approx(8.025)
-        assert params.contact_distance_cm == pytest.approx(2.675)
+        assert thresholds.social.together_max_distance_cm == pytest.approx(7.)
+        assert params.contact_distance_cm == pytest.approx(12.985665630296548)
         assert params.chase_min_speed_cm_s == pytest.approx(26.75)
         assert params.attack_mild_nose_accel_cm_s2 == pytest.approx(66.875)
-        assert params.isolation_distance_cm == pytest.approx(26.75)
-        assert params.group_locomotion_max_distance_cm == pytest.approx(33.4375)
+        assert params.isolation_distance_cm == pytest.approx(20.)
+        assert params.group_locomotion_max_distance_cm == pytest.approx(64.03693389892578)
         assert params.stationary_min_duration_s == 1.
         assert params.huddle_min_duration_s == 5.
         assert params.chase_min_duration_s == 1.
         assert params.chase_min_direction_similarity == .707
         assert params.huddle_width_multiplier == 2.
-    assert HeuristicParameters().stationary_max_speed_cm_s == pytest.approx(13.375)
-    assert HeuristicParameters().stationary_transient_max_duration_s == pytest.approx(.2)
-    assert HeuristicParameters().stationary_transient_max_displacement_cm == pytest.approx(1.3375)
+    assert HeuristicParameters().stationary_max_speed_cm_s == pytest.approx(.66875)
+    assert HeuristicParameters().stationary_transient_max_duration_s == pytest.approx(1.)
+    assert HeuristicParameters().stationary_transient_max_displacement_cm == pytest.approx(4.)
     assert core.MotionThresholds().static_max_speed_cm_s == pytest.approx(.66875)
     collective = CollectiveRuleConfig.from_mapping(None)
     assert collective.active_speed_cm_s == pytest.approx(4.0125)
@@ -179,16 +180,16 @@ def test_invalid_explicit_width_fallback_is_rejected(width):
 def test_calibrated_width_and_parameters_are_not_scaled_twice():
     cfg = load_config(ROOT / "configs/default.yaml")
     resolved = resolve_scale(cfg["scale"], reference_body_px=100.)
-    assert resolved.cm_per_pixel == pytest.approx(.107)
-    assert resolved.reference_width_cm == pytest.approx(4.1467)
+    assert resolved.cm_per_pixel == pytest.approx(.07918)
+    assert resolved.reference_width_cm == pytest.approx(3.068558)
     first = config_seed_parameters(cfg)
     second = config_seed_parameters(cfg)
     assert first == second
-    assert first.stationary_max_speed_cm_s == pytest.approx(13.375)
-    assert cfg["extended_behavior"]["individual"]["stationary_max_speed_cm_s"] == 13.375
-    assert cfg["extended_behavior"]["individual"]["stationary_transient_max_duration_seconds"] == .2
-    assert cfg["extended_behavior"]["individual"]["stationary_transient_max_displacement_cm"] == 1.3375
-    assert cfg["extended_behavior"]["individual"]["stationary_max_center_radius_cm"] == 1.3375
+    assert first.stationary_max_speed_cm_s == pytest.approx(.66875)
+    assert cfg["extended_behavior"]["individual"]["stationary_max_speed_cm_s"] == .66875
+    assert cfg["extended_behavior"]["individual"]["stationary_transient_max_duration_seconds"] == 1.
+    assert cfg["extended_behavior"]["individual"]["stationary_transient_max_displacement_cm"] == 4.
+    assert cfg["extended_behavior"]["individual"]["stationary_max_center_radius_cm"] == 4.
 
 
 def test_missing_hip_and_ear_width_uses_measured_fallback(tmp_path):
@@ -198,9 +199,9 @@ def test_missing_hip_and_ear_width_uses_measured_fallback(tmp_path):
     path.write_text(json.dumps([{"frame": 0, "detections": [
         {"track_id": 7, "keypoints": points.tolist()}]}]), encoding="utf-8")
     features = load_exported_features(path, fps=30.)
-    assert features.cm_per_pixel == pytest.approx(.107)
-    assert features.mouse_width_cm == pytest.approx(4.1467)
-    assert features.body_width_ref_cm[0] == pytest.approx(4.1467)
+    assert features.cm_per_pixel == pytest.approx(.07918)
+    assert features.mouse_width_cm == pytest.approx(3.068558)
+    assert features.body_width_ref_cm[0] == pytest.approx(3.068558)
 
 
 @pytest.mark.parametrize("gap_cm, contact_expected", [(4.5, True), (5.5, False)])

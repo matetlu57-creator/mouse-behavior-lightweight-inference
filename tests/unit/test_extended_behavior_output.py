@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from pathlib import Path
 
 from mouse_behavior.annotation_website_export import build_annotations
@@ -125,14 +126,20 @@ def test_website_export_includes_all_new_behavior_names_and_participants():
     assert by_name["群体分散"]["mouse_ids"] == [0, 1, 2]
 
 
-def _individual_events(speed: np.ndarray, frames: int, individual_cfg: dict) -> list[dict]:
+def _individual_events(
+    speed: np.ndarray, frames: int, individual_cfg: dict,
+    *, centers_cm: np.ndarray | None = None,
+) -> list[dict]:
     """Run only the individual/group ethogram over a synthetic one-mouse track."""
 
+    if centers_cm is None:
+        centers_cm = np.zeros((frames, 1, 2), dtype=float)
+        centers_cm[1:, 0, 0] = np.cumsum(speed[1:, 0]) / 30.0
     kin = {
         "valid": np.ones((frames, 1), dtype=bool),
         "behavior_speed": speed,
         "pose_quality": np.ones((frames, 1), dtype=float),
-        "centers_cm": np.zeros((frames, 1, 2), dtype=float),
+        "centers_cm": centers_cm,
         "body_cm": np.full((frames, 1), 8.0, dtype=float),
         "reference_body_cm": 8.0,
     }
@@ -153,52 +160,55 @@ def test_locomotion_spans_the_whole_merged_speed_band():
     """One merged label covers the former Walking *and* Running speed ranges."""
 
     # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
-    frames = 9
-    speed = np.array([84.9] * 3 + [85.0] * 3 + [85.1] * 3, dtype=float)[:, None]
+    frames = 60
+    speed = np.repeat([84.9, 85.0, 85.1], 20)[:, None]
     events = _individual_events(speed, frames, {
         "stationary_max_speed_cm_s": 4.0,
         # running_min_speed_cm_s is retained as the locomotion score normaliser
         # and the Chasing high-speed floor; it no longer splits individual labels.
         "running_min_speed_cm_s": 85.0,
-        "locomotion_min_duration_seconds": 0.05,
+        "motion_speed_threshold_cm_s": 4.0,
+        "locomotion_min_duration_seconds": 0.5,
         "confirm_seconds": 0.05,
         "fill_gap_seconds": 0.0,
         "min_pose_quality": 0.2,
     })
 
     by_behavior = {event["behavior"]: event for event in events}
-    # The old 85.0 cm/s Walking/Running boundary is gone: frames 0-8 are one event.
+    # The old 85.0 cm/s split is gone: the real 2 s trajectory is one event.
     assert by_behavior["locomotion"]["start_frame"] == 0
-    assert by_behavior["locomotion"]["end_frame"] == 8
+    assert by_behavior["locomotion"]["end_frame"] == frames - 1
     assert sum(event["behavior"] == "locomotion" for event in events) == 1
     for deleted in ("walking", "running"):
         assert deleted not in by_behavior, f"{deleted} must stay deleted"
 
 
-def test_locomotion_boundary_is_only_the_static_ceiling():
-    """The single individual speed gate is `speed > stationary_max_speed_cm_s`."""
-
-    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
-    frames = 5
-    speed = np.array([1.0, 4.0, 4.1, 85.0, 200.0], dtype=float)[:, None]
+@pytest.mark.parametrize("physical_speed, expected", [
+    (0.0, "stationary"), (4.1, "locomotion"),
+    (85.0, "locomotion"), (200.0, "locomotion"),
+])
+def test_locomotion_uses_shared_motion_policy_and_measured_centers(physical_speed, expected):
+    """The shared 4 cm/s policy reads centers, independent of the legacy mirror."""
+    frames = 90
+    speed = np.full((frames, 1), 200.0 if physical_speed == 0.0 else 1.0)
+    centers = np.zeros((frames, 1, 2))
+    centers[:, 0, 0] = np.arange(frames) * physical_speed / 30.0
     events = _individual_events(speed, frames, {
-        "stationary_max_speed_cm_s": 4.0,
+        "stationary_max_speed_cm_s": 999.0,
+        "motion_speed_threshold_cm_s": 4.0,
         "running_min_speed_cm_s": 85.0,
-        "locomotion_min_duration_seconds": 0.05,
-        "stationary_min_duration_seconds": 0.05,
+        "locomotion_min_duration_seconds": 0.5,
+        "stationary_min_duration_seconds": 1.0,
         "confirm_seconds": 0.05,
         "fill_gap_seconds": 0.0,
         "min_pose_quality": 0.2,
-    })
+    }, centers_cm=centers)
 
     by_behavior = {event["behavior"]: event for event in events}
-    assert by_behavior["stationary"]["start_frame"] == 0
-    assert by_behavior["stationary"]["end_frame"] == 1
-    # Frames 2-4 stay one Locomotion event even though they cross the retained
-    # 85.0 cm/s normaliser, proving no second individual boundary exists.
-    assert by_behavior["locomotion"]["start_frame"] == 2
-    assert by_behavior["locomotion"]["end_frame"] == 4
-    assert sum(event["behavior"] == "locomotion" for event in events) == 1
+    assert set(by_behavior) == {expected}
+    assert by_behavior[expected]["start_frame"] == 0
+    assert by_behavior[expected]["end_frame"] == frames - 1
+    assert len(events) == 1
 
 
 def test_isolation_does_not_average_distance_to_a_far_companion():

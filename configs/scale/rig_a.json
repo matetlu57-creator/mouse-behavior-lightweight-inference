@@ -26,17 +26,17 @@
     ]
   ],
   "box_inner_cm": {
-    "width": 100.0,
-    "height": 100.0
+    "width": 74.0,
+    "height": 74.0
   },
   "scale": {
-    "px_per_cm_width": 7.750232868879021,
-    "px_per_cm_height": 7.7493942496589625,
+    "px_per_cm_width": 10.473287660647326,
+    "px_per_cm_height": 10.472154391431031,
     "axis_consistency_ratio": 1.000108217390036,
-    "px_per_cm": 7.749813559268992,
-    "cm_per_pixel": 0.1290353622512599
+    "px_per_cm": 10.472721026039178,
+    "cm_per_pixel": 0.09548616806593231
   },
-  "homography_px_per_cm": 7.749813559268992,
+  "homography_px_per_cm": 10.472721026039178,
   "homography": [
     [
       1.0338204767822126,
@@ -66,13 +66,13 @@
     "max_relative_edge_deviation": 0.022953040002786314
   },
   "subject_metrics": {
-    "cm_per_pixel_used": 0.1290353622512599,
+    "cm_per_pixel_used": 0.09548616806593231,
     "segments_cm": {
       "hip_width": {
-        "mean_cm": 4.1467
+        "mean_cm": 3.068558
       }
     },
-    "unified_body_length_cm": 10.7,
-    "definition": "Unified nose-to-tail-base length and mean hip width from pose-valid tracks; local video paths and track IDs intentionally omitted."
+    "unified_body_length_cm": 7.918,
+    "definition": "Reference body length is nose tip to tail base (7.918 cm); reference body width is mean hip width (3.068558 cm). Arena is a 74 x 74 cm square; local video paths and track IDs intentionally omitted."
   }
 }

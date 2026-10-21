@@ -186,6 +186,7 @@ class MotionThresholds:
     locomotion_min_duration_s: float = 0.5
     static_min_duration_s: float = 1.0
     static_max_center_radius_cm: float = 1.3375
+    static_min_projected_body_length_ratio: float = 0.55
     static_max_transient_duration_s: float = 0.2
     static_max_transient_displacement_cm: float = 1.3375
     # walking_min_speed_cm_s: float = 0.5
@@ -198,6 +199,10 @@ class MotionThresholds:
     def validate(self) -> None:
         for name, value in self.__dict__.items():
             _finite_nonnegative(name, float(value))
+        _unit_interval(
+            "static_min_projected_body_length_ratio",
+            self.static_min_projected_body_length_ratio,
+        )
         if self.static_max_speed_cm_s > self.moving_min_speed_cm_s:
             raise ValueError("Static and Locomotion speed intervals overlap")
         if self.moving_min_speed_cm_s > self.running_min_speed_cm_s:
@@ -378,6 +383,9 @@ class MotionWindowStats:
     # speed-only Static rule remains in force.
     transient_motion_duration_s: float | None = None
     transient_displacement_cm: float | None = None
+    # Minimum 2D nose-to-tail projected length divided by calibrated reference
+    # body length over this window. None keeps older summary callers compatible.
+    min_projected_body_length_ratio: float | None = None
 
     @property
     def directionality(self) -> float:
@@ -674,40 +682,65 @@ def detect_individual_motion(stats: MotionWindowStats, cfg: MotionThresholds) ->
         _finite_nonnegative("transient_motion_duration_s", stats.transient_motion_duration_s)
     if stats.transient_displacement_cm is not None:
         _finite_nonnegative("transient_displacement_cm", stats.transient_displacement_cm)
+    if stats.min_projected_body_length_ratio is not None:
+        _unit_interval(
+            "min_projected_body_length_ratio",
+            stats.min_projected_body_length_ratio,
+        )
     speed = stats.mean_speed_cm_s
     if not np.isfinite(speed):
         return BehaviorDecision(Level.INDIVIDUAL, MotionLabel.UNKNOWN.value, (stats.mouse_id,))
-    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）：负定义互斥门；理毛/站立攀爬证据门已就位，检测器默认关闭（Step 5-A 标定后启用）。
+    # Summary adapter for v13; the temporal detector owns posture evidence.
     transient_excursion = (
         stats.transient_motion_duration_s is not None
         and stats.transient_displacement_cm is not None
         and 0 < stats.transient_motion_duration_s <= cfg.static_max_transient_duration_s
         and stats.transient_displacement_cm <= cfg.static_max_transient_displacement_cm
     )
+    bounded_segment_displacement = (
+        stats.transient_motion_duration_s in (None, 0.0)
+        and stats.net_displacement_cm <= cfg.static_max_transient_displacement_cm
+        and stats.center_radius_cm <= cfg.static_max_center_radius_cm
+    )
     locomotion = (stats.duration_s >= cfg.locomotion_min_duration_s
-                  and speed >= cfg.moving_min_speed_cm_s
+                  and speed > cfg.moving_min_speed_cm_s
                   and not transient_excursion
+                  and not bounded_segment_displacement
                   and not stats.rearing_evidence and not stats.grooming_evidence)
-    static = (stats.duration_s >= cfg.static_min_duration_s
-              and ((0 <= speed < cfg.static_max_speed_cm_s) or transient_excursion)
-              and stats.center_radius_cm <= cfg.static_max_center_radius_cm
-              and not stats.rearing_evidence and not stats.grooming_evidence)
-    if stats.rearing_evidence:
-        return BehaviorDecision(Level.INDIVIDUAL, MotionLabel.REARING.value, (stats.mouse_id,), 1.0,
-                                evidence={"speed_cm_s": speed})
+    static = (
+        stats.duration_s >= cfg.static_min_duration_s
+        and (
+            (
+                (0 <= speed <= cfg.static_max_speed_cm_s or transient_excursion)
+                and stats.center_radius_cm <= cfg.static_max_center_radius_cm
+            )
+            or bounded_segment_displacement
+        )
+        and not stats.rearing_evidence
+        and not stats.grooming_evidence
+    )
     if stats.grooming_evidence:
         return BehaviorDecision(Level.INDIVIDUAL, MotionLabel.GROOMING.value, (stats.mouse_id,), 1.0,
                                 evidence={"speed_cm_s": speed})
+    if stats.rearing_evidence:
+        return BehaviorDecision(Level.INDIVIDUAL, MotionLabel.REARING.value, (stats.mouse_id,), 1.0,
+                                evidence={"speed_cm_s": speed})
     if locomotion and static:
         raise RuntimeError("individual motion gates overlap; do not resolve by priority")
+    static_evidence = {
+        "speed_cm_s": speed,
+        "center_radius_cm": stats.center_radius_cm,
+        "net_displacement_cm": float(stats.net_displacement_cm),
+        "transient_motion_duration_s": float(stats.transient_motion_duration_s or 0.0),
+        "transient_displacement_cm": float(stats.transient_displacement_cm or 0.0),
+    }
+    if stats.min_projected_body_length_ratio is not None:
+        static_evidence["min_projected_body_length_ratio"] = float(
+            stats.min_projected_body_length_ratio
+        )
     for matched, label, evidence in (
         (locomotion, MotionLabel.LOCOMOTION, {"speed_cm_s": speed, "active_fraction": stats.active_fraction}),
-        (static, MotionLabel.STATIC, {
-            "speed_cm_s": speed,
-            "center_radius_cm": stats.center_radius_cm,
-            "transient_motion_duration_s": float(stats.transient_motion_duration_s or 0.0),
-            "transient_displacement_cm": float(stats.transient_displacement_cm or 0.0),
-        }),
+        (static, MotionLabel.STATIC, static_evidence),
     ):
         if matched:
             return BehaviorDecision(Level.INDIVIDUAL, label.value, (stats.mouse_id,), 1.0, evidence=evidence)

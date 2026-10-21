@@ -27,7 +27,24 @@ def test_source_hashes_cover_every_module_and_have_a_stable_aggregate() -> None:
     hashes = adapter.exported_dataset_source_hashes(repository_root)
 
     assert tuple(hashes) == adapter.EXPORTED_DATASET_SOURCE_FILES
-    assert len(hashes) == 9
+    assert tuple(hashes) == tuple(sorted(hashes))
+    required_implementation_files = {
+        "src/mouse_behavior/evaluation/exported_dataset_prediction.py",
+        "src/mouse_behavior/evaluation/confirmed_rules.py",
+        "src/mouse_behavior/evaluation/clustering_formation.py",
+        "src/mouse_behavior/evaluation/event_frames.py",
+        "src/mouse_behavior/evaluation/pair_roles.py",
+        "src/mouse_behavior/evaluation/screening_signals.py",
+        "src/mouse_behavior/evaluation/social_event_geometry.py",
+        "src/mouse_behavior/evaluation/social_heuristic_config.py",
+        "src/mouse_behavior/evaluation/group_event_rules.py",
+        "src/mouse_behavior/evaluation/group_heuristic_config.py",
+        "src/mouse_behavior/behavior/static_rule.py",
+        "src/mouse_behavior/behavior/individual_rules.py",
+        "src/mouse_behavior/preprocessing/scale_resolution.py",
+    }
+    assert required_implementation_files <= set(hashes)
+    assert len(hashes) == len(set(adapter.EXPORTED_DATASET_SOURCE_FILES))
     assert all(
         hashlib.sha256((repository_root / relative_path).read_bytes()).hexdigest() == digest
         for relative_path, digest in hashes.items()
