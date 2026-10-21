@@ -166,7 +166,9 @@ def main() -> int:
         "prediction_count": len(clips),
         "predictions_sha256": _sha256(predictions_path),
         "evidence_sha256": _sha256(evidence_path),
-        "parameters_sha256": _sha256(args.model_dir / "tuned_parameters.json"),
+        # Parameters and ranking weights are sealed together in this verified file.
+        "parameters_sha256": provenance["model_sha256"],
+        "parameters_file": provenance["model_file"],
         "feature_debug_sha256": _sha256(debug_path),
         "feature_debug_rows": len(debug_rows),
         "blind_manifest_sha256": _sha256(args.blind_manifest),

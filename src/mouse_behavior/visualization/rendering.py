@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from collections import defaultdict
 from pathlib import Path
@@ -44,6 +45,26 @@ from .overlay import (
 LOGGER = logging.getLogger("mouse_behavior.lightweight_behavior_inference")
 
 
+def _verified_render_identity(metadata_path: Path, explicit_map: Path | None):
+    """Bind event slot identities to the mapping bytes used during analysis."""
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    if not isinstance(metadata, dict):
+        raise ValueError("analysis identity metadata must be an object")
+    map_path = explicit_map or metadata.get("identity_map")
+    if map_path is None:
+        if metadata.get("identity_source") == "rfid_mtrack":
+            raise ValueError("RFID analysis is missing its identity map")
+        return metadata, None
+    mapping = load_identity_map(map_path)
+    if (metadata.get("identity_source") != "rfid_mtrack"
+            or not metadata.get("identity_map_sha256")
+            or not metadata.get("identity_labels")):
+        raise ValueError("RFID render requires sealed analysis identity metadata; rerun analysis")
+    if mapping.source_sha256 != metadata["identity_map_sha256"]:
+        raise ValueError("identity map hash changed since analysis")
+    return metadata, mapping
+
+
 def render_behavior_video(
     video_path: Path,
     cache_dir: Path,
@@ -66,6 +87,9 @@ def render_behavior_video(
     if max_frames is not None:
         total_cache_frames = min(total_cache_frames, max(int(max_frames), 1))
 
+    metadata, identity_map = _verified_render_identity(
+        events_path.parent / "lightweight_analysis_metadata.json", identity_map_path,
+    )
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"无法打开源视频: {video_path}")
@@ -87,16 +111,6 @@ def render_behavior_video(
             require_video_match=True,
         )
         arena_polygon = np.asarray(boundary.polygon, dtype=np.float64)
-    metadata_path = events_path.parent / "lightweight_analysis_metadata.json"
-    if metadata_path.exists():
-        try:
-            with metadata_path.open("r", encoding="utf-8") as handle:
-                metadata = json.load(handle)
-            if identity_map_path is None and metadata.get("identity_map"):
-                identity_map_path = Path(str(metadata["identity_map"]))
-        except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
-            LOGGER.warning("[render] unable to read identity settings: %s", metadata_path)
-    identity_map = load_identity_map(identity_map_path) if identity_map_path is not None else None
     tracks, _tracking_stats = load_trajectory_cache(
         cache_dir,
         total_cache_frames,
@@ -105,6 +119,11 @@ def render_behavior_video(
         arena_polygon=arena_polygon,
     )
     identity_labels = tuple(str(value) for value in tracks["identity_labels"])
+    if (("identity_labels" in metadata and tuple(metadata["identity_labels"]) != identity_labels)
+            or ("identity_source" in metadata
+                and metadata["identity_source"] != tracks["identity_source"])):
+        cap.release()
+        raise ValueError("render identity labels/source differ from the saved analysis")
 
     event_frame_map: list[list[dict[str, Any]]] = [[] for _ in range(total_cache_frames)]
     if not events_path.exists():
@@ -351,6 +370,15 @@ def render_behavior_video(
             normalized_focus,
             focus_evidence_frames / max(frame_index, 1),
         )
+    output_path.with_suffix(".identity.json").write_text(
+        json.dumps({
+            "source_video": str(video_path), "events_path": str(events_path),
+            "events_sha256": hashlib.sha256(events_path.read_bytes()).hexdigest(),
+            "identity_source": tracks["identity_source"], "identity_labels": identity_labels,
+            "identity_map": tracks.get("identity_map"),
+            "identity_map_sha256": tracks.get("identity_map_sha256"),
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
     return output_path
 
 

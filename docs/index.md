@@ -81,3 +81,12 @@ and [the architecture decision](adr/2026-10-21-independent-posture-and-standalon
 The repository CI executes complete quality gates on Python 3.10 and 3.11 under
 the existing required check names. CI success does not validate scientific
 classification accuracy or alter human-reviewed A1/A2 results.
+
+RFID analysis now seals the exact mapping CSV bytes as `identity_map_sha256`.
+Re-rendering checks this digest, source and slot labels before publishing; legacy
+RFID metadata without the digest requires re-analysis. Visual-only website exports
+retain raw visual IDs and emit no biological `animal_id`. All group review approvals
+require at least three observed IDs. The historical viewer's correct/error navigation
+uses strict matches; old diagnostic values never grant current credit. See the
+[pre-merge audit and migration notes](posture-v3-duration-review-2026-10-21.md#父-pr-16-合并前补查与修复)
+and [explicit frozen-media packaging](../tools/video_review_viewer/README.md).

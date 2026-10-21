@@ -21,6 +21,8 @@ of being resolved heuristically.
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
 import math
 from bisect import bisect_right
 from dataclasses import dataclass
@@ -93,6 +95,7 @@ class IdentityMap:
         assignments: Iterable[IdentityAssignment],
         *,
         source_path: Path | None = None,
+        source_sha256: str | None = None,
     ) -> None:
         grouped: dict[int, list[IdentityAssignment]] = {}
         unique: set[tuple[int, int, int, str]] = set()
@@ -143,6 +146,7 @@ class IdentityMap:
         )
         self.animal_ids = tuple(dict.fromkeys(animal for _frame, animal in ordered_animals))
         self.source_path = Path(source_path) if source_path is not None else None
+        self.source_sha256 = source_sha256
 
     def __bool__(self) -> bool:
         return bool(self._by_visual_id)
@@ -173,7 +177,9 @@ def load_identity_map(path: str | Path) -> IdentityMap:
     if not csv_path.exists():
         raise FileNotFoundError(csv_path)
     assignments: list[IdentityAssignment] = []
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+    # Seal the exact bytes parsed, so later in-place CSV changes cannot relabel a render.
+    raw_csv = csv_path.read_bytes()
+    with io.StringIO(raw_csv.decode("utf-8-sig"), newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
             raise ValueError(f"identity CSV has no header: {csv_path}")
@@ -225,7 +231,9 @@ def load_identity_map(path: str | Path) -> IdentityMap:
 
     if not assignments:
         raise ValueError(f"identity CSV contains no assignments: {csv_path}")
-    return IdentityMap(assignments, source_path=csv_path)
+    return IdentityMap(
+        assignments, source_path=csv_path, source_sha256=hashlib.sha256(raw_csv).hexdigest(),
+    )
 
 
 __all__ = ["IdentityAssignment", "IdentityMap", "load_identity_map"]

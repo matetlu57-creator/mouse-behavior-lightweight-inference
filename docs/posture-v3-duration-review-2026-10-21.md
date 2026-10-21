@@ -9,9 +9,29 @@
 - [PR #17：当前规则、独立姿态审核与视频时长修复](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/pull/17) 已合入 `codex/modularize-exported-dataset`。
 - #17 合并提交为 [`a7832545f62bc2cecf67b9f20ceea81c01b58f34`](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/commit/a7832545f62bc2cecf67b9f20ceea81c01b58f34)，被验证的功能提交为 `5f4901e2c1b608f352bd4d7727dd6dbf72a2f48c`。
 - [PR #16](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/pull/16) 是这些提交进入 `main` 的发布入口；其 GitHub 合并记录是主分支发布状态的依据。本文件随该入口更新，不以本地原始分支名代替远端状态。
-- 隔离 PR 分支执行完整质量门：**1148 passed、20 skipped、9 xfailed**；lint、compile、仓库安全检查、wheel/sdist 构建通过。[推送 CI](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/actions/runs/39606282429) 与 [PR CI](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/actions/runs/39606617425) 均通过。跳过项依赖未公开的本地历史校准产物，预期失败属于保留的历史审计，均不等于科学识别验收通过。
+- 补查前隔离 PR 分支执行完整质量门：**1148 passed、20 skipped、9 xfailed**；lint、compile、仓库安全检查、wheel/sdist 构建通过。[推送 CI](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/actions/runs/39606282429) 与 [PR CI](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/actions/runs/39606617425) 均通过。跳过项依赖未公开的本地历史校准产物，预期失败属于保留的历史审计，均不等于科学识别验收通过。
 - 主分支保护要求 `quality (3.10)`、`quality (3.11)`；CI 现按这两个准确名称分别执行完整质量门。恢复矩阵是为了满足现有保护条件，没有降低或绕过保护规则。
 - 本轮只集成源码、测试、文档与 CI；原始数据、人工审核记录、视频和 A1/A2 保持不变。Grooming/Rearing 继续采用显式审核模式，默认正典停用。
+
+## 父 PR #16 合并前补查与修复
+
+早期自动审查意见中，严格 Top-1 的 ID 集合相等和传递源码哈希已由当前代码修复；其余接口问题不能因 Python 质量门通过而视为已解决。本轮补查修复如下，行为门槛和审核指标未重算。
+
+| 问题 | 修复与回归证据 |
+|---|---|
+| 历史盲推理收据依赖未生成的 `tuned_parameters.json` | 只引用已验证 `frozen_model.json`；集成测试删除旧侧文件，完成预测、收据、独立评分以及模型篡改拒绝 |
+| 通用 `track_id` 被隐式当作追踪器 ID | 缓存必须显式提供 `visual_track_id`；仅含旧字段的缓存拒绝加载 |
+| 未解析视觉身份被导出为动物身份 | 非 `rfid_mtrack` 输出 `animal_id: null`、身份置信度 0；保留真实视觉 ID 与本地槽位的区别 |
+| RFID CSV 可在分析后被修改并用于重渲染 | 对实际解析的 CSV 字节封存 SHA-256，贯穿轨迹、分析及导出元数据；渲染拒绝映射哈希、标签顺序或来源漂移，并输出 `.identity.json` 收据 |
+| 3 类群体审核允许不足 3 个成员 | Huddling、Dispersal、Group locomotion、Social clustering 统一至少 3 个实际可见 ID，原数据不写回 |
+| 历史网页将旧兼容命中显示为成功 | 正确／错误导航仅依据严格行为与 ID 匹配；旧值仅以不计分的历史诊断展示 |
+| 空／损坏清单导致崩溃或持续加载，部署遗漏视频 | 验证嵌套清单、超时和错误恢复；只有显式选择且 SHA 匹配的完成清单才能打包，逐个复制所引用视频并封存哈希，保留范围请求与 HEAD |
+
+新增回归前复现 7 项失败；修复后的针对性 Python 检查 18 项通过。包含新回归的全仓库结果为 **1161 passed、20 skipped、9 xfailed**；前端构建与 12 项 Node 测试通过。旧的 1148 项通过是补查前的完整基线，不是本轮最终测试计数。CI 同时执行 Python 3.10、3.11，3.10 作业另执行锁定前端依赖的构建与测试。
+
+浏览器冒烟使用明确标记为“非科学结果”的合成 H.264 片段，确认 `readyState=4`、播放从 0 前进至 3 秒且无媒体错误；故意设置“历史成功但严格错误”的条目仍显示错误。缺失清单页面保留筛选、搜索和重试入口。该冒烟不构成新的行为准确率测量，也未将私人视频／数据提交到 Git。
+
+兼容性：旧的 RFID 分析元数据若缺少映射摘要，须重新运行分析后再渲染；旧的通用 `track_id` 缓存须用外部追踪器重建。默认前端构建只交付页面外壳，私有审核清单与视频须按 [网页打包说明](../tools/video_review_viewer/README.md) 显式选取；本轮没有发布网站。
 
 ## 已修改的路径与职责
 
@@ -77,4 +97,4 @@ python scripts/run_canonical_behavior_video.py --video <源视频> --pose-cache 
 
 复现 176 段回放：`scripts/audit_posture_v3.py --manifest <冻结split_manifest_v31.json> --baseline-results <原包results_v31目录> --output <全新目录>`。
 
-PR #17 最初以模块化 PR #16 的分支为基底，现已合入该发布分支，并携带运行此管线所需的当前正典规则依赖。原始工作目录与审核结果保留。758 项通过、176 段回放和媒体时长属于 PR 准备前的本地快照证据；1148 项通过属于隔离 PR 分支完整仓库回归。这两组计数不可相加或互相替代。更详细的源文件哈希、保护清单和远端合并收据保留在本地结果目录。
+PR #17 最初以模块化 PR #16 的分支为基底，现已合入该发布分支，并携带运行此管线所需的当前正典规则依赖。原始工作目录与审核结果保留。758 项通过、176 段回放和媒体时长属于 PR 准备前的本地快照证据；1148 项通过属于补查前隔离 PR 分支完整仓库基线，1161 项通过属于本轮补查修复后的完整回归。这些计数不可相加或互相替代。更详细的源文件哈希、保护清单和远端合并收据保留在本地结果目录。

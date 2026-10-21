@@ -576,6 +576,7 @@ def analyze(
         "identity_source": str(tracks["identity_source"]),
         "identity_labels": list(identity_labels),
         "identity_map": str(identity_map_path) if identity_map_path is not None else None,
+        "identity_map_sha256": tracks.get("identity_map_sha256"),
         "expected_mice": int(expected_mice),
         "source_frames": int(total_frames),
         "analysis_frames": int(analysis_frames),

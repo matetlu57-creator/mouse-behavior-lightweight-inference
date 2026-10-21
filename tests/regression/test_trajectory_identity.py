@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import hashlib
 
 from mouse_behavior.identity.mtrack import load_identity_map
 from mouse_behavior.tracking.cache import TrajectoryCacheError, load_trajectory_cache
@@ -89,6 +90,7 @@ def test_rfid_mapping_corrects_visual_id_switch_without_guessing(
     assert np.allclose(tracks["identity_confidence"], [[0.99, 0.99], [0.97, 0.97]])
     assert stats["identity_source"] == "rfid_mtrack"
     assert stats["unresolved_detection_count"] == 0
+    assert tracks["identity_map_sha256"] == hashlib.sha256(mapping_path.read_bytes()).hexdigest()
 
 
 def test_old_untracked_cache_is_rejected(tmp_path, write_pose_cache, pose_payload_factory):
@@ -99,3 +101,13 @@ def test_old_untracked_cache_is_rejected(tmp_path, write_pose_cache, pose_payloa
 
     with pytest.raises(TrajectoryCacheError, match="visual_track_id"):
         load_trajectory_cache(cache_dir, total_frames=1, expected_mice=1)
+
+
+def test_legacy_track_id_cannot_impersonate_visual_track_id(
+    tmp_path, write_pose_cache, pose_payload_factory,
+):
+    detection = pose_payload_factory(42, 10.0)
+    detection['track_id'] = detection.pop('visual_track_id')
+    cache = write_pose_cache(tmp_path / 'cache', [{'frame': 0, 'pose_detections': [detection]}])
+    with pytest.raises(TrajectoryCacheError, match='visual_track_id'):
+        load_trajectory_cache(cache, total_frames=1, expected_mice=1)

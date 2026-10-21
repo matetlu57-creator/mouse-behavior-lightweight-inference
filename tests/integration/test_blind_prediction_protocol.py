@@ -43,10 +43,6 @@ def test_frozen_inference_precedes_separate_label_scoring(tmp_path: Path) -> Non
                     "ranking_weights": {"stationary": 1.0}}),
         encoding="utf-8",
     )
-    (model_dir / "tuned_parameters.json").write_text(
-        json.dumps(HeuristicParameters().as_dict()),
-        encoding="utf-8",
-    )
     source = REPO_ROOT / "src/mouse_behavior/evaluation/blind_top1.py"
     (model_dir / "run_provenance.json").write_text(
         json.dumps(
@@ -74,6 +70,8 @@ def test_frozen_inference_precedes_separate_label_scoring(tmp_path: Path) -> Non
         cwd=REPO_ROOT, capture_output=True, text=True, check=False,
     )
     assert inference.returncode == 0, inference.stderr
+    receipt = json.loads((predictions_dir / "prediction_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["parameters_sha256"] == hashlib.sha256(model_file.read_bytes()).hexdigest()
     with (predictions_dir / "predictions.csv").open("r", encoding="utf-8-sig") as handle:
         prediction = next(csv.DictReader(handle))
     assert prediction["predicted_behavior"] == "stationary"

@@ -3,7 +3,9 @@ export default {
     const response = await env.ASSETS.fetch(request);
     const acceptsHtml = request.headers.get("accept")?.includes("text/html");
 
-    if (response.status !== 404 || !acceptsHtml || !["GET", "HEAD"].includes(request.method)) {
+    const pathname = new URL(request.url).pathname;
+    if (response.status !== 404 || !acceptsHtml || !["GET", "HEAD"].includes(request.method)
+        || /\.(json|mp4)$/i.test(pathname)) {
       return response;
     }
 

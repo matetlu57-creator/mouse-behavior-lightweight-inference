@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { loadReviewData } from './review-data.js';
 
 const EMPTY_DATA = { metrics: { total: 0, success: 0, errors: 0, strictTop1Rate: 0 }, behaviors: [], items: [] };
 const REVIEW_DATA_FILES = {
@@ -17,7 +18,7 @@ const REVIEW_TITLES = {
   v8: '验证集渲染视频 · 群体手工特征版 v8',
   v9: '验证集渲染视频 · 预测目标 ID 修复版 v9',
   v10: '验证集渲染视频 · 预测 ID 与辅助轨迹修复版 v10',
-  v11: '验证集渲染视频 · 兼容口径复核版 v11',
+  v11: '验证集渲染视频 · 历史诊断 v11',
 };
 
 function formatClip(item) {
@@ -52,11 +53,10 @@ function metricWithCount(value, numerator, denominator) {
 }
 
 function StatusBadge({ item, compact = false }) {
-  const success = item.status === 'success';
-  const compatibleOnly = success && !item.strictTop1 && item.compatibleTop1;
-  const label = !success ? 'ERR' : compatibleOnly ? 'COMPAT' : item.strictTop1 ? 'STRICT' : 'PASS';
+  const success = item.strictTop1 === true;
+  const label = success ? 'STRICT' : 'ERR';
   return (
-    <span className={`status-badge ${!success ? 'is-error' : compatibleOnly ? 'is-compatible' : 'is-success'} ${compact ? 'is-compact' : ''}`}>
+    <span className={`status-badge ${success ? 'is-success' : 'is-error'} ${compact ? 'is-compact' : ''}`}>
       {label}
     </span>
   );
@@ -82,33 +82,30 @@ export function App() {
   const [videoError, setVideoError] = useState('');
   const videoRef = useRef(null);
   const reviewVersion = new URLSearchParams(window.location.search).get('version');
-  const dataFile = REVIEW_DATA_FILES[reviewVersion] || REVIEW_DATA_FILES.v7;
-  const reviewTitle = REVIEW_TITLES[reviewVersion] || REVIEW_TITLES.v7;
+  const dataFile = REVIEW_DATA_FILES[reviewVersion] || REVIEW_DATA_FILES.legacy;
+  const reviewTitle = REVIEW_TITLES[reviewVersion] || '冻结审核清单 · 严格口径';
 
   useEffect(() => {
-    fetch(dataFile)
-      .then((response) => {
-        if (!response.ok) throw new Error(`${dataFile} ${response.status}`);
-        if (!response.headers.get('content-type')?.includes('application/json')) {
-          throw new Error(`审核数据不存在或不是 JSON：${dataFile}`);
-        }
-        return response.json();
-      })
+    const controller = new AbortController();
+    let active = true;
+    const timer = setTimeout(() => controller.abort(), 15000);
+    setLoadError('');
+    loadReviewData(dataFile, controller.signal)
       .then((payload) => {
-        if (!payload || !Array.isArray(payload.items) || !Array.isArray(payload.behaviors) || !payload.metrics) {
-          throw new Error(`审核数据结构无效：${dataFile}`);
-        }
+        if (controller.signal.aborted) return;
         setData(payload);
-        setSelectedId(payload.items?.[0]?.id || '');
+        setSelectedId(payload.items[0].id);
         setVideoError('');
       })
-      .catch((error) => setLoadError(error.message));
+      .catch((error) => { if (active) setLoadError(error.name === 'AbortError' ? '读取超时，请重试' : error.message); })
+      .finally(() => clearTimeout(timer));
+    return () => { active = false; clearTimeout(timer); controller.abort(); };
   }, [dataFile]);
 
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return data.items.filter((item) => {
-      if (filter !== 'all' && item.status !== filter) return false;
+      if (filter !== 'all' && (item.strictTop1 ? 'success' : 'error') !== filter) return false;
       if (behavior !== 'all' && item.truth !== behavior) return false;
       if (!normalizedQuery) return true;
       return [item.sampleId, item.truthName, item.predictedName, item.errorReason, ...(item.targetIds || [])]
@@ -157,10 +154,9 @@ export function App() {
 
   const counts = {
     all: data.items.length,
-    success: data.items.filter((item) => item.status === 'success').length,
-    error: data.items.filter((item) => item.status === 'error').length,
+    success: data.items.filter((item) => item.strictTop1).length,
+    error: data.items.filter((item) => !item.strictTop1).length,
   };
-  const compatibleReview = data.reviewVersion === 'v11-compatible';
 
   return (
     <div className="app-shell">
@@ -177,8 +173,8 @@ export function App() {
           <small>验证集 · 行为识别 · 目标 ID 复核</small>
         </div>
         <div className="topbar-stats">
-          <span className="topbar-count"><b>{data.metrics.total}</b> clips · {compatibleReview ? '兼容正确' : '严格正确'} {data.metrics.success} / 错误 {data.metrics.errors}</span>
-          <span className="topbar-rate"><b>{compatibleReview ? data.metrics.compatibleTop1Rate : data.metrics.strictTop1Rate}%</b> {compatibleReview ? '兼容' : '严格'} Top‑1</span>
+          <span className="topbar-count"><b>{counts.all}</b> clips · 严格正确 {counts.success} / 错误 {counts.error}</span>
+          <span className="topbar-rate"><b>{percentLabel(data.metrics.strictTop1Rate)}</b> 严格 Top‑1</span>
         </div>
       </header>
 
@@ -195,7 +191,7 @@ export function App() {
           <div className="filter-tabs" role="tablist" aria-label="结果筛选">
             {[
               ['all', '全部'],
-              ['success', compatibleReview ? '兼容正确' : '严格正确'],
+              ['success', '严格正确'],
               ['error', '错误'],
             ].map(([key, label]) => (
               <button
@@ -240,8 +236,8 @@ export function App() {
                 <div className="episode-meta">
                   <span>{item.recordingSession || 'validation'}</span>
                   <span>标签 {item.truthName}</span>
-                  <span className={item.status === 'success' ? 'meta-good' : 'meta-bad'}>
-                    {item.strictTop1 ? '严格正确' : item.status === 'success' ? '兼容正确' : `识别 ${item.predictedName || '未识别'}`}
+                  <span className={item.strictTop1 ? 'meta-good' : 'meta-bad'}>
+                    {item.strictTop1 ? '严格正确' : `识别 ${item.predictedName || '未识别'}`}
                   </span>
                 </div>
               </button>
@@ -251,7 +247,7 @@ export function App() {
         </aside>
 
         <main className="review-panel">
-          {loadError && <div className="load-error">无法读取审核数据：{loadError}</div>}
+          {loadError && <div className="load-error">无法读取审核数据：{loadError}。此代码包不附带私有数据。<button onClick={() => window.location.reload()}>重试</button></div>}
           {!selected && !loadError && <div className="empty-review">正在读取渲染清单…</div>}
           {selected && (
             <>
@@ -271,11 +267,11 @@ export function App() {
                       <span className="eyebrow">VALIDATION METRICS</span>
                       <h3>各行为精确率、召回率与 Top‑1</h3>
                     </div>
-                    <span>严格口径要求行为与 ID 集合完全匹配；兼容口径另计目标 ID 包含与允许的同层双标签</span>
+                    <span>严格口径要求行为与 ID 集合完全匹配；包含关系仅作历史诊断，不计识别正确</span>
                   </div>
                   <div className="metrics-table-wrap">
                     <table className="metrics-table">
-                      <thead><tr><th>行为</th><th>P 严格</th><th>P 兼容</th><th>R 严格</th><th>R 兼容</th><th>严格 Top‑1</th><th>兼容 Top‑1</th><th>严格 TP / 预测数 / 标签数</th></tr></thead>
+                      <thead><tr><th>行为</th><th>P 严格</th><th>P 历史诊断</th><th>R 严格</th><th>R 历史诊断</th><th>严格 Top‑1</th><th>历史诊断（不计分）</th><th>严格 TP / 预测数 / 标签数</th></tr></thead>
                       <tbody>
                         {data.metrics.perBehavior.map((row) => (
                           <tr key={row.key} className={row.key === selected.truth ? 'is-current' : ''}>
@@ -293,7 +289,7 @@ export function App() {
                       <tfoot><tr><th>总体</th><td>{metricWithCount(data.metrics.strictOverallPrecision ?? data.metrics.overallPrecision, data.metrics.strictCorrect ?? data.metrics.success, data.metrics.predictionCount ?? data.metrics.microPredictedCount)}</td><td>{metricWithCount(data.metrics.compatibleOverallPrecision ?? data.metrics.overallPrecision, data.metrics.compatibleCorrect ?? data.metrics.success, data.metrics.predictionCount ?? data.metrics.microPredictedCount)}</td><td>{metricWithCount(data.metrics.strictOverallRecall ?? data.metrics.overallRecall, data.metrics.strictCorrect ?? data.metrics.success, data.metrics.total)}</td><td>{metricWithCount(data.metrics.compatibleOverallRecall ?? data.metrics.overallRecall, data.metrics.compatibleCorrect ?? data.metrics.success, data.metrics.total)}</td><td>{metricWithCount(data.metrics.strictTop1Rate, data.metrics.strictCorrect ?? data.metrics.success, data.metrics.total)}</td><td>{metricWithCount(data.metrics.compatibleTop1Rate, data.metrics.compatibleCorrect ?? data.metrics.success, data.metrics.total)}</td><td>{data.metrics.strictCorrect ?? data.metrics.success}/{data.metrics.predictionCount ?? data.metrics.microPredictedCount}/{data.metrics.total}</td></tr></tfoot>
                     </table>
                   </div>
-                  <div className="metric-note">当前验证集 {data.metrics.total} 条：严格正确 {data.metrics.strictCorrect ?? data.metrics.success} 条；兼容口径正确 {data.metrics.compatibleCorrect ?? data.metrics.success} 条。P/R 均分别展示严格与兼容口径；兼容口径包含目标 ID 集合包含关系及允许的同层双标签。{compatibleReview ? '接近↔鼻头/鼻尾接触要求同一 ID 对且接触累计时长 >0.5 秒；Together↔接触要求同一 ID 对。' : ''}该集合此前已用于诊断，不是新的盲测。</div>
+                  <div className="metric-note">显示冻结文件中的历史指标；历史诊断列可能保留旧包含关系或旧双标签结果，均不计入当前严格正确。左侧正确／错误导航仅使用严格行为与 ID 集合匹配。原始清单和人工审核 A1/A2 均不写回。该集合此前已用于诊断，不是新的盲测。</div>
                   {data.metrics.errorConfusion?.length > 0 && (
                     <div className="confusion-summary"><strong>错误去向：</strong>{data.metrics.errorConfusion.map((item) => `${item.pair} ${item.count} 条`).join('；')}</div>
                   )}
@@ -383,7 +379,7 @@ export function App() {
                     <Metric label="目标 ID 包含命中" value={selected.targetHit ? '是' : '否'} tone={selected.targetHit ? 'good' : 'bad'} />
                     <Metric label="ID 集合完全一致" value={selected.exactTargetHit ? '是' : '否'} tone={selected.exactTargetHit ? 'good' : 'bad'} />
                     <Metric label="严格 Top‑1" value={selected.strictTop1 ? '是' : '否'} tone={selected.strictTop1 ? 'good' : 'bad'} />
-                    <Metric label="兼容 Top‑1" value={selected.compatibleTop1 ? '是' : '否'} tone={selected.compatibleTop1 ? 'good' : 'bad'} />
+                    <Metric label="历史诊断（不计分）" value={selected.compatibleTop1 ? '是' : '否'} />
                   </div>
 
                   <div className="detail-section">
@@ -400,13 +396,13 @@ export function App() {
                     </div>
                   </div>
 
-                  <div className={`reason-box ${selected.status === 'success' ? 'is-success' : 'is-error'}`}>
+                  <div className={`reason-box ${selected.strictTop1 ? 'is-success' : 'is-error'}`}>
                     <span className="eyebrow">REVIEW NOTE</span>
-                    <strong>{selected.strictTop1 ? '严格正确：行为与 ID 完全匹配' : selected.compatibleTop1 ? '兼容口径命中（原始预测未改写）' : `${selected.truthName} 被识别为 ${selected.predictedName || '未识别'}`}</strong>
+                    <strong>{selected.strictTop1 ? '严格正确：行为与 ID 完全匹配' : `${selected.truthName} 被识别为 ${selected.predictedName || '未识别'}`}</strong>
                     <p>{selected.compatibilityReason || selected.errorReason || '—'}</p>
                   </div>
 
-                  {selected.status === 'error' && selected.failedConditions?.length > 0 && (
+                  {!selected.strictTop1 && selected.failedConditions?.length > 0 && (
                     <div className="condition-box">
                       <span className="eyebrow">FEATURE CONDITION REVIEW</span>
                       <strong>未满足的特征条件 / 错误归因</strong>

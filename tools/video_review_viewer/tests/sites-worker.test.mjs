@@ -45,6 +45,8 @@ test("does not turn missing API or write requests into the app shell", async () 
   for (const request of [
     new Request("https://example.test/api/missing", { headers: { accept: "application/json" } }),
     new Request("https://example.test/flow", { method: "POST", headers: { accept: "text/html" } }),
+    new Request("https://example.test/review-data.json", { headers: { accept: "text/html" } }),
+    new Request("https://example.test/video-files/missing.mp4", { headers: { accept: "text/html" } }),
   ]) {
     let calls = 0;
     const response = await worker.fetch(request, {
@@ -58,6 +60,23 @@ test("does not turn missing API or write requests into the app shell", async () 
 
     assert.equal(response.status, 404);
     assert.equal(calls, 1);
+  }
+});
+
+test('forwards byte ranges and HEAD to packaged static media', async () => {
+  for (const method of ['GET', 'HEAD']) {
+    const request = new Request('https://example.test/video-files/clip.mp4', {
+      method, headers: { Range: 'bytes=0-3' },
+    });
+    const response = await worker.fetch(request, { ASSETS: { fetch: async (forwarded) => {
+      assert.equal(forwarded.headers.get('range'), 'bytes=0-3');
+      assert.equal(forwarded.method, method);
+      return new Response(method === 'HEAD' ? null : 'mp4!', { status: 206,
+        headers: { 'content-range': 'bytes 0-3/8', 'content-type': 'video/mp4' } });
+    } } });
+    assert.equal(response.status, 206);
+    assert.equal(response.headers.get('content-range'), 'bytes 0-3/8');
+    assert.equal(await response.text(), method === 'HEAD' ? '' : 'mp4!');
   }
 });
 

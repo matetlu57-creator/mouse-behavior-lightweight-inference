@@ -41,7 +41,7 @@ class TrajectoryCacheError(ValueError):
 
 
 def _visual_track_id(payload: Mapping[str, Any]) -> int | None:
-    raw = payload.get("visual_track_id", payload.get("track_id"))
+    raw = payload.get("visual_track_id")
     if raw is None:
         return None
     try:
@@ -345,6 +345,8 @@ def load_trajectory_cache(
         **arrays,
         "identity_labels": identity_labels,
         "identity_source": identity_source,
+        "identity_map": str(identity_map.source_path) if identity_map and identity_map.source_path else None,
+        "identity_map_sha256": identity_map.source_sha256 if identity_map else None,
         "visual_track_ids_by_slot": (
             visual_track_ids_by_slot
             if identity_map is None

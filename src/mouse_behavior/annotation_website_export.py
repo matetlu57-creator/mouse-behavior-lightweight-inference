@@ -452,7 +452,7 @@ def _write_tracks_jsonl(
     confidences = np.asarray(tracks["confidences"], dtype=float)
     pose_quality = np.asarray(tracks["pose_quality"], dtype=float)
     identity_confidence = np.asarray(
-        tracks.get("identity_confidence", np.ones_like(valid, dtype=float)),
+        tracks.get("identity_confidence", np.zeros_like(valid, dtype=float)),
         dtype=float,
     )
     visual_track_ids = np.asarray(
@@ -505,14 +505,17 @@ def _write_tracks_jsonl(
                             "visual_track_id": int(visual_track_ids[frame_index, track_id]),
                             "animal_id": (
                                 identity_labels[track_id]
-                                if track_id < len(identity_labels)
-                                else str(track_id)
+                                if identity_source == "rfid_mtrack" and track_id < len(identity_labels)
+                                else None
                             ),
                             "identity_source": identity_source,
                             "identity_confidence": float(
                                 np.clip(
                                     _json_number(
-                                        identity_confidence[frame_index, track_id], default=0.0
+                                        identity_confidence[frame_index, track_id]
+                                        if identity_source == "rfid_mtrack" and track_id < len(identity_labels)
+                                        else 0.0,
+                                        default=0.0,
                                     ),
                                     0.0,
                                     1.0,
@@ -646,6 +649,8 @@ def export_complete_video_package(
         ),
         "identity_source": str(tracks.get("identity_source", "visual_track")),
         "identity_labels": [str(value) for value in tracks.get("identity_labels", [])],
+        "identity_map": tracks.get("identity_map"),
+        "identity_map_sha256": tracks.get("identity_map_sha256"),
         "tracker_params": dict(tracker_params or {}),
         "class_names": ["mouse"],
     }

@@ -596,7 +596,7 @@ class ReviewStore:
         pairs = {'Approach', 'Attack', 'Chasing', 'Together', 'Snout-head_contact', 'Snout-rear_contact'}
         if (label in single and len(ids) != 1) or (label in pairs and len(ids) != 2):
             raise ValueError('individual behavior needs one ID; pair behavior needs exactly two IDs')
-        if label not in single | pairs and len(ids) < (3 if label == 'Social clustering' else 2):
+        if label not in single | pairs and len(ids) < 3:
             raise ValueError('insufficient group target IDs')
         tracks = json.loads((reference / 'tracks.json').read_text(encoding='utf-8'))
         sliced = [f for f in tracks if a <= f['frame'] < b]

@@ -66,7 +66,11 @@ function validationVideoServer() {
       server.middlewares.use("/video-files", handler);
     },
     configurePreviewServer(server) {
-      server.middlewares.use("/video-files", handler);
+      // A sealed production package serves its own static MP4s with range support.
+      const receipt = path.join(appRoot, 'dist/client/review-package-receipt.json');
+      const packaged = fs.existsSync(receipt)
+        && JSON.parse(fs.readFileSync(receipt, 'utf8')).mode === 'explicit_frozen_review';
+      if (!packaged) server.middlewares.use("/video-files", handler);
     },
   };
 }
@@ -74,6 +78,7 @@ function validationVideoServer() {
 export default defineConfig({
   build: {
     outDir: "dist/client",
+    copyPublicDir: false,
   },
   optimizeDeps: {
     include: ["react", "react-dom/client"],

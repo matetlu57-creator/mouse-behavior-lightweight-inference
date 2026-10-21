@@ -126,6 +126,16 @@ def candidate_revision(store, *, missing=False):
     return {'schema_version': 1, 'base_manifest_sha256': store.manifest_sha, 'updates': [update]}
 
 
+@pytest.mark.parametrize('label', ['Huddling', 'Dispersal', 'Group locomotion', 'Social clustering'])
+def test_all_group_approvals_require_three_actual_members(review, label):
+    store, source, original_hashes = review
+    card = dict(next(iter(store.cards.values())))
+    proposal = payload(store, behavior=label, mouse_ids=[1, 2], start_frame=0, end_frame=6)
+    with pytest.raises(ValueError, match='insufficient group target IDs'):
+        store._validate(proposal, card, source)
+    assert tree_hashes(source) == original_hashes
+
+
 def supplemental_candidates(store, *, windows=((1, 6),), batch_id='rearing_from_rejected_locomotion_v1'):
     import hashlib
     import cv2
