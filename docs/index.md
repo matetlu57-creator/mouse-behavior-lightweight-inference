@@ -44,7 +44,10 @@ Event tables add label fields next to numeric actor/target/contact/member slots.
   `exported_dataset_records.py`, `exported_dataset_features.py`,
   `exported_dataset_temporal.py`, `exported_dataset_collective.py`,
   `exported_dataset_prediction.py`, `exported_dataset_metrics.py`, and
-  `exported_dataset_config.py`; provenance hashes cover the façade and all eight modules.
+  `exported_dataset_config.py`; provenance hashes cover the façade and its static
+  local dependency closure, including current pair roles, group formation,
+  individual rules and scale resolution. A regression checks coverage whenever
+  a new local dependency is introduced.
   Its historical target-ID hit metrics are conditional on annotated IDs, not joint Top-1.
 - `evaluation/blind_top1.py` and `evaluation/train_only_tuning.py`: independent
   behavior-plus-visual-ID prediction, exact scoring, and train-session-only
@@ -57,3 +60,24 @@ Event tables add label fields next to numeric actor/target/contact/member slots.
   recording holdouts select regularization; validation labels only score locked predictions.
 - [`behavior-definitions.md`](behavior-definitions.md): operational definitions, duration gates, roles, and output semantics for the extended ethogram.
 - `visualization/`: rendering and annotation-package export.
+
+## Independent posture review and standalone video packages
+
+`behavior/posture_measurements.py`, `posture_rules.py`, and `posture_adapter.py`
+separate shared pixel measurements from independent Grooming/Rearing evidence,
+candidate events and conflict resolution. Rearing includes wall-supported
+standing. Both classes remain suspended in default canonical prediction;
+`--posture-mode v3_review` explicitly enables unconfirmed review candidates.
+
+`canonical_video_pipeline.py` preserves raw visual IDs and binds video/cache
+provenance. `behavior/duration_policy.py` resolves effective duration gates;
+`visualization/behavior_packages.py` verifies standalone intervals before export
+and again after decoding. Video, annotation, metadata and tracks share the same
+half-open source interval. Legacy fixed-window showcase clips are explicitly
+distinguished from qualified standalone behavior events.
+
+See [the implementation and merge record](posture-v3-duration-review-2026-10-21.md)
+and [the architecture decision](adr/2026-10-21-independent-posture-and-standalone-duration.md).
+The repository CI executes complete quality gates on Python 3.10 and 3.11 under
+the existing required check names. CI success does not validate scientific
+classification accuracy or alter human-reviewed A1/A2 results.

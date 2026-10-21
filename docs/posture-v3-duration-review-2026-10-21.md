@@ -4,6 +4,15 @@
 
 结果目录：`outputs/posture_v3_duration_review_20261021`。最终入口为 `CURRENT_RESULT.json`，最终回放在 `final_frozen_replay`，最终媒体在 `final_media_grooming`、`final_media_rearing`。较早运行目录保留作过程证据。
 
+## 合并与发布记录（2026-10-21）
+
+- [PR #17：当前规则、独立姿态审核与视频时长修复](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/pull/17) 已合入 `codex/modularize-exported-dataset`。
+- #17 合并提交为 [`a7832545f62bc2cecf67b9f20ceea81c01b58f34`](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/commit/a7832545f62bc2cecf67b9f20ceea81c01b58f34)，被验证的功能提交为 `5f4901e2c1b608f352bd4d7727dd6dbf72a2f48c`。
+- [PR #16](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/pull/16) 是这些提交进入 `main` 的发布入口；其 GitHub 合并记录是主分支发布状态的依据。本文件随该入口更新，不以本地原始分支名代替远端状态。
+- 隔离 PR 分支执行完整质量门：**1148 passed、20 skipped、9 xfailed**；lint、compile、仓库安全检查、wheel/sdist 构建通过。[推送 CI](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/actions/runs/39606282429) 与 [PR CI](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/actions/runs/39606617425) 均通过。跳过项依赖未公开的本地历史校准产物，预期失败属于保留的历史审计，均不等于科学识别验收通过。
+- 主分支保护要求 `quality (3.10)`、`quality (3.11)`；CI 现按这两个准确名称分别执行完整质量门。恢复矩阵是为了满足现有保护条件，没有降低或绕过保护规则。
+- 本轮只集成源码、测试、文档与 CI；原始数据、人工审核记录、视频和 A1/A2 保持不变。Grooming/Rearing 继续采用显式审核模式，默认正典停用。
+
 ## 已修改的路径与职责
 
 | 模块 | 责任 |
@@ -42,7 +51,7 @@ L 是独立输入或当前片段鼻颈长+颈尾长的 Q90 投影代理，不是
 
 ## 验证结果与含义
 
-- 完整测试：758 passed、1 skipped、21 个既有 xfailed。Ruff、compile、仓库验证、wheel/sdist 构建通过。已知 xfail 保留，不能解释为全仓库所有行为缺陷已解决。
+- PR 准备前的本地源码快照测试：758 passed、1 skipped、21 个既有 xfailed。该快照没有包含远端仓库的完整历史测试；不能将此数值称为完整仓库回归。隔离 PR 分支恢复并迁移历史测试后的完整结果为 1148 passed、20 skipped、9 xfailed，详见上方合并记录。已知 xfail 保留，不能解释为全仓库所有行为缺陷已解决。
 - 176 段（22 个正类片段、154 个静止/移动负例）按冻结全量配置回放：两类候选逐帧掩码、独立事件和解析帧标签相对原包 **零差异**。
 - 在 22 个正类片段上单独收紧一类参数，Grooming 自身改变 1,022 帧、Rearing 自身改变 400 帧；另一类的完整候选、评分、事件和理由不变。
 - 本次回放是冻结模型复现，开发集已参与选择，旧会话也已暴露，不是新的 OOF 或独立验证。不能把其训练内数值与原报告的 OOF 数值直接比较。
@@ -68,4 +77,4 @@ python scripts/run_canonical_behavior_video.py --video <源视频> --pose-cache 
 
 复现 176 段回放：`scripts/audit_posture_v3.py --manifest <冻结split_manifest_v31.json> --baseline-results <原包results_v31目录> --output <全新目录>`。
 
-PR 以现有模块化 PR #16 的分支为基底，并携带运行此管线所需的当前正典规则依赖。原始工作目录与审核结果保留。本文的 758 项通过、176 段回放和媒体时长是 PR 准备前的本地快照结果；隔离 PR 分支的实际检查结果在 PR 描述中单独列出。更详细的源文件哈希与保护清单保留在本地结果目录。
+PR #17 最初以模块化 PR #16 的分支为基底，现已合入该发布分支，并携带运行此管线所需的当前正典规则依赖。原始工作目录与审核结果保留。758 项通过、176 段回放和媒体时长属于 PR 准备前的本地快照证据；1148 项通过属于隔离 PR 分支完整仓库回归。这两组计数不可相加或互相替代。更详细的源文件哈希、保护清单和远端合并收据保留在本地结果目录。

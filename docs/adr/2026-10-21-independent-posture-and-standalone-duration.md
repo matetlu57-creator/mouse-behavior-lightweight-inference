@@ -2,6 +2,8 @@
 
 日期：2026-10-21。状态：已实现，审核候选通道；未通过科学识别能力验收。
 
+集成记录：[PR #17](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/pull/17) 已合入模块化发布分支，合并提交 `a7832545f62bc2cecf67b9f20ceea81c01b58f34`；主分支发布入口为 [PR #16](https://github.com/matetlu57-creator/mouse-behavior-lightweight-inference/pull/16)。完整仓库回归与发布状态见 [本轮记录](../posture-v3-duration-review-2026-10-21.md)。代码合并不改变本 ADR 对识别可靠性的限制。
+
 ## 背景与决策
 
 用户提供的 V3 压缩包已将 Grooming/Rearing 的行为参数、评分、参数选择和候选事件拆开。该包的负例验证仍显示低精确率，旧会话 Rearing 召回为零。接入任务不能据此自动赋予正式标签或人工审核信用。

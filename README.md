@@ -89,7 +89,7 @@ start_frame,end_frame,visual_track_id,animal_id,identity_confidence
 
 默认行为参数在 `configs/default.yaml`，实验差异通过 `configs/profiles/*.yaml` 的 `extends` 覆盖。默认配置只保留笼界、尺度、特征、接触、追逐、攻击和扩展行为 FSM，不包含视觉追踪或身份恢复参数。
 
-扩展行为层现已包含跟随、群体同步运动、社会聚集和群体分散。四类行为的角色、人数、时空阈值、与追逐/扎堆的互斥边界，以及可调整配置见 [行为定义](docs/behavior-definitions.md)。这些规则只消费已经完成身份解析的轨迹；群体成员和 Follower/Leader 角色不会用于反推或修复身份。
+历史扩展接口保留跟随、群体同步运动、社会聚集和群体分散的定义。当前正典视频管线的默认活跃集合为 13 类，Following/Avoiding 停用，Grooming/Rearing 仅通过显式审核模式产生候选；不要把历史接口标签清单当作当前启用集合。角色、人数和时空定义见 [行为定义](docs/behavior-definitions.md)，当前实现、合并记录与限制见 [本轮记录](docs/posture-v3-duration-review-2026-10-21.md)。群体成员和角色不会用于反推或修复身份。
 
 更完整的数据契约、输出语义和模块边界见 `docs/index.md` 与 `docs/adr/0001-external-tracking-and-rfid-identity.md`。
 
@@ -120,7 +120,7 @@ python -m pytest -q
 python scripts/run_quality.py --ci
 ```
 
-质量门包含 Ruff、字节码编译、测试、仓库边界/敏感信息检查和包构建。真实视频与 RFID 硬件联调不在单元测试内，发布前仍需使用受控实验数据做端到端验证。
+质量门包含 Ruff、字节码编译、测试、仓库边界/敏感信息检查和包构建。GitHub CI 分别使用 Python 3.10、3.11，检查名称为 `quality (3.10)`、`quality (3.11)`，与主分支保护一致。真实视频与 RFID 硬件联调不在单元测试内，发布前仍需使用受控实验数据做端到端验证。
 
 ## 许可证与支持
 
