@@ -90,3 +90,11 @@ require at least three observed IDs. The historical viewer's correct/error navig
 uses strict matches; old diagnostic values never grant current credit. See the
 [pre-merge audit and migration notes](posture-v3-duration-review-2026-10-21.md#父-pr-16-合并前补查与修复)
 and [explicit frozen-media packaging](../tools/video_review_viewer/README.md).
+
+Historical blind inference checkpoints seal the frozen model, provenance, exact
+manifest, trajectory contents, implementation and flushed evidence prefix. Resume
+requires `--historical-model`; old unsealed partial runs must restart. Split-based
+scoring verifies the manifest receipt before label joining. Non-isolation blind
+group candidates need at least three target IDs; this does not change the
+lower-level two-leavers-from-a-group process condition. Tracked private data and
+credential filenames are rejected by the repository checker as well as ignored.

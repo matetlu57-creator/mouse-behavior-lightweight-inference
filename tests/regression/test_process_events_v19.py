@@ -69,13 +69,15 @@ def test_public_group_outputs_retain_exact_process_frames():
                 assert c.support_frame_intervals, "simultaneous support differs from process span"
 
 
-def test_two_departing_members_and_frame_metadata_survive_prediction_json():
+def test_three_target_group_and_frame_metadata_survive_prediction_json():
+    # Blind target sets require three members; lower-level departure processes
+    # may still detect two leavers from an initial group of at least three.
     prediction = {
-        "group_scores": {"1,2": {"dispersal": 2.0}},
+        "group_scores": {"1,2,3": {"dispersal": 2.0}},
         "group_events": [
             {
                 "behavior": "dispersal",
-                "member_ids": [1, 2],
+                "member_ids": [1, 2, 3],
                 "evidence_seconds": 2.0,
                 "frame_intervals": [[10, 30]],
                 "support_frame_intervals": None,
@@ -84,8 +86,10 @@ def test_two_departing_members_and_frame_metadata_survive_prediction_json():
     }
     candidates = candidates_from_evidence(prediction)
     assert len(candidates) == 1
-    assert candidates[0].target_ids == (1, 2)
+    assert candidates[0].target_ids == (1, 2, 3)
     assert candidates[0].frame_intervals == ((10, 30),)
+    assert candidates[0].support_frame_intervals is None
+    assert not candidates_from_evidence({"group_scores": {"1,2": {"dispersal": 2.0}}})
     assert not candidates_from_evidence({"group_scores": {"1": {"dispersal": 2.0}}})
 
 

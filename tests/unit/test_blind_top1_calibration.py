@@ -261,6 +261,18 @@ def test_isolation_group_candidate_is_a_single_target_mouse():
     assert evaluate_top1([(label, Top1Prediction("isolation", (7,), 1.0))])["joint_top1_accuracy"] == 1.0
 
 
+@pytest.mark.parametrize("explicit_groups", [True, False])
+@pytest.mark.parametrize("member_count", [2, 3])
+def test_dispersal_candidate_requires_at_least_three_mice(explicit_groups, member_count):
+    ids = tuple(range(1, member_count + 1))
+    evidence = {"identity_scores": {str(member): {"dispersal": 4.0} for member in ids},
+                "pair_scores": {}}
+    if explicit_groups:
+        evidence["group_scores"] = {",".join(map(str, ids)): {"dispersal": 4.0}}
+    candidates = candidates_from_evidence(evidence)
+    assert (Candidate("dispersal", ids, 4.0) in candidates) is (member_count >= 3)
+
+
 def test_blind_manifest_rejects_label_columns_without_opening_tracks(tmp_path) -> None:
     path = tmp_path / "blind.csv"
     with path.open("w", encoding="utf-8", newline="") as handle:

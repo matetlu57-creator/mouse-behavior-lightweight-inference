@@ -12,12 +12,18 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 from _bootstrap import REPO_ROOT
+from blind_checkpoint import (
+    CHECKPOINT_NAME,
+    HISTORICAL_POLICY_SCOPE,
+    EvidenceCheckpoint,
+    checkpoint_binding,
+    sha256 as _sha256,
+)
 from mouse_behavior.evaluation.blind_top1 import (
     candidates_from_evidence,
     load_unlabeled_manifest,
@@ -43,14 +49,6 @@ def _json_default(value: Any) -> Any:
     except ImportError:
         pass
     raise TypeError(f"unsupported evidence value: {type(value).__name__}")
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _verified_model(model_dir: Path) -> tuple[HeuristicParameters, dict[str, float], dict[str, Any]]:
@@ -91,16 +89,19 @@ def main() -> int:
     args = parse_args()
     parameters, weights, provenance = _verified_model(args.model_dir)
     clips = load_unlabeled_manifest(args.blind_manifest)
+    binding = checkpoint_binding(args.blind_manifest, args.model_dir, clips, provenance)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     predictions_path = args.output_dir / "predictions.csv"
     partial_path = args.output_dir / "predictions.partial.csv"
     evidence_path = args.output_dir / "trajectory_evidence.jsonl"
     evidence_partial_path = args.output_dir / "trajectory_evidence.partial.jsonl"
-    if any(path.exists() for path in (predictions_path, partial_path, evidence_path, evidence_partial_path)):
+    if any(path.exists() for path in (predictions_path, partial_path, evidence_path,
+                                     evidence_partial_path, args.output_dir / CHECKPOINT_NAME)):
         raise FileExistsError(f"blind prediction output already exists in {args.output_dir}")
+    checkpoint = EvidenceCheckpoint(args.output_dir, binding)
     debug_rows: list[dict[str, Any]] = []
     with partial_path.open("x", encoding="utf-8-sig", newline="") as handle, evidence_partial_path.open(
-        "x", encoding="utf-8"
+        "x", encoding="utf-8", newline="\n"
     ) as evidence_handle:
         writer = csv.DictWriter(
             handle,
@@ -122,7 +123,7 @@ def main() -> int:
                 for key, value in evidence.items()
                 if key != "_collective_candidate_windows"
             }
-            evidence_handle.write(
+            serialized_evidence = (
                 json.dumps(
                     {"opaque_id": clip.sample_id, **label_free_evidence},
                     ensure_ascii=False,
@@ -130,6 +131,7 @@ def main() -> int:
                 )
                 + "\n"
             )
+            evidence_handle.write(serialized_evidence)
             debug_rows.extend(
                 {"opaque_id": clip.sample_id, **debug}
                 for debug in evidence.get("collective_feature_debug", ())
@@ -152,6 +154,9 @@ def main() -> int:
                     "track_selection_truncated": evidence["track_selection_truncated"],
                 }
             )
+            handle.flush()
+            evidence_handle.flush()
+            checkpoint.record_flushed_row(serialized_evidence)
     partial_path.rename(predictions_path)
     evidence_partial_path.rename(evidence_path)
     debug_path = args.output_dir / "feature_debug.csv"
@@ -161,7 +166,7 @@ def main() -> int:
         writer.writeheader()
         writer.writerows(debug_rows)
     receipt = {
-        "policy_scope": "historical_frozen_model_not_current_canonical_v27",
+        "policy_scope": HISTORICAL_POLICY_SCOPE,
         "count": len(clips),
         "prediction_count": len(clips),
         "predictions_sha256": _sha256(predictions_path),
@@ -173,6 +178,7 @@ def main() -> int:
         "feature_debug_rows": len(debug_rows),
         "blind_manifest_sha256": _sha256(args.blind_manifest),
         "model_sha256": provenance["model_sha256"],
+        "checkpoint_sha256": _sha256(args.output_dir / CHECKPOINT_NAME),
         "contains_ground_truth": False,
         "contains_labels": False,
     }

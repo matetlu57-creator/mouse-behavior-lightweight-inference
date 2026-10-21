@@ -249,7 +249,7 @@ def candidates_from_evidence(prediction: Mapping[str, Any]) -> tuple[Candidate, 
                 raise ValueError(f"invalid visual-ID group in prediction: {text_ids!r}")
             for behavior in GROUP_BEHAVIORS:
                 score = _positive_score(dict(raw_scores).get(behavior, 0.0))
-                minimum_size = 1 if behavior == "isolation" else 2 if behavior == "dispersal" else 3
+                minimum_size = 1 if behavior == "isolation" else 3
                 if score and len(ids) >= minimum_size:
                     frames, support = event_frames.get(((behavior, ids), score), (None, None))
                     candidates.append(Candidate(behavior, ids, score, frames, support))
@@ -267,7 +267,7 @@ def candidates_from_evidence(prediction: Mapping[str, Any]) -> tuple[Candidate, 
                 for track_id, values in identity_scores.items()
             )
             members = [(track_id, score) for track_id, score in positive if score]
-            minimum_size = 1 if behavior == "isolation" else 2 if behavior == "dispersal" else 3
+            minimum_size = 3
             if len(members) >= minimum_size:
                 candidates.append(
                     Candidate(behavior, tuple(track_id for track_id, _ in members),

@@ -309,6 +309,11 @@ def main() -> int:
     if args.labels is not None:
         labels = load_blind_labels(args.labels)
     elif args.dataset_split is not None and args.blind_manifest is not None:
+        receipt = json.loads(
+            (args.predictions_dir / "prediction_receipt.json").read_text(encoding="utf-8")
+        )
+        if _trajectory_sha256(str(args.blind_manifest)) != receipt.get("blind_manifest_sha256"):
+            raise ValueError("blind manifest differs from the blind prediction receipt")
         labels = load_blind_labels_from_split(args.dataset_split, args.blind_manifest)
     else:
         raise ValueError("provide --labels or both --dataset-split and --blind-manifest")

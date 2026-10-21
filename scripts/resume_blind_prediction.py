@@ -15,6 +15,13 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _bootstrap import REPO_ROOT  # noqa: E402,F401
+from blind_checkpoint import (  # noqa: E402
+    CHECKPOINT_NAME,
+    HISTORICAL_POLICY_SCOPE,
+    EvidenceCheckpoint,
+    checkpoint_binding,
+    verify_checkpoint,
+)
 from predict_exported_blind import _json_default, _sha256, _verified_model  # noqa: E402
 from mouse_behavior.evaluation.blind_top1 import (  # noqa: E402
     candidates_from_evidence,
@@ -96,20 +103,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--partial-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    return parser.parse_args()
+    parser.add_argument("--historical-model", action="store_true",
+                        help="Explicitly select the historical frozen-model route")
+    args = parser.parse_args()
+    if not args.historical_model:
+        parser.error("this is the historical frozen-model route; use run_canonical_behavior_video.py "
+                     "for current rules, or explicitly select --historical-model")
+    return args
 
 
 def main() -> int:
     args = parse_args()
     parameters, weights, provenance = _verified_model(args.model_dir)
     clips = load_unlabeled_manifest(args.blind_manifest)
+    binding = checkpoint_binding(args.blind_manifest, args.model_dir, clips, provenance)
+    checkpoint_count = verify_checkpoint(args.partial_dir, binding)
     prior_evidence = load_partial_evidence(
         args.partial_dir / "trajectory_evidence.partial.jsonl",
         [clip.sample_id for clip in clips],
     )
+    if len(prior_evidence) != checkpoint_count:
+        raise ValueError("partial evidence count differs from its inference checkpoint")
     if args.output_dir.exists():
         raise FileExistsError(f"resume output directory already exists: {args.output_dir}")
     args.output_dir.mkdir(parents=True)
+    checkpoint = EvidenceCheckpoint(args.output_dir, binding)
     predictions_partial = args.output_dir / "predictions.partial.csv"
     evidence_partial = args.output_dir / "trajectory_evidence.partial.jsonl"
     debug_partial = args.output_dir / "feature_debug.partial.csv"
@@ -122,21 +140,21 @@ def main() -> int:
     print(f"resume from label-free trajectory evidence: {len(prior_evidence)}/{len(clips)}")
     with (
         predictions_partial.open("x", encoding="utf-8-sig", newline="") as prediction_handle,
-        evidence_partial.open("x", encoding="utf-8") as evidence_handle,
+        evidence_partial.open("x", encoding="utf-8", newline="\n") as evidence_handle,
     ):
         writer = csv.DictWriter(prediction_handle, fieldnames=prediction_fields)
         writer.writeheader()
         for index, evidence in enumerate(prior_evidence):
             writer.writerow(_prediction_row(evidence, weights))
-            evidence_handle.write(
-                json.dumps(evidence, ensure_ascii=False, default=_json_default) + "\n"
-            )
+            serialized_evidence = json.dumps(evidence, ensure_ascii=False, default=_json_default) + "\n"
+            evidence_handle.write(serialized_evidence)
             debug_rows.extend(
                 {"opaque_id": evidence["opaque_id"], **row}
                 for row in evidence["collective_feature_debug"]
             )
             prediction_handle.flush()
             evidence_handle.flush()
+            checkpoint.record_flushed_row(serialized_evidence)
 
         for index in range(len(prior_evidence), len(clips)):
             clip = clips[index]
@@ -151,15 +169,15 @@ def main() -> int:
             }
             row = {"opaque_id": clip.sample_id, **label_free_evidence}
             writer.writerow(_prediction_row(row, weights))
-            evidence_handle.write(
-                json.dumps(row, ensure_ascii=False, default=_json_default) + "\n"
-            )
+            serialized_evidence = json.dumps(row, ensure_ascii=False, default=_json_default) + "\n"
+            evidence_handle.write(serialized_evidence)
             debug_rows.extend(
                 {"opaque_id": clip.sample_id, **debug}
                 for debug in prediction_evidence.get("collective_feature_debug", ())
             )
             prediction_handle.flush()
             evidence_handle.flush()
+            checkpoint.record_flushed_row(serialized_evidence)
             completed = index + 1
             if completed % 5 == 0 or completed == len(clips):
                 print(f"blind inference progress: {completed}/{len(clips)}", flush=True)
@@ -176,15 +194,18 @@ def main() -> int:
         writer.writerows(debug_rows)
     debug_partial.rename(debug_path)
     receipt = {
+        "policy_scope": HISTORICAL_POLICY_SCOPE,
         "count": len(clips),
         "prediction_count": len(clips),
         "predictions_sha256": _sha256(predictions_path),
         "evidence_sha256": _sha256(evidence_path),
-        "parameters_sha256": _sha256(args.model_dir / "tuned_parameters.json"),
+        "parameters_sha256": provenance["model_sha256"],
+        "parameters_file": provenance["model_file"],
         "feature_debug_sha256": _sha256(debug_path),
         "feature_debug_rows": len(debug_rows),
         "blind_manifest_sha256": _sha256(args.blind_manifest),
         "model_sha256": provenance["model_sha256"],
+        "checkpoint_sha256": _sha256(args.output_dir / CHECKPOINT_NAME),
         "contains_ground_truth": False,
         "contains_labels": False,
         "resumed_evidence_count": len(prior_evidence),

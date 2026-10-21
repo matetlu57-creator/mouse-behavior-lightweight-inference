@@ -16,6 +16,12 @@ output/
 artifacts/
 build/
 dist/
+/data/**
+!/data/**/
+!/data/**/README.md
+!/data/**/.gitkeep
+!/data/**/*.template.*
+!/data/**/*.template
 tools/video_review_viewer/public/review-data*.json
 yolo_precompute/
 *_precompute/
@@ -24,6 +30,17 @@ yolo_precompute/
 *.log
 *.tmp
 *.bak
+
+# Local credentials; only explicit empty/example templates belong in Git.
+.env
+.env.*
+*.pem
+*.key
+!.env.example
+!.env.template
+!.env.sample
+!*.pem.template
+!*.key.template
 
 # Large local inputs and unregistered model artifacts
 *.mp4

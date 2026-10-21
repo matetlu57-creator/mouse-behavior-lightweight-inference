@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import sys
 import csv
+import argparse
+import hashlib
+import json
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
@@ -12,6 +17,7 @@ from score_exported_blind import (
     _write_scored_predictions,
     load_blind_labels_from_split,
 )
+import score_exported_blind as scorer
 
 
 def test_precision_recall_uses_exact_target_ids_for_joint_metrics(tmp_path: Path) -> None:
@@ -110,3 +116,44 @@ def test_isolation_label_requires_one_target_mouse(tmp_path: Path) -> None:
 
     assert labels["v-isolation"].behavior == "isolation"
     assert labels["v-isolation"].target_ids == (7,)
+
+
+@pytest.mark.parametrize("substitute_manifest", [False, True])
+def test_split_scoring_verifies_manifest_before_label_join(tmp_path, monkeypatch, substitute_manifest):
+    manifest = tmp_path / "blind.csv"
+    manifest.write_text("sample_id,tracks_path,fps\nopaque-1,first.json,30\n", encoding="utf-8")
+    predicted_dir = tmp_path / "predictions"
+    predicted_dir.mkdir()
+    predictions = predicted_dir / "predictions.csv"
+    predictions.write_text("sample_id,predicted_behavior,predicted_target_ids,score\n"
+                           "opaque-1,stationary,7,1\n", encoding="utf-8")
+    (predicted_dir / "prediction_receipt.json").write_text(json.dumps(dict(
+        predictions_sha256=hashlib.sha256(predictions.read_bytes()).hexdigest(),
+        prediction_count=1,
+        blind_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+    )), encoding="utf-8")
+    if substitute_manifest:
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+            "first.json", "different.json"
+        ), encoding="utf-8")
+    output = tmp_path / "score" / "metrics.json"
+    monkeypatch.setattr(scorer, "parse_args", lambda: argparse.Namespace(
+        predictions_dir=predicted_dir, labels=None, dataset_split=tmp_path / "labels.csv",
+        blind_manifest=manifest, output=output,
+    ))
+    joined = []
+
+    def label_join(*args):
+        joined.append(True)
+        return {"opaque-1": LabeledClip("annotated", "", 30.0, "", "stationary", (7,))}
+
+    monkeypatch.setattr(scorer, "load_blind_labels_from_split", label_join)
+    if substitute_manifest:
+        with pytest.raises(ValueError, match="blind manifest.*receipt"):
+            scorer.main()
+        assert not joined
+        assert not output.parent.exists()
+    else:
+        assert scorer.main() == 0
+        assert joined
+        assert json.loads(output.read_text(encoding="utf-8"))["strict_exact_top1_accuracy"] == 1.0

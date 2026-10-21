@@ -205,6 +205,16 @@ def check(root: Path) -> list[str]:
         if path.suffix.lower() in FORBIDDEN_SUFFIXES and not allowed_lfs_artifact:
             errors.append(f"tracked runtime/data artifact: {relative}")
         lowered = relative.replace("\\", "/").lower()
+        name = path.name.lower()
+        template = name in {"readme.md", ".gitkeep", ".env.example", ".env.template", ".env.sample"} or (
+            name.endswith(".template") or ".template." in name
+        )
+        if lowered.startswith("data/") and not template:
+            errors.append(f"tracked private data: {relative}")
+        if not template and (
+            name == ".env" or name.startswith(".env.") or path.suffix.lower() in {".pem", ".key"}
+        ):
+            errors.append(f"tracked private credential file: {relative}")
         if any(part in lowered.split("/") for part in ("runs", "results", "yolo_precompute")):
             errors.append(f"tracked generated output/cache: {relative}")
         if lowered.startswith("outputs/") and lowered != "outputs/.gitkeep":
