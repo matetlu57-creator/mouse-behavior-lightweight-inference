@@ -1,1 +1,1 @@
-"""Frozen bug, output, and performance regression tests."""
+"""Test package for stable intra-suite imports."""

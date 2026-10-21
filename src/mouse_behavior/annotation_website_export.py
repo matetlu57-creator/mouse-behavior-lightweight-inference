@@ -37,29 +37,48 @@ KEYPOINT_NAMES = (
 WEBSITE_BEHAVIOR_NAMES = {
     "together": "一起",
     "approach": "接近",
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "following": "跟随",
     "chase": "追逐",
-    "avoidance": "回避",
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "avoidance": "回避",
     "attack": "攻击行为",
     "nose_head_contact": "鼻头接触",
     "nose_tail_contact": "鼻尾接触",
     "huddle": "扎堆行为",
+    "social_clustering": "社会聚集",
+    "group_locomotion": "群体同步运动",
+    "dispersal": "群体分散",
     "isolation": "孤立行为",
-    "running": "奔跑",
-    "walking": "行走",
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
+    "locomotion": "移动",
+    "grooming": "理毛",
+    "rearing": "站立攀爬",
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
+    # "walking": "行走",
     "stationary": "静止",
 }
 
 PAIR_BEHAVIORS = {
     "together",
     "approach",
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "following",
     "chase",
-    "avoidance",
+    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+    # "avoidance",
     "attack",
     "nose_head_contact",
     "nose_tail_contact",
 }
-GROUP_BEHAVIORS = {"huddle", "isolation"}
-INDIVIDUAL_BEHAVIORS = {"running", "walking", "stationary"}
+GROUP_BEHAVIORS = {
+    "huddle",
+    "social_clustering",
+    "group_locomotion",
+    "dispersal",
+    "isolation",
+}
+INDIVIDUAL_BEHAVIORS = {"locomotion", "stationary", "grooming", "rearing"}  # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
 
 
 def _json_number(value: Any, *, default: float = 0.0) -> float:
@@ -264,7 +283,13 @@ def _event_mouse_ids(
             for track_id in _isolation_id(tracks, start, end, cm_per_pixel)
             if track_id in visible
         ]
-    if behavior in {"running", "walking", "stationary"}:
+    if behavior in {"social_clustering", "group_locomotion", "dispersal"}:
+        peak_members = _member_ids(event.get("member_ids_at_peak"))
+        if len(peak_members) >= 3:
+            return [track_id for track_id in peak_members if track_id in visible]
+        explicit_members = _member_ids(event.get("member_ids"))
+        return [track_id for track_id in explicit_members if track_id in visible]
+    if behavior in {"locomotion", "stationary", "grooming", "rearing"}:  # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
         actor = _json_int(event.get("actor_id"), default=-1)
         return [actor] if actor >= 0 and actor in visible else []
 
@@ -426,6 +451,16 @@ def _write_tracks_jsonl(
     keypoints = np.asarray(tracks["keypoints_px"], dtype=float)
     confidences = np.asarray(tracks["confidences"], dtype=float)
     pose_quality = np.asarray(tracks["pose_quality"], dtype=float)
+    identity_confidence = np.asarray(
+        tracks.get("identity_confidence", np.zeros_like(valid, dtype=float)),
+        dtype=float,
+    )
+    visual_track_ids = np.asarray(
+        tracks.get("visual_track_ids", np.full_like(valid, -1, dtype=np.int64)),
+        dtype=np.int64,
+    )
+    identity_labels = [str(value) for value in tracks.get("identity_labels", [])]
+    identity_source = str(tracks.get("identity_source", "visual_track"))
     available_frames = min(len(valid), len(boxes), len(keypoints), len(confidences))
     detection_count = 0
     with path.open("w", encoding="utf-8", newline="\n") as handle:
@@ -467,6 +502,25 @@ def _write_tracks_jsonl(
                     detections.append(
                         {
                             "track_id": int(track_id),
+                            "visual_track_id": int(visual_track_ids[frame_index, track_id]),
+                            "animal_id": (
+                                identity_labels[track_id]
+                                if identity_source == "rfid_mtrack" and track_id < len(identity_labels)
+                                else None
+                            ),
+                            "identity_source": identity_source,
+                            "identity_confidence": float(
+                                np.clip(
+                                    _json_number(
+                                        identity_confidence[frame_index, track_id]
+                                        if identity_source == "rfid_mtrack" and track_id < len(identity_labels)
+                                        else 0.0,
+                                        default=0.0,
+                                    ),
+                                    0.0,
+                                    1.0,
+                                )
+                            ),
                             "box_xyxy_px": [x1, y1, x2, y2],
                             "detection_confidence": float(
                                 np.clip(
@@ -590,7 +644,13 @@ def export_complete_video_package(
         "keypoint_names": list(KEYPOINT_NAMES),
         "skeleton_edges": [[int(a), int(b)] for a, b in skeleton_edges],
         "model_name": "mouse-pose-v8 best.pt",
-        "tracker_name": "position_plus_keypoint_hungarian",
+        "tracker_name": str(
+            dict(tracker_params or {}).get("tracker", "ultralytics_external")
+        ),
+        "identity_source": str(tracks.get("identity_source", "visual_track")),
+        "identity_labels": [str(value) for value in tracks.get("identity_labels", [])],
+        "identity_map": tracks.get("identity_map"),
+        "identity_map_sha256": tracks.get("identity_map_sha256"),
         "tracker_params": dict(tracker_params or {}),
         "class_names": ["mouse"],
     }

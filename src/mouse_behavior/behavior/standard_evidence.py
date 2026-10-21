@@ -271,7 +271,9 @@ def _chase_evidence(
         closing_speed = _num(row, "selected_distance_drop_cm", 0.0) / lookback
 
     distance_cm_m = _distance_membership(center_distance, float(chase_cfg["max_distance_cm"]))
-    reference_body_length = max(float(engine_cfg.get("reference_body_length_cm", 8.0)), 1e-6)
+    if "reference_body_length_cm" not in engine_cfg:
+        raise ValueError("standard_behavior_engine must supply reference_body_length_cm")
+    reference_body_length = max(float(engine_cfg["reference_body_length_cm"]), 1e-6)
     max_distance_bl = float(chase_cfg["max_distance_cm"]) / reference_body_length
     if np.isfinite(center_distance_bl) and center_distance_bl > 0.0:
         distance_bl_m = _distance_membership(center_distance_bl, max_distance_bl)
@@ -324,7 +326,7 @@ def _chase_evidence(
     total_weight = sum(max(float(weights.get(k, 0.0)), 0.0) for k in parts) or 1.0
     chase = sum(max(float(weights.get(k, 0.0)), 0.0) * v for k, v in parts.items()) / total_weight
 
-    rapid_distance = float(attack_cfg.get("rapid_closing_distance_cm", 2.0))
+    rapid_distance = float(attack_cfg.get("rapid_closing_distance_cm", 2.675))
     response_seconds = max(float(engine_cfg.get("response_lookback_seconds", 0.30)), 1e-6)
     closing_reference = rapid_distance / response_seconds
     closing_m = _ramp_high(closing_speed, 0.0, max(closing_reference, 1.0))
@@ -335,8 +337,8 @@ def _chase_evidence(
     )
     contact = _ramp_low(
         nose_body,
-        float(attack_cfg.get("contact_distance_cm", 3.0)) * 0.65,
-        float(attack_cfg.get("contact_distance_cm", 3.0)) * 1.20,
+        float(attack_cfg.get("contact_distance_cm", 4.0125)) * 0.65,
+        float(attack_cfg.get("contact_distance_cm", 4.0125)) * 1.20,
     )
 
     actor_accel = _prefix_value(row, prefix, "actor_acceleration_cm_s2", None)
@@ -354,18 +356,18 @@ def _chase_evidence(
     target_deformation = _prefix_value(row, prefix, "target_pose_deformation_energy", None)
 
     lunge_m = _speed_membership(
-        actor_speed, float(attack_cfg.get("actor_lunge_speed_cm_s", 8.0)), 0.25
+        actor_speed, float(attack_cfg.get("actor_lunge_speed_cm_s", 10.7)), 0.25
     )
     attack_pursuit_m = _threshold_membership(
         pursuit, float(attack_cfg.get("attack_pursuit_alignment_min", 0.50)), 0.22
     )
-    head_speed_threshold = float(attack_cfg.get("head_motion_speed_cm_s", 12.0))
+    head_speed_threshold = float(attack_cfg.get("head_motion_speed_cm_s", 16.05))
     head_motion_m = max(
         _speed_membership(actor_nose_speed, head_speed_threshold, 0.25),
         _ramp_high(actor_head_relative, head_speed_threshold * 0.15, head_speed_threshold * 0.55),
     )
     accel_reference = max(
-        float(attack_cfg.get("actor_lunge_speed_cm_s", 8.0)) / response_seconds, 10.0
+        float(attack_cfg.get("actor_lunge_speed_cm_s", 10.7)) / response_seconds, 13.375
     )
     accel_m = _ramp_high(abs(actor_accel), accel_reference * 0.35, accel_reference * 1.25)
     initiation = (
@@ -377,7 +379,7 @@ def _chase_evidence(
     )
 
     escape_speed_m = _speed_membership(
-        target_speed, float(attack_cfg.get("target_escape_speed_cm_s", 7.0)), 0.25
+        target_speed, float(attack_cfg.get("target_escape_speed_cm_s", 9.3625)), 0.25
     )
     escape_align_m = _threshold_membership(
         escape, float(attack_cfg.get("target_escape_alignment_min", 0.30)), 0.25
@@ -397,19 +399,19 @@ def _chase_evidence(
     # sufficient to distinguish an attack from ordinary nose-head/nose-tail
     # contact.  Build the explicit causal evidence used by the calibrated
     # legacy gate: physical contact + actor initiation + target reaction.
-    contact_distance = float(attack_cfg.get("contact_distance_cm", 3.0))
+    contact_distance = float(attack_cfg.get("contact_distance_cm", 4.0125))
     potential_contact = bool(np.isfinite(nose_body) and nose_body < contact_distance)
     distance_drop = _num(row, "selected_distance_drop_cm", 0.0)
-    rapid_closing = distance_drop >= float(attack_cfg.get("rapid_closing_distance_cm", 2.0))
-    lunge_gate = actor_speed >= float(attack_cfg.get("actor_lunge_speed_cm_s", 8.0))
+    rapid_closing = distance_drop >= float(attack_cfg.get("rapid_closing_distance_cm", 2.675))
+    lunge_gate = actor_speed >= float(attack_cfg.get("actor_lunge_speed_cm_s", 10.7))
     target_escape_gate = bool(
-        target_speed >= float(attack_cfg.get("target_escape_speed_cm_s", 7.0))
+        target_speed >= float(attack_cfg.get("target_escape_speed_cm_s", 9.3625))
         and escape >= float(attack_cfg.get("target_escape_alignment_min", 0.30))
     )
     target_turn_gate = target_turn >= float(attack_cfg.get("target_turn_angle_deg", 40.0))
     repeated_gate = repeated >= int(attack_cfg.get("repeated_contact_count", 2))
     head_motion_gate = bool(
-        actor_nose_speed >= float(attack_cfg.get("head_motion_speed_cm_s", 12.0))
+        actor_nose_speed >= float(attack_cfg.get("head_motion_speed_cm_s", 16.05))
         and actor_nose_speed
         >= float(attack_cfg.get("head_to_center_speed_ratio", 1.35)) * max(actor_speed, 1.0)
     )
@@ -448,8 +450,8 @@ def _chase_evidence(
     center_speed = max(actor_speed, target_speed)
     slow_center_m = _ramp_low(
         center_speed,
-        float(attack_cfg.get("stationary_fight_max_center_speed_cm_s", 5.0)),
-        max(float(attack_cfg.get("stationary_fight_max_center_speed_cm_s", 5.0)) * 2.5, 8.0),
+        float(attack_cfg.get("stationary_fight_max_center_speed_cm_s", 6.6875)),
+        max(float(attack_cfg.get("stationary_fight_max_center_speed_cm_s", 6.6875)) * 2.5, 10.7),
     )
     local_motion_m = max(head_motion_m, angular_m)
     deformation_pair = math.sqrt(max(actor_deformation, 0.0) * max(target_deformation, 0.0))
@@ -464,7 +466,7 @@ def _chase_evidence(
         attack_cfg.get("attack_direction_max_target_escape_alignment", 0.98)
     )
     direction_turn_min = float(attack_cfg.get("attack_direction_min_target_turn_deg", 30.0))
-    direction_drop_min = float(attack_cfg.get("attack_direction_min_distance_drop_cm", 6.0))
+    direction_drop_min = float(attack_cfg.get("attack_direction_min_distance_drop_cm", 8.025))
     # The actor and target do not have to deform symmetrically during a real
     # attack.  Use the stronger single-mouse deformation, while rejecting the
     # nearly perfectly same-direction motion common in ordinary contact.
@@ -486,12 +488,12 @@ def _chase_evidence(
     impulse_attack_gate = bool(
         dynamic_attack_gate
         and actor_speed + target_speed
-        >= float(attack_cfg.get("impulse_min_combined_speed_cm_s", 70.0))
+        >= float(attack_cfg.get("impulse_min_combined_speed_cm_s", 93.625))
         and distance_drop
         >= float(
             attack_cfg.get(
                 "impulse_min_distance_drop_cm",
-                max(float(attack_cfg.get("attack_direction_min_distance_drop_cm", 6.0)), 8.0),
+                max(float(attack_cfg.get("attack_direction_min_distance_drop_cm", 8.025)), 10.7),
             )
         )
     )
@@ -505,9 +507,9 @@ def _chase_evidence(
     stationary_fight_gate = bool(
         potential_contact
         and np.isfinite(center_distance)
-        and center_distance < float(attack_cfg.get("stationary_fight_distance_cm", 5.0))
+        and center_distance < float(attack_cfg.get("stationary_fight_distance_cm", 6.6875))
         and max(actor_speed, target_speed)
-        < float(attack_cfg.get("stationary_fight_max_center_speed_cm_s", 5.0))
+        < float(attack_cfg.get("stationary_fight_max_center_speed_cm_s", 6.6875))
         and min(abs(actor_angular), abs(target_angular))
         >= float(attack_cfg.get("stationary_fight_min_angular_speed_deg_s", 110.0))
         and repeated_gate

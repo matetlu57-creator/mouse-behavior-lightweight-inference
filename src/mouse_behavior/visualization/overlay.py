@@ -11,6 +11,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -45,14 +46,17 @@ DISPLAY_NAMES_ZH = {
 
 FOCUS_BEHAVIORS = frozenset(
     {
-        "running",
-        "walking",
+        # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
+        "locomotion",
+        "grooming",
+        "rearing",
         "stationary",
         "together",
         "approach",
-        "following",
+        # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+        # "following",
         "chase",
-        "avoidance",
+        # "avoidance",
         "attack",
         "nose_head_contact",
         "nose_tail_contact",
@@ -65,10 +69,10 @@ FOCUS_BEHAVIORS = frozenset(
 )
 FOCUS_NAMES_ZH = {
     "chase": "追逐/被追逐",
-    "avoidance": "回避/被回避",
+    # "avoidance": "回避/被回避",
     "attack": "攻击/被攻击",
     "approach": "接近/被接近",
-    "following": "跟随/被跟随",
+    # "following": "跟随/被跟随",
     "together": "一起",
     "nose_head_contact": "鼻头接触",
     "nose_tail_contact": "鼻尾接触",
@@ -77,16 +81,18 @@ FOCUS_NAMES_ZH = {
     "group_locomotion": "群体同步运动",
     "dispersal": "群体分散",
     "isolation": "孤立",
-    "running": "奔跑",
-    "walking": "行走",
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
+    "locomotion": "移动",
+    "grooming": "理毛",
+    "rearing": "站立攀爬",
     "stationary": "静止",
 }
 
 ROLE_NAMES_ZH = {
     "approach": {"actor": "主动接近", "target": "被接近", "pair": "接近"},
-    "following": {"actor": "跟随者", "target": "被跟随者", "pair": "跟随"},
+    # "following": {"actor": "跟随者", "target": "被跟随者", "pair": "跟随"},
     "chase": {"actor": "追逐", "target": "被追逐", "pair": "追逐"},
-    "avoidance": {"actor": "回避", "target": "被回避", "pair": "回避"},
+    # "avoidance": {"actor": "回避", "target": "被回避", "pair": "回避"},
     "attack": {"actor": "攻击", "target": "被攻击", "pair": "攻击"},
 }
 
@@ -97,9 +103,9 @@ UNKNOWN_BEHAVIOR_COLOR_BGR = (170, 170, 170)
 EVENT_COLORS_BGR = {
     "together": (80, 190, 190),
     "approach": {"actor": (0, 165, 255), "target": (255, 200, 80), "pair": (80, 190, 255)},
-    "following": {"actor": (20, 180, 255), "target": (255, 180, 40), "pair": (80, 200, 240)},
+    # "following": {"actor": (20, 180, 255), "target": (255, 180, 40), "pair": (80, 200, 240)},
     "chase": {"actor": (0, 215, 255), "target": (255, 140, 0), "pair": (80, 190, 255)},
-    "avoidance": {"actor": (255, 220, 0), "target": (200, 80, 220), "pair": (220, 160, 0)},
+    # "avoidance": {"actor": (255, 220, 0), "target": (200, 80, 220), "pair": (220, 160, 0)},
     "attack": {"actor": (0, 0, 255), "target": (255, 0, 255), "pair": (120, 80, 255)},
     "nose_head": (80, 220, 120),
     "nose_tail": (220, 160, 60),
@@ -110,8 +116,10 @@ EVENT_COLORS_BGR = {
     "group_locomotion": (120, 220, 120),
     "dispersal": (220, 150, 80),
     "isolation": (180, 120, 255),
-    "running": (80, 220, 80),
-    "walking": (0, 200, 255),
+    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
+    "locomotion": (0, 200, 255),
+    "grooming": (180, 220, 80),
+    "rearing": (220, 160, 220),
     "stationary": (180, 180, 180),
 }
 
@@ -177,22 +185,24 @@ def normalize_focus_behavior(value: Any) -> str | None:
     """
 
     aliases = {
-        "奔跑": "running",
-        "行走": "walking",
+        # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）
+        "移动": "locomotion",
+        "理毛": "grooming",
+        "站立攀爬": "rearing",
         "静止": "stationary",
         "一起": "together",
         "接近": "approach",
         "接近/被接近": "approach",
         "接近-被接近": "approach",
-        "跟随": "following",
-        "跟随/被跟随": "following",
-        "跟随-被跟随": "following",
+        # "跟随": "following",
+        # "跟随/被跟随": "following",
+        # "跟随-被跟随": "following",
         "追逐": "chase",
         "追逐/被追逐": "chase",
         "追逐-被追逐": "chase",
-        "回避": "avoidance",
-        "回避/被回避": "avoidance",
-        "回避-被回避": "avoidance",
+        # "回避": "avoidance",
+        # "回避/被回避": "avoidance",
+        # "回避-被回避": "avoidance",
         "攻击": "attack",
         "攻击行为": "attack",
         "鼻头": "nose_head_contact",
@@ -630,9 +640,10 @@ def build_panel_lines(
         if len(display_events) > 5:
             second += f"；另有 {len(display_events) - 5} 项"
         return [first, _truncate(second)]
-    return [first, empty_event_text or "当前帧无已判定事件，框上显示“仅追踪”"]
+    return [first, empty_event_text or "当前帧无已判定行为事件，目标仅追踪"]
 
 
+@lru_cache(maxsize=8)
 def resolve_font_path(font_path: Path | None = None) -> Path | None:
     candidates = []
     if font_path is not None:
@@ -652,6 +663,7 @@ def resolve_font_path(font_path: Path | None = None) -> Path | None:
     return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
+@lru_cache(maxsize=32)
 def load_font(font_path: Path | None, font_size: int):
     resolved = resolve_font_path(font_path)
     if resolved is None:
@@ -844,7 +856,7 @@ def draw_behavior_sidebar(
         overlay = mouse_overlays.get(
             mouse_id,
             MouseOverlay(
-                text=f"{format_mouse_id(mouse_id)}｜仅追踪",
+                text=format_mouse_id(mouse_id),
                 color_bgr=UNKNOWN_BEHAVIOR_COLOR_BGR,
                 priority=(0, 0.0),
             ),
@@ -866,7 +878,7 @@ def draw_behavior_sidebar(
         max_behavior_chars = max((sidebar_width - 125) // max(detail_size, 1), 1)
         draw.text(
             (105, text_y),
-            _truncate(behavior or "仅追踪", max_behavior_chars),
+            _truncate(behavior or "未判定", max_behavior_chars),
             font=detail_font,
             fill=(245, 245, 245),
         )

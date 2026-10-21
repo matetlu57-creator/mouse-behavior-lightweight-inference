@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "method": "manual_visual+gradient_refine",
+  "corner_order": [
+    "top_left",
+    "top_right",
+    "bottom_right",
+    "bottom_left"
+  ],
+  "quad_px": [
+    [
+      616.889,
+      138.086
+    ],
+    [
+      1396.423,
+      117.309
+    ],
+    [
+      1401.651,
+      901.227
+    ],
+    [
+      631.421,
+      903.891
+    ]
+  ],
+  "box_inner_cm": {
+    "width": 74.0,
+    "height": 74.0
+  },
+  "scale": {
+    "px_per_cm_width": 10.473287660647326,
+    "px_per_cm_height": 10.472154391431031,
+    "axis_consistency_ratio": 1.000108217390036,
+    "px_per_cm": 10.472721026039178,
+    "cm_per_pixel": 0.09548616806593231
+  },
+  "homography_px_per_cm": 10.472721026039178,
+  "homography": [
+    [
+      1.0338204767822126,
+      -0.019617957478252724,
+      -635.0430521270813
+    ],
+    [
+      0.02707069874092107,
+      1.015654486463767,
+      -156.94712853962886
+    ],
+    [
+      3.0341943960267513e-05,
+      -1.662032798817867e-05,
+      1.0
+    ]
+  ],
+  "diagnostics": {
+    "top_px": 779.8115172699664,
+    "right_px": 783.9362854253988,
+    "bottom_px": 770.2350565058376,
+    "left_px": 765.9425645063939,
+    "top_tilt_deg": -1.5267693409037573,
+    "left_tilt_deg": -1.0871237764735184,
+    "width_edge_ratio": 1.0124331665810853,
+    "height_edge_ratio": 0.9770469599972137,
+    "max_relative_edge_deviation": 0.022953040002786314
+  },
+  "subject_metrics": {
+    "cm_per_pixel_used": 0.09548616806593231,
+    "segments_cm": {
+      "hip_width": {
+        "mean_cm": 3.068558
+      }
+    },
+    "unified_body_length_cm": 7.918,
+    "definition": "Reference body length is nose tip to tail base (7.918 cm); reference body width is mean hip width (3.068558 cm). Arena is a 74 x 74 cm square; local video paths and track IDs intentionally omitted."
+  }
+}

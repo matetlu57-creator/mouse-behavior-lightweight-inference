@@ -2,17 +2,17 @@
 # -*- coding: utf-8 -*-
 """Mouse Behavior Lightweight Inference entry point.
 
-Analyze one completed YOLO cache without rerunning the heavy tracker.
+Analyze one completed Ultralytics trajectory cache without rerunning the model.
 
 This is intentionally a bounded, single-video fallback for long Windows
 videos.  It reads only ``yolo_precompute`` records for the requested video,
-keeps at most ``expected_mice`` tracks with position+keypoint matching, builds
+uses the ``visual_track_id`` produced by ``YOLO.track`` or an external mTrack
+RFID identity map, builds
 the pair-wise kinematics required by the v1.43 standard behavior engine, and
 then runs the same standard chase/attack FSM and thresholds offline.
 
-It does not claim to replace the full occlusion/ReID pipeline.  The output
-metadata explicitly records that limitation so a detected event can be
-reviewed separately from a full-pipeline result.
+Visual-only output is explicitly provisional. RFID mode never guesses an
+unresolved identity from position, color, pose, or motion.
 """
 
 from __future__ import annotations
@@ -30,17 +30,14 @@ import cv2
 import numpy as np
 import yaml
 
-try:
-    from scipy.optimize import linear_sum_assignment
-except Exception:  # pragma: no cover - a deterministic greedy fallback is below
-    linear_sum_assignment = None
-
 from . import adaptive_arena_boundary as arena_boundary
 from .parallel_behavior_fsm import ParallelBehaviorFSM
 from . import standard_behavior_engine as behavior_engine  # noqa: F401
 from .annotation_website_export import export_complete_video_package
 from .config import load_config
 from .logging_config import configure_logging
+from .identity.labels import annotate_identity_labels
+from .identity.mtrack import load_identity_map
 from .utils.rolling import rolling_corr as _rolling_corr  # noqa: F401
 from .utils.rolling import rolling_sum as _rolling_sum  # noqa: F401
 from .utils.timer import Timer
@@ -73,21 +70,24 @@ from .preprocessing.geometry import (
     _weighted_mean,
 )  # noqa: F401
 from .tracking.cache import (
-    _assign_tracks,
     _cache_total_frames,
-    _deduplicate,
-    _inside_arena,
     _iter_cache_records,
-    _payload_detection,
-    _track_cache,
+    load_trajectory_cache,
 )  # noqa: F401
 from .preprocessing.kinematics import (
     _ema_smooth,
     _ema_smooth_keypoints,
     _kinematics,
     _pose_deformation_energy,
+    _reference_body_pixel_length,
     _rolling_quantile,
 )  # noqa: F401
+from .preprocessing.scale_resolution import (
+    default_scale_config,
+    log_scale_warnings,
+    resolve_scale,
+    scale_block_of,
+)
 from .preprocessing.pair_features import (
     _PairWorkset,
     _boolean_runs,
@@ -147,13 +147,9 @@ __all__ = [
     "_angle_deg",
     "_weighted_mean",
     "_box_iou",
-    "_payload_detection",
-    "_deduplicate",
     "_iter_cache_records",
     "_cache_total_frames",
-    "_inside_arena",
-    "_assign_tracks",
-    "_track_cache",
+    "load_trajectory_cache",
     "_ema_smooth",
     "_ema_smooth_keypoints",
     "_pose_deformation_energy",
@@ -220,14 +216,12 @@ def _prepare_video_arena_boundary(
     the caller explicitly sets ``reuse_boundary_json``; the boundary module
     then checks the saved source path, resolution, and file fingerprint.
     ``mode=configured`` skips heatmap learning and uses the fixed physical
-    cage polygon from ``detector_first.arena_mask.polygon``.  ``mode=disabled``
+    cage polygon from ``adaptive_arena.polygon``.  ``mode=disabled``
     removes arena gating completely.
     """
 
     arena_cfg = dict(config.get("adaptive_arena", {}))
-    configured_polygon = (
-        dict(config.get("detector_first", {})).get("arena_mask", {}).get("polygon", [])
-    )
+    configured_polygon = arena_cfg.get("polygon", [])
     boundary_mode = str(arena_cfg.get("mode", "learned")).strip().lower()
     if boundary_mode in {"disabled", "none", "off"}:
         LOGGER.info("笼界模式=disabled：不学习热力图，也不启用固定笼界过滤")
@@ -310,8 +304,11 @@ def analyze(
     max_frames: int | None = None,
     sample_stride: int = 1,
     fps_override: float | None = None,
+    identity_map_path: Path | None = None,
 ) -> Path:
     started = time.perf_counter()
+    if identity_map_path is not None:
+        identity_map_path = Path(identity_map_path).expanduser().resolve()
     stage_timings: dict[str, float] = {}
     setup_timer = Timer(
         "setup_and_video_probe",
@@ -364,64 +361,18 @@ def analyze(
     arena_timer.stop()
 
     track_timer = Timer(
-        "track_cache",
+        "load_trajectory_cache",
         logger=LOGGER,
         sink=stage_timings,
     ).start()
-    extended_cfg_for_tracking = dict(config.get("extended_behavior", {}))
-    social_cfg_for_tracking = dict(extended_cfg_for_tracking.get("social", {}))
-    semantic_cfg_for_tracking = dict(social_cfg_for_tracking.get("semantic_fsm", {}))
-    semantic_attack_cfg_for_tracking = dict(semantic_cfg_for_tracking.get("semantic_attack", {}))
-    try:
-        bbox_occlusion_max_gap_frames = max(
-            int(semantic_attack_cfg_for_tracking.get("bbox_occlusion_max_gap_frames", 0)),
-            0,
-        )
-    except (TypeError, ValueError):
-        bbox_occlusion_max_gap_frames = 0
-    lightweight_cfg_for_tracking = dict(config.get("lightweight_behavior_inference", {}))
-    tracking_cfg = dict(lightweight_cfg_for_tracking.get("tracking", {}))
-    try:
-        initial_min_detection_score = max(
-            float(tracking_cfg.get("initial_min_detection_score", 0.0)),
-            0.0,
-        )
-    except (TypeError, ValueError, OverflowError):
-        initial_min_detection_score = 0.0
-    if not np.isfinite(initial_min_detection_score):
-        initial_min_detection_score = 0.0
-    try:
-        recent_assignment_gate = max(
-            float(tracking_cfg.get("recent_assignment_gate", 3.2)),
-            0.1,
-        )
-    except (TypeError, ValueError, OverflowError):
-        recent_assignment_gate = 3.2
-    try:
-        reacquisition_assignment_gate = max(
-            float(tracking_cfg.get("reacquisition_assignment_gate", 5.0)),
-            0.1,
-        )
-    except (TypeError, ValueError, OverflowError):
-        reacquisition_assignment_gate = 5.0
-    try:
-        reacquisition_after_missed_frames = max(
-            int(tracking_cfg.get("reacquisition_after_missed_frames", 3)),
-            0,
-        )
-    except (TypeError, ValueError, OverflowError):
-        reacquisition_after_missed_frames = 3
-    tracks, tracking_stats = _track_cache(
+    identity_map = load_identity_map(identity_map_path) if identity_map_path is not None else None
+    tracks, tracking_stats = load_trajectory_cache(
         cache_dir,
         total_frames,
         expected_mice,
+        identity_map=identity_map,
         arena_polygon=arena_polygon,
         arena_tolerance_px=arena_tolerance,
-        bbox_occlusion_max_gap_frames=bbox_occlusion_max_gap_frames,
-        initial_min_detection_score=initial_min_detection_score,
-        recent_assignment_gate=recent_assignment_gate,
-        reacquisition_assignment_gate=reacquisition_assignment_gate,
-        reacquisition_after_missed_frames=reacquisition_after_missed_frames,
     )
     # Preserve full-resolution source-frame tracks for the annotation website.
     # Behavior analysis may sample this array below; the export contract may not.
@@ -437,37 +388,32 @@ def analyze(
         tracks = {
             key: (
                 value[::sample_stride]
-                if isinstance(value, np.ndarray) and value.ndim > 0
+                if (
+                    isinstance(value, np.ndarray)
+                    and value.ndim > 0
+                    and value.shape[0] == total_frames
+                )
                 else value
             )
             for key, value in tracks.items()
         }
     analysis_frames = int(tracks["valid"].shape[0])
     fps = source_fps / sample_stride
-    scale_cfg = dict(config.get("scale", {}))
-    scale_mode = str(scale_cfg.get("mode", "body_length")).strip().lower()
-    configured_cm_per_pixel = scale_cfg.get("cm_per_pixel")
-    fixed_cm_per_pixel: float | None = None
-    if configured_cm_per_pixel is not None:
-        try:
-            fixed_cm_per_pixel = float(configured_cm_per_pixel)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("scale.cm_per_pixel must be numeric when provided") from exc
-        if not np.isfinite(fixed_cm_per_pixel) or fixed_cm_per_pixel <= 0.0:
-            raise ValueError("scale.cm_per_pixel must be a finite positive number")
-    if scale_mode == "fixed" and fixed_cm_per_pixel is None:
-        raise ValueError("scale.mode=fixed requires a positive scale.cm_per_pixel")
-    try:
-        assumed_body_length_cm = float(scale_cfg.get("assumed_mouse_body_length_cm", 8.0))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("scale.assumed_mouse_body_length_cm must be numeric") from exc
-    if not np.isfinite(assumed_body_length_cm) or assumed_body_length_cm <= 0.0:
-        raise ValueError("scale.assumed_mouse_body_length_cm must be a finite positive number")
+    scale_cfg = scale_block_of(config) or dict(default_scale_config())
+    resolved_scale = resolve_scale(
+        scale_cfg,
+        reference_body_px=_reference_body_pixel_length(
+            np.asarray(tracks["body_lengths_px"], dtype=float),
+            np.asarray(tracks["valid"], dtype=bool),
+        ),
+        source_video=video_path,
+    )
+    log_scale_warnings(resolved_scale, LOGGER)
     kin = _kinematics(
         tracks,
         fps=fps,
-        body_length_cm=assumed_body_length_cm,
-        cm_per_pixel=fixed_cm_per_pixel,
+        reference_body_cm=resolved_scale.reference_body_cm,
+        cm_per_pixel=resolved_scale.cm_per_pixel,
     )
     kinematics_timer.stop()
     pair_workset = _prepare_pair_workset(
@@ -524,7 +470,8 @@ def analyze(
         )
         for behavior, key in (
             ("approach", "approach_min_duration_seconds"),
-            ("avoidance", "avoidance_min_duration_seconds"),
+            # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
+            # ("avoidance", "avoidance_min_duration_seconds"),
         )
         if key in social_cfg
     }
@@ -554,6 +501,9 @@ def analyze(
         source_fps,
         minimum_durations=minimum_behavior_durations,
     )
+    identity_labels = tuple(str(value) for value in tracks["identity_labels"])
+    for records in (events, contact_events, pair_summaries, top_evidence):
+        annotate_identity_labels(records, identity_labels)
     global_events_timer.stop()
 
     website_frame_count = (
@@ -584,11 +534,12 @@ def analyze(
         ),
         tracker_params={
             "expected_mice": int(expected_mice),
+            "identity_source": str(tracks["identity_source"]),
+            "identity_labels": list(identity_labels),
             "sample_stride": int(sample_stride),
             "behavior_analysis_fps": float(source_fps),
             "video_container_fps": float(website_fps),
-            "analysis_mode": "lightweight_cache_tracking",
-            "full_pipeline_not_run": True,
+            "analysis_mode": "behavior_from_external_trajectories",
         },
     )
     website_timer.stop()
@@ -619,10 +570,13 @@ def analyze(
         "source_video": str(video_path),
         "yolo_cache": str(cache_dir),
         "config": str(config_path),
-        "analysis_mode": "lightweight_cache_tracking",
-        "full_pipeline_not_run": True,
-        "scale_mode": scale_mode,
-        "tracker": "position_plus_keypoint_hungarian",
+        "analysis_mode": "behavior_from_external_trajectories",
+        "scale_mode": resolved_scale.mode,
+        "tracker": "ultralytics_external",
+        "identity_source": str(tracks["identity_source"]),
+        "identity_labels": list(identity_labels),
+        "identity_map": str(identity_map_path) if identity_map_path is not None else None,
+        "identity_map_sha256": tracks.get("identity_map_sha256"),
         "expected_mice": int(expected_mice),
         "source_frames": int(total_frames),
         "analysis_frames": int(analysis_frames),
@@ -666,8 +620,12 @@ def analyze(
         "contact_event_csv": str(output_dir / "lightweight_contact_events.csv"),
         "annotation_website_export": website_export,
         "notes": [
-            "仅读取指定视频的完整 YOLO 预推理缓存，没有读取其他行为目录。",
-            "该结果用于当前长视频的快速行为筛查；它不包含完整流水线的遮挡簇 ReID、ROI Pose 恢复和伪掩码身份保护。",
+            "仅读取指定视频的 Ultralytics 轨迹缓存，没有在行为层重新分配 ID。",
+            (
+                "个体身份来自外部 mTrack/RFID 映射；未匹配检测保持 unknown。"
+                if identity_map is not None
+                else "当前为 visual_only 模式；ID 仅表示 Ultralytics 视觉轨迹，不代表长期动物身份。"
+            ),
             "行为事件 CSV 同时包含 legacy chase/attack 与扩展 ethogram 标签；鼻头/鼻尾接触写入独立 lightweight_contact_events.csv，接触本身不会单独升级为 attack。",
             "候选鼠对的昂贵鼻体几何、滚动轨迹特征和标准行为连续证据只在距离/朝向窗口及其上下文 padding 内计算；窗口外帧保留在输出时间轴中并作为FSM硬否决/状态重置行。",
             "新视频没有人工行为标签，因此不能据此计算 Precision、Recall、F1 或 actor/target accuracy；事件中的角色 ID 和 role confidence 仅是模型诊断。",
@@ -700,9 +658,9 @@ def analyze(
             ),
             "regions": {
                 "individual": "stationary|walking|running per mouse",
-                "pair": "together|approach|chase|avoidance|attack per pair",
+                "pair": "together|approach|chase|attack per pair (following/avoidance suspended step3)",
                 "contact": "nose_head|nose_tail|combined per pair",
-                "group": "huddle|isolation per video",
+                "group": "huddle|social_clustering|group_locomotion|dispersal|isolation per video",
             },
         },
         "pair_prefilter": {
@@ -739,6 +697,15 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--fps", type=float, required=False)
     parser.add_argument("--expected-mice", type=int, default=20)
+    parser.add_argument(
+        "--identity-map",
+        type=Path,
+        default=None,
+        help=(
+            "外部 mTrack/RFID 身份映射 CSV；省略时仅使用 provisional "
+            "Ultralytics visual_track_id"
+        ),
+    )
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument(
         "--sample-stride",
@@ -863,6 +830,7 @@ def main() -> int:
             max_frames=args.max_frames,
             font_path=args.font_path,
             focus_behavior=args.focus_behavior,
+            identity_map_path=args.identity_map,
         )
         LOGGER.info("render_output=%s", render_output)
         return 0
@@ -915,6 +883,7 @@ def main() -> int:
             expected_mice=max(int(args.expected_mice), 2),
             max_frames=args.max_frames,
             sample_stride=max(int(args.sample_stride), 1),
+            identity_map_path=args.identity_map,
         )
         metadata_path = result_dir / "lightweight_analysis_metadata.json"
         with metadata_path.open("r", encoding="utf-8") as handle:

@@ -152,7 +152,10 @@ def _reference_body_pixel_length(
             per_track.append(float(np.median(track_values[track_valid])))
 
     if per_track:
-        return float(np.median(np.asarray(per_track, dtype=float)))
+        # # [STEP4+ 2026-10-05] 逐视频体长尺度：剔除姿态坏轨（尾关键点塌缩等）后的鲁棒像素体长
+        from mouse_behavior.preprocessing.scale_resolution import robust_reference_body_px
+
+        return robust_reference_body_px(per_track)
 
     fallback = values[np.isfinite(values) & (values >= 10.0) & (values <= 300.0)]
     return float(np.median(fallback)) if fallback.size else 60.0
@@ -161,8 +164,8 @@ def _reference_body_pixel_length(
 def _kinematics(
     tracks: Mapping[str, np.ndarray],
     fps: float,
-    body_length_cm: float = 8.0,
-    cm_per_pixel: float | None = None,
+    reference_body_cm: float,
+    cm_per_pixel: float,
 ) -> dict[str, np.ndarray | float]:
     valid = np.asarray(tracks["valid"], dtype=bool)
     pose_quality = np.asarray(tracks["pose_quality"], dtype=float)
@@ -170,12 +173,12 @@ def _kinematics(
     raw_centers = np.asarray(tracks["centers_px"], dtype=float)
     raw_body_lengths = np.asarray(tracks["body_lengths_px"], dtype=float)
     reference_body_px = _reference_body_pixel_length(raw_body_lengths, valid)
-    if cm_per_pixel is None:
-        cm_per_pixel_value = float(body_length_cm / max(reference_body_px, 1e-6))
-    else:
-        cm_per_pixel_value = float(cm_per_pixel)
-        if not np.isfinite(cm_per_pixel_value) or cm_per_pixel_value <= 0.0:
-            raise ValueError("cm_per_pixel must be a finite positive number")
+    cm_per_pixel_value = float(cm_per_pixel)
+    if not np.isfinite(cm_per_pixel_value) or cm_per_pixel_value <= 0.0:
+        raise ValueError("cm_per_pixel must be a finite positive number")
+    reference_body_cm_value = float(reference_body_cm)
+    if not np.isfinite(reference_body_cm_value) or reference_body_cm_value <= 0.0:
+        raise ValueError("reference_body_cm must be a finite positive number")
     smooth_kp = _ema_smooth_keypoints(raw_kp, valid, alpha=0.70)
     smooth_centers = _ema_smooth(raw_centers, valid, alpha=0.70)
     frames, mice = valid.shape
@@ -423,7 +426,7 @@ def _kinematics(
         "bbox_iou_previous": bbox_iou_previous,
         "cm_per_pixel": cm_per_pixel_value,
         "reference_body_px": reference_body_px,
-        "reference_body_cm": float(body_length_cm),
+        "reference_body_cm": reference_body_cm_value,
     }
 
 

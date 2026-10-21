@@ -117,7 +117,9 @@ def _pair_dataframe(
     nose_head_ab = np.asarray(metrics["nose_head_ab"][:, pair_index], dtype=float)
     nose_head_ba = np.asarray(metrics["nose_head_ba"][:, pair_index], dtype=float)
     behavior_speed = np.asarray(metrics["behavior_speed"], dtype=float)
-    distance_body_lengths = distance / 8.0
+    if "reference_body_cm" not in metrics:
+        raise ValueError("pair metrics must provide reference_body_cm from kinematics")
+    distance_body_lengths = distance / max(float(metrics["reference_body_cm"]), 1e-6)
     bbox_center_distance = np.asarray(
         metrics.get("bbox_center_distance_body_lengths", np.full(valid.shape, np.inf)),
         dtype=float,
@@ -222,10 +224,10 @@ def _pair_dataframe(
         "selected_strong_chase_score": np.zeros(p, dtype=float),
         "selected_weak_attack_evidence": np.zeros(p, dtype=float),
         "selected_strong_attack_evidence": np.zeros(p, dtype=float),
-        "weak_contact": (np.minimum(nose_body_ab, nose_body_ba) <= 4.0),
-        "strong_contact": (np.minimum(nose_body_ab, nose_body_ba) <= 3.0),
-        "weak_potential_attack": (np.minimum(nose_body_ab, nose_body_ba) <= 4.0),
-        "strong_potential_attack": (np.minimum(nose_body_ab, nose_body_ba) <= 3.0),
+        "weak_contact": (np.minimum(nose_body_ab, nose_body_ba) <= 5.35),
+        "strong_contact": (np.minimum(nose_body_ab, nose_body_ba) <= 4.0125),
+        "weak_potential_attack": (np.minimum(nose_body_ab, nose_body_ba) <= 5.35),
+        "strong_potential_attack": (np.minimum(nose_body_ab, nose_body_ba) <= 4.0125),
         "weak_raw_chase": np.zeros(p, dtype=bool),
         "strong_raw_chase": np.zeros(p, dtype=bool),
         "weak_raw_attack": np.zeros(p, dtype=bool),
@@ -567,7 +569,7 @@ def _pair_metrics(
         )
         / fps
     )
-    contact = np.minimum(nose_body_ab, nose_body_ba) <= 4.0
+    contact = np.minimum(nose_body_ab, nose_body_ba) <= 5.35
     contact &= valid_pair
     repeated_contact = _rolling_sum(
         contact.astype(float),
@@ -681,9 +683,9 @@ def _interaction_radius(config: Mapping[str, Any]) -> float:
     weak_chase = dict(chase_cfg.get("weak", {}))
     weak_attack = dict(attack_cfg.get("weak", {}))
     return max(
-        float(weak_chase.get("max_distance_cm", 12.0)),
-        float(weak_attack.get("body_center_contact_distance_cm", 6.0)),
-    ) + float(interaction_cfg.get("buffer_cm", 5.0))
+        float(weak_chase.get("max_distance_cm", 16.05)),
+        float(weak_attack.get("body_center_contact_distance_cm", 8.025)),
+    ) + float(interaction_cfg.get("buffer_cm", 6.6875))
 
 
 def _pair_prefilter(
@@ -711,7 +713,7 @@ def _pair_prefilter(
     enabled = bool(configured.get("enabled", True))
     radius = max(float(interaction_radius), 0.0)
     close_distance = min(
-        max(float(configured.get("close_distance_cm", 10.0)), 0.0),
+        max(float(configured.get("close_distance_cm", 13.375)), 0.0),
         radius,
     )
     min_heading_cosine = float(np.clip(float(configured.get("min_heading_cosine", 0.0)), -1.0, 1.0))

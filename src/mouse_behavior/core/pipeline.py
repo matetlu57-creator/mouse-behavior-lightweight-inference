@@ -14,13 +14,14 @@ class PipelineRun:
     yolo_cache: Path
     config: Path
     output: Path
+    identity_map: Path | None = None
 
 
 class LightweightPipeline:
     """Coordinate the cache-based lightweight analyzer.
 
     The implementation is imported lazily so importing the orchestration API
-    does not initialize OpenCV, SciPy, or any model runtime.
+        does not initialize OpenCV or any model runtime.
     """
 
     def __init__(
@@ -43,6 +44,7 @@ class LightweightPipeline:
         output: str | Path,
         *,
         fps: float | None = None,
+        identity_map: str | Path | None = None,
     ) -> PipelineRun:
         """Run analysis and return a typed record of the produced location."""
 
@@ -51,6 +53,7 @@ class LightweightPipeline:
         video_path = Path(video)
         cache_path = Path(yolo_cache)
         output_path = Path(output)
+        identity_map_path = Path(identity_map) if identity_map is not None else None
         analyze(
             video_path,
             cache_path,
@@ -60,5 +63,6 @@ class LightweightPipeline:
             max_frames=self.max_frames,
             sample_stride=self.sample_stride,
             fps_override=fps,
+            identity_map_path=identity_map_path,
         )
-        return PipelineRun(video_path, cache_path, self.config, output_path)
+        return PipelineRun(video_path, cache_path, self.config, output_path, identity_map_path)

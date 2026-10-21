@@ -1,11 +1,6 @@
 {
   "stationary_max_speed_cm_s": 10.0,
-  "walking_min_speed_cm_s": 10.0,
-  "walking_max_speed_cm_s": 85.0,
-  "walking_max_stop_gap_s": 0.5,
   "running_min_speed_cm_s": 85.0,
-  "running_min_directionality": 0.55,
-  "running_min_duration_s": 0.5,
   "together_max_distance_cm": 8.0,
   "together_max_individual_speed_cm_s": 16.0,
   "together_max_combined_speed_cm_s": 28.0,
@@ -36,11 +31,11 @@
   "huddle_min_member_support_fraction": 0.25,
   "isolation_distance_cm": 8.0,
   "isolation_min_duration_s": 10.0,
+  "isolation_max_gap_s": 0.2,
   "clustering_max_distance_cm": 30.0,
   "clustering_initial_max_distance_cm": 24.0,
   "clustering_min_nearest_neighbor_drop_cm": 2.0,
   "stationary_min_duration_s": 1.0,
-  "walking_min_duration_s": 1.0,
   "pair_min_duration_s": 0.1,
   "together_min_duration_s": 1.0,
   "group_min_duration_s": 0.3,
@@ -57,9 +52,11 @@
   "clustering_motion_loose_pair_distance_cm": 9.5,
   "group_locomotion_max_distance_cm": 30.0,
   "group_locomotion_min_direction_similarity": 0.7,
-  "group_locomotion_min_walking_fraction": 0.6,
   "group_locomotion_min_duration_s": 3.0,
   "dispersal_start_distance_cm": 15.0,
   "dispersal_min_distance_increase_cm": 5.0,
-  "dispersal_min_duration_s": 10.0
+  "dispersal_min_duration_s": 10.0,
+  "locomotion_stop_gap_s": 0.5,
+  "locomotion_min_duration_s": 1.0,
+  "group_locomotion_min_moving_fraction": 0.6
 }

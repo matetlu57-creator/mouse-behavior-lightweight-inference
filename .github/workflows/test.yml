@@ -1,40 +1,42 @@
-name: quality
+name: test
 
 on:
   push:
-    branches: [main, "feat/**", "fix/**", "refactor/**", "agent/**"]
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: quality-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   quality:
+    name: quality (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11"]
     steps:
-      - name: Check out repository
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            requirements.txt
-            requirements-dev.txt
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e . -r requirements-dev.txt
-      - name: Run canonical quality gate
-        run: python scripts/run_quality.py --ci
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - run: python scripts/run_quality.py --ci
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.python-version == '3.10'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/video_review_viewer/package-lock.json
+      - run: npm ci --ignore-scripts
+        if: matrix.python-version == '3.10'
+        working-directory: tools/video_review_viewer
+      - run: |
+          npm run build
+          npm run test:sites
+        if: matrix.python-version == '3.10'
+        working-directory: tools/video_review_viewer

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 from collections import defaultdict
 from pathlib import Path
@@ -13,6 +14,8 @@ import numpy as np
 import pandas as pd
 
 from .. import adaptive_arena_boundary as arena_boundary
+from ..identity.labels import identity_label
+from ..identity.mtrack import load_identity_map
 from ..preprocessing.constants import (
     BEHAVIOR_NAMES_ZH,
     EXTENDED_BEHAVIORS,
@@ -20,7 +23,7 @@ from ..preprocessing.constants import (
     SKELETON_EDGES,
 )
 from ..preprocessing.pair_features import _boolean_runs
-from ..tracking.cache import _cache_total_frames, _track_cache
+from ..tracking.cache import _cache_total_frames, load_trajectory_cache
 from ..io.csv import _write_csv
 from .overlay import (
     BoxLabel,
@@ -42,6 +45,26 @@ from .overlay import (
 LOGGER = logging.getLogger("mouse_behavior.lightweight_behavior_inference")
 
 
+def _verified_render_identity(metadata_path: Path, explicit_map: Path | None):
+    """Bind event slot identities to the mapping bytes used during analysis."""
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    if not isinstance(metadata, dict):
+        raise ValueError("analysis identity metadata must be an object")
+    map_path = explicit_map or metadata.get("identity_map")
+    if map_path is None:
+        if metadata.get("identity_source") == "rfid_mtrack":
+            raise ValueError("RFID analysis is missing its identity map")
+        return metadata, None
+    mapping = load_identity_map(map_path)
+    if (metadata.get("identity_source") != "rfid_mtrack"
+            or not metadata.get("identity_map_sha256")
+            or not metadata.get("identity_labels")):
+        raise ValueError("RFID render requires sealed analysis identity metadata; rerun analysis")
+    if mapping.source_sha256 != metadata["identity_map_sha256"]:
+        raise ValueError("identity map hash changed since analysis")
+    return metadata, mapping
+
+
 def render_behavior_video(
     video_path: Path,
     cache_dir: Path,
@@ -52,6 +75,7 @@ def render_behavior_video(
     contact_events_path: Path | None = None,
     font_path: Path | None = None,
     focus_behavior: str | None = None,
+    identity_map_path: Path | None = None,
 ) -> Path:
     """Render exactly one annotated MP4 for one source video.
 
@@ -63,6 +87,9 @@ def render_behavior_video(
     if max_frames is not None:
         total_cache_frames = min(total_cache_frames, max(int(max_frames), 1))
 
+    metadata, identity_map = _verified_render_identity(
+        events_path.parent / "lightweight_analysis_metadata.json", identity_map_path,
+    )
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"无法打开源视频: {video_path}")
@@ -84,51 +111,19 @@ def render_behavior_video(
             require_video_match=True,
         )
         arena_polygon = np.asarray(boundary.polygon, dtype=np.float64)
-    bbox_occlusion_max_gap_frames = 0
-    initial_min_detection_score = 0.0
-    recent_assignment_gate = 3.2
-    reacquisition_assignment_gate = 5.0
-    reacquisition_after_missed_frames = 3
-    metadata_path = events_path.parent / "lightweight_analysis_metadata.json"
-    if metadata_path.exists():
-        try:
-            with metadata_path.open("r", encoding="utf-8") as handle:
-                metadata = json.load(handle)
-            tracking_metadata = metadata.get("tracking", {})
-            if isinstance(tracking_metadata, dict):
-                bbox_occlusion_max_gap_frames = max(
-                    int(tracking_metadata.get("bbox_occlusion_max_gap_frames", 0)),
-                    0,
-                )
-                initial_min_detection_score = max(
-                    float(tracking_metadata.get("initial_min_detection_score", 0.0)),
-                    0.0,
-                )
-                recent_assignment_gate = max(
-                    float(tracking_metadata.get("recent_assignment_gate", 3.2)),
-                    0.1,
-                )
-                reacquisition_assignment_gate = max(
-                    float(tracking_metadata.get("reacquisition_assignment_gate", 5.0)),
-                    0.1,
-                )
-                reacquisition_after_missed_frames = max(
-                    int(tracking_metadata.get("reacquisition_after_missed_frames", 3)),
-                    0,
-                )
-        except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
-            LOGGER.warning("[render] unable to read tracking settings: %s", metadata_path)
-    tracks, tracking_stats = _track_cache(
+    tracks, _tracking_stats = load_trajectory_cache(
         cache_dir,
         total_cache_frames,
         expected_mice,
+        identity_map=identity_map,
         arena_polygon=arena_polygon,
-        bbox_occlusion_max_gap_frames=bbox_occlusion_max_gap_frames,
-        initial_min_detection_score=initial_min_detection_score,
-        recent_assignment_gate=recent_assignment_gate,
-        reacquisition_assignment_gate=reacquisition_assignment_gate,
-        reacquisition_after_missed_frames=reacquisition_after_missed_frames,
     )
+    identity_labels = tuple(str(value) for value in tracks["identity_labels"])
+    if (("identity_labels" in metadata and tuple(metadata["identity_labels"]) != identity_labels)
+            or ("identity_source" in metadata
+                and metadata["identity_source"] != tracks["identity_source"])):
+        cap.release()
+        raise ValueError("render identity labels/source differ from the saved analysis")
 
     event_frame_map: list[list[dict[str, Any]]] = [[] for _ in range(total_cache_frames)]
     if not events_path.exists():
@@ -215,6 +210,17 @@ def render_behavior_video(
                 valid_ids,
                 focus_behavior=normalized_focus,
             )
+            for logical_id, overlay in tuple(mouse_overlays.items()):
+                display_identity = identity_label(logical_id, identity_labels)
+                if display_identity is None:
+                    continue
+                mouse_overlays[logical_id] = MouseOverlay(
+                    text=overlay.text.replace(
+                        format_mouse_id(logical_id), display_identity, 1
+                    ),
+                    color_bgr=overlay.color_bgr,
+                    priority=overlay.priority,
+                )
             box_labels: list[BoxLabel] = []
 
             for logical_id in range(expected_mice):
@@ -236,7 +242,8 @@ def render_behavior_video(
                 overlay = mouse_overlays.get(
                     logical_id,
                     MouseOverlay(
-                        text=f"{format_mouse_id(logical_id)}｜仅追踪",
+                        text=identity_label(logical_id, identity_labels)
+                        or format_mouse_id(logical_id),
                         color_bgr=(170, 170, 170),
                         priority=(0, 0.0),
                     ),
@@ -363,6 +370,15 @@ def render_behavior_video(
             normalized_focus,
             focus_evidence_frames / max(frame_index, 1),
         )
+    output_path.with_suffix(".identity.json").write_text(
+        json.dumps({
+            "source_video": str(video_path), "events_path": str(events_path),
+            "events_sha256": hashlib.sha256(events_path.read_bytes()).hexdigest(),
+            "identity_source": tracks["identity_source"], "identity_labels": identity_labels,
+            "identity_map": tracks.get("identity_map"),
+            "identity_map_sha256": tracks.get("identity_map_sha256"),
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
     return output_path
 
 
@@ -414,11 +430,13 @@ def extract_four_class_clips(
     min_start_interval_seconds: float = 5.0,
     max_clips_per_class: int = 200,
 ) -> Path:
-    """Extract raw source clips into the four mutually exclusive classes.
+    """Extract fixed-window showcases into the four mutually exclusive classes.
 
     Class IDs follow the established extractor contract:
     ``chase + 2 * attack`` -> 0/1/2/3.  This function never draws boxes,
     skeletons, IDs, labels, or overlays; it writes only source-video crops.
+    A class records event presence within a sample, not an independently
+    qualified behavior process. Use canonical behavior packages for that contract.
     """
     import cv2
 
@@ -506,6 +524,8 @@ def extract_four_class_clips(
                     "source_video": str(video_path),
                     "source_events": str(events_path),
                     "event_level": expected_level,
+                    "clip_contract": "fixed_window_showcase",
+                    "standalone_behavior_qualification": False,
                 }
             )
 
@@ -575,6 +595,8 @@ def extract_four_class_clips(
             for label_id in FOUR_CLASS_NAMES
         },
         "rendered_video": False,
+        "clip_contract": "fixed_window_showcase",
+        "standalone_behavior_qualification": False,
     }
     with (output_dir / "four_class_clip_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
@@ -598,7 +620,7 @@ def extract_behavior_clips(
     min_start_interval_seconds: float = 5.0,
     max_clips_per_behavior: int = 200,
 ) -> Path:
-    """Extract fixed-length raw clips separately for each behavior label.
+    """Extract fixed-window raw showcases separately for each behavior label.
 
     This is the default clip contract for the lightweight ethogram.  It reads
     the already generated behavior-event CSV, builds one frame state per
@@ -606,6 +628,8 @@ def extract_behavior_clips(
     It does not create four mutually exclusive classes and does not draw
     overlays.  ``event_level='all'`` keeps both the extended ethogram rows and
     the weak/strong legacy chase/attack rows.
+    Presence of a label in the sampled window does not qualify its standalone
+    process duration. Canonical behavior packages enforce that semantic contract.
     """
     import cv2
 
@@ -728,6 +752,8 @@ def extract_behavior_clips(
                     "path": str(path),
                     "source_video": str(video_path),
                     "source_events": str(events_path),
+                    "clip_contract": "fixed_window_showcase",
+                    "standalone_behavior_qualification": False,
                 }
             )
 
@@ -796,6 +822,8 @@ def extract_behavior_clips(
         "clip_counts": clip_counts,
         "total_clips": int(len(intervals)),
         "rendered_video": False,
+        "clip_contract": "fixed_window_showcase",
+        "standalone_behavior_qualification": False,
     }
     with (output_dir / "behavior_clip_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
