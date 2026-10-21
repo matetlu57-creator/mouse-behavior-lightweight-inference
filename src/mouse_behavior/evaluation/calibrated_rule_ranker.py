@@ -13,17 +13,43 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from mouse_behavior.behavior.individual_rules import SUSPENDED_POSTURE_BEHAVIORS
+
 from .blind_top1 import (
-    Candidate, LabeledClip, Top1Prediction, candidates_from_evidence, evaluate_top1,
+    Candidate, LabeledClip, Top1Prediction, candidates_from_evidence,
     hierarchical_candidate_indices,
 )
 from .exported_dataset import (
-    CANONICAL_BEHAVIORS, INDIVIDUAL_BEHAVIORS, PAIR_BEHAVIORS,
+    CANONICAL_BEHAVIORS, GROUP_BEHAVIORS, INDIVIDUAL_BEHAVIORS, PAIR_BEHAVIORS,
     # [STEP6 2026-10-05] Huddling 速度门删除后不再需要 onset 静息检查
     ExportedFeatures, HeuristicParameters,
     _huddle_pair_distance_cm,
     _durations_by_column, predict_features,
 )
+from .social_heuristic_config import (
+    DEFAULT_SOCIAL_HEURISTIC_CONFIG,
+    SocialHeuristicConfig,
+)
+
+MULTI_MOUSE_GROUP_BEHAVIORS = frozenset(GROUP_BEHAVIORS) - {"isolation"}
+# [ERA 2026-10-16 group-v16.2] Isolation-vs-group arbitration. Both knobs are
+# dimensionless on purpose: preprocessing/scale_migration.py rescales
+# cm_per_pixel by 0.74 at load, so any new absolute cm literal taken from the
+# plan document (written in the un-migrated 10.7 cm body era) would be 1.35x
+# mis-scaled against the runtime quantity it is compared to; see DEFECT ERA-1.
+#
+# Isolation is a BACKGROUND claim. A lone mouse loses its isolation evidence to
+# a group event only when the positive multi-mouse candidates already account
+# for a bare majority of the tracks observed in the clip. Below that share the
+# singletons are the signal, not the background: in a 10-mouse cage where 3
+# mice huddle and 7 are genuinely alone, the old unconditional rule erased all
+# seven at candidate generation (isolation 24/33 -> 2/33).
+ISOLATION_SUPPRESSION_POPULATION_FRACTION = 0.6
+# The dominating group event must also be at least this large a fraction of the
+# isolation claim it overrides, so a 0.2 s group blip cannot erase a 12 s
+# isolation. A mouse that is itself a member of the group event is suppressed
+# unconditionally: it cannot be alone and in a pile at the same time.
+ISOLATION_SUPPRESSION_EVIDENCE_RATIO = 0.5
 
 
 @dataclass(frozen=True)
@@ -40,6 +66,10 @@ def rule_profiles(seed: HeuristicParameters) -> tuple[HeuristicParameters, ...]:
     train-only ranker learns which speed/distance interpretation best matches
     the labeled training examples; no validation labels enter this bank.
     """
+    if seed.confirmed_rules_v1 > 0:
+        # v17 uses one full-data fitted profile. Historical threshold sweeps
+        # remain available only for explicitly legacy parameter sets.
+        return (seed,)
     variants = (
         seed,
         replace(seed, stationary_max_speed_cm_s=2.675, running_min_speed_cm_s=113.6875,
@@ -75,6 +105,7 @@ def rule_profiles(seed: HeuristicParameters) -> tuple[HeuristicParameters, ...]:
     return tuple(
         replace(
             profile,
+            stationary_max_speed_cm_s=seed.stationary_max_speed_cm_s,
             huddle_max_mean_speed_cm_s=min(
                 profile.huddle_max_mean_speed_cm_s,
                 profile.stationary_max_speed_cm_s,
@@ -365,7 +396,16 @@ def _aggregate_group_candidates(
                                 and moving_fraction + 1e-12
                                 >= parameters.clustering_min_moving_member_fraction
                             ):
-                                remember("social_clustering", ids, episode_duration * 1.25)
+                                # [ERA 2026-10-16 group-v16.2] Evidence is the
+                                # measured connected-group support inside the
+                                # episode, in seconds, like every other group
+                                # behavior. The old 1.25 boost was a ranking
+                                # fudge: it could exceed the clip length and
+                                # push rule_k_fraction / evidence_fraction
+                                # above 1.0 into the learned ranker.
+                                remember("social_clustering", ids, float(
+                                    np.count_nonzero(grouped[episode_start:group_end + 1])
+                                ) / max(f.fps, 1e-6))
                                 break
                 if distance <= huddle_distance + 1e-9:
                     # Huddling is a stable, low-motion state. Exclude brief
@@ -403,7 +443,16 @@ def _aggregate_group_candidates(
                             out=np.zeros(len(members), dtype=float), where=seen.sum(axis=0) > 0,
                         )
                         if np.all(connection_rate >= 0.15):
-                            remember("huddle", ids, duration * 0.75)
+                            # [ERA 2026-10-16 group-v16.2] Measured, unbridged
+                            # connected-triple support for this exact union, in
+                            # the same seconds as the stable-core path above.
+                            # `duration` is the BRIDGED span, and the old 0.75
+                            # handicap made the two huddle paths
+                            # incommensurable, so the multiplier - not the
+                            # rules - decided Top-1.
+                            remember("huddle", ids, float(
+                                _durations_by_column(grouped[:, None], f.fps)[0]
+                            ))
                 if distance <= parameters.group_locomotion_max_distance_cm + 1e-9:
                     member_speed = f.speed_cm_s[:, members]
                     member_visible = f.valid[:, members]
@@ -466,14 +515,34 @@ def _aggregate_group_candidates(
                         final_start = max(start, len(group_distance) - max(1, int(round(f.fps))))
                         final = group_distance[final_start:]
                         span = (len(group_distance) - start) / max(f.fps, 1e-6)
+                        initial_finite = initial[np.isfinite(initial)]
+                        final_finite = final[np.isfinite(final)]
+                        net_spread_change = (
+                            float(np.median(final_finite) - np.median(initial_finite))
+                            if initial_finite.size and final_finite.size else float("nan")
+                        )
                         if (
-                            initial.size and final.size
-                            and np.isfinite(initial).any() and np.isfinite(final).any()
+                            initial_finite.size and final_finite.size
                             and span >= parameters.dispersal_min_duration_s
-                            and float(np.nanmedian(final) - np.nanmedian(initial))
-                            >= parameters.dispersal_min_distance_increase_cm
+                            and np.isfinite(net_spread_change)
+                            and net_spread_change >= parameters.dispersal_min_distance_increase_cm
                         ):
-                            remember("dispersal", ids, span)
+                            # [ERA 2026-10-16 group-v16.2] Publish the OBSERVED
+                            # expansion interval, not "everything left in the
+                            # clip". Frames after the group stops being
+                            # observable are not dispersal support, and the
+                            # whole-remaining-span value made dispersal
+                            # incommensurable with huddle measured seconds.
+                            # The duration GATE above still uses `span`, so this
+                            # changes evidence magnitude only, not candidacy.
+                            observed_after = np.flatnonzero(
+                                np.isfinite(group_distance[start:])
+                            )
+                            expansion_seconds = (
+                                (int(observed_after[-1]) + 1) / max(f.fps, 1e-6)
+                                if observed_after.size else span
+                            )
+                            remember("dispersal", ids, expansion_seconds)
     return tuple(result.values())
 
 
@@ -560,35 +629,135 @@ def _physical_features(f: ExportedFeatures, ids: tuple[int, ...]) -> dict[str, f
     return values
 
 
-def build_candidate_table(f: ExportedFeatures, profiles: Sequence[HeuristicParameters]) -> CandidateTable:
-    """The prediction boundary: only trajectory features and frozen rules enter."""
+def build_candidate_table(
+    f: ExportedFeatures,
+    profiles: Sequence[HeuristicParameters],
+    *,
+    behavior_subset: Sequence[str] | None = None,
+    social_config: SocialHeuristicConfig = DEFAULT_SOCIAL_HEURISTIC_CONFIG,
+) -> CandidateTable:
+    """The prediction boundary: only trajectory features and frozen rules enter.
+
+    ``behavior_subset`` permits a social-only validation pass. It prevents
+    candidates from other layers from entering training or Top-1 competition.
+    """
     scores: dict[tuple[str, tuple[int, ...]], np.ndarray] = {}
+    group_frame_metadata: dict[tuple[str, tuple[int, ...]], Candidate] = {}
     if not profiles:
         raise ValueError("at least one heuristic profile is required")
+    allowed_behaviors = set(CANONICAL_BEHAVIORS if behavior_subset is None else behavior_subset)
+    unknown = allowed_behaviors - set(CANONICAL_BEHAVIORS)
+    if unknown:
+        raise ValueError(f"unknown behavior subset: {sorted(unknown)}")
+    allowed_behaviors -= SUSPENDED_POSTURE_BEHAVIORS
     # The temporal group graph is the expensive part on long clips with
     # fragmented tracks. Evaluate the conservative seed and the low-motion
     # edge of the train threshold bank; intermediate group states remain
     # available through the inexpensive trajectory-rule profiles below.
     group_profile_indices = tuple(sorted({0, len(profiles) - 1}))
     formed_social_sets: set[tuple[int, ...]] = set()
+    # Clip-level accumulators for the isolation arbitration below.
+    group_event_ids: set[int] = set()
+    group_event_evidence = 0.0
     for index, parameters in enumerate(profiles):
-        for candidate in candidates_from_evidence(predict_features(f, parameters)):
-            key = (candidate.behavior, candidate.target_ids)
-            scores.setdefault(key, np.zeros(len(profiles) + 1))[index] = candidate.evidence
-        if index in group_profile_indices:
-            for candidate in _aggregate_group_candidates(f, parameters):
+        group_only = allowed_behaviors.issubset(GROUP_BEHAVIORS) and parameters.confirmed_rules_v1 > 0
+        individual_only = allowed_behaviors.issubset(INDIVIDUAL_BEHAVIORS)
+        if individual_only:
+            from mouse_behavior.behavior.individual_rules import DEFAULT_INDIVIDUAL_CONFIG, individual_rule_masks
+            config = replace(DEFAULT_INDIVIDUAL_CONFIG,
+                             motion_speed_threshold_cm_s=parameters.individual_motion_speed_threshold_cm_s,
+                             static_min_duration_s=parameters.stationary_min_duration_s,
+                             locomotion_min_duration_s=parameters.locomotion_min_duration_s)
+            result = individual_rule_masks(f.centers_cm, f.valid, f.fps,
+                                          keypoints_cm=f.collective_keypoints_cm,
+                                          reference_body_cm=f.reference_body_cm, config=config)
+            for behavior, mask in result.masks.items():
+                if behavior not in allowed_behaviors:
+                    continue
+                for slot, duration in enumerate(_durations_by_column(mask, f.fps)):
+                    key = (behavior, (int(f.track_ids[slot]),))
+                    scores.setdefault(key, np.zeros(len(profiles) + 1))[index] = duration
+            group_candidates = ()
+        elif group_only:
+            from .group_event_rules import group_rule_candidates, isolation_candidates
+            group_candidates = (*group_rule_candidates(f, parameters, ()), *isolation_candidates(f, parameters))
+        else:
+            for candidate in candidates_from_evidence(
+                predict_features(f, parameters, social_config=social_config)
+            ):
+                if candidate.behavior not in allowed_behaviors:
+                    continue
+                if parameters.confirmed_rules_v1 > 0 and len(candidate.target_ids) >= 3:
+                    continue
                 key = (candidate.behavior, candidate.target_ids)
-                vector = scores.setdefault(key, np.zeros(len(profiles) + 1))
-                vector[index] = candidate.evidence
-                vector[-1] = max(vector[-1], candidate.evidence)
-                if candidate.behavior == "social_clustering":
-                    formed_social_sets.add(candidate.target_ids)
+                scores.setdefault(key, np.zeros(len(profiles) + 1))[index] = candidate.evidence
+            group_candidates = ()
+            if index in group_profile_indices and allowed_behaviors.intersection(GROUP_BEHAVIORS):
+                group_candidates = _aggregate_group_candidates(f, parameters)
+                if parameters.confirmed_rules_v1 > 0:
+                    from .confirmed_rules import group_rule_candidates
+                    group_candidates = group_rule_candidates(f, parameters, group_candidates)
+        for candidate in group_candidates:
+            # [GRP-12] The allowed-behavior filter comes FIRST. Evaluating the
+            # group evidence on the unfiltered tuple let a huddle zero
+            # isolation under behavior_subset=("isolation",) and then be
+            # dropped itself, leaving a table with no positive evidence at all,
+            # so predict_table silently returned behavior=None: a coverage loss
+            # reported as a clean run.
+            if candidate.behavior not in allowed_behaviors:
+                continue
+            if (candidate.behavior in MULTI_MOUSE_GROUP_BEHAVIORS
+                    and candidate.evidence > 0.0):
+                # [GRP-2] Accumulated over every profile and decided once per
+                # clip below, so a single non-firing profile cannot resurrect
+                # an isolation claim the clip has already contradicted.
+                group_event_ids.update(candidate.target_ids)
+                group_event_evidence = max(
+                    group_event_evidence, float(candidate.evidence))
+            key = (candidate.behavior, candidate.target_ids)
+            vector = scores.setdefault(key, np.zeros(len(profiles) + 1))
+            vector[index] = candidate.evidence
+            vector[-1] = max(vector[-1], candidate.evidence)
+            if candidate.frame_intervals is not None:
+                old = group_frame_metadata.get(key)
+                if old is None or candidate.evidence > old.evidence:
+                    group_frame_metadata[key] = candidate
+            if candidate.behavior == "social_clustering":
+                formed_social_sets.add(candidate.target_ids)
 
     # A clustering candidate needs the same explicit group formation evidence
     # in at least one frozen profile; identity membership alone is not enough.
     for key in tuple(scores):
         if key[0] == "social_clustering" and key[1] not in formed_social_sets:
             scores.pop(key)
+
+    # [GRP-1/GRP-2/GRP-11/GRP-12] Isolation arbitration, decided ONCE per clip
+    # and applied to every isolation candidate regardless of which path
+    # produced it. Rewriting only the local group_candidates tuple left the
+    # default full-13-class path untouched, because there the isolation
+    # candidates come from predict_features -> group_scores ->
+    # candidates_from_evidence above and never pass through it.
+    if group_event_ids and "isolation" in allowed_behaviors:
+        observed_tracks = {
+            int(track) for column, track in enumerate(f.track_ids)
+            if f.valid[:, column].any()
+        }
+        population = len(observed_tracks)
+        dominated = (
+            population > 0
+            and len(group_event_ids & observed_tracks) / population
+            >= ISOLATION_SUPPRESSION_POPULATION_FRACTION
+        )
+        for key, vector in scores.items():
+            if key[0] != "isolation" or len(key[1]) != 1 or vector.max() <= 0.0:
+                continue
+            inside = key[1][0] in group_event_ids
+            if not inside and not dominated:
+                continue
+            if (not inside and group_event_evidence
+                    < float(vector.max()) * ISOLATION_SUPPRESSION_EVIDENCE_RATIO):
+                continue
+            vector[:] = 0.0
 
     # Thresholds express evidence strength, not whether an observed mouse or
     # pair is allowed to compete at all. Keeping every visible singleton and
@@ -598,17 +767,21 @@ def build_candidate_table(f: ExportedFeatures, profiles: Sequence[HeuristicParam
     empty_evidence = np.zeros(len(profiles) + 1)
     for track_id in f.track_ids:
         ids = (int(track_id),)
-        # # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）：理毛/站立攀爬在 Phase B 进入标注 schema 前不作为 ranker 候选。
+        # Historical posture taxonomy remains readable, but suspended labels
+        # have no candidate slot, including when their evidence would be zero.
         for behavior in INDIVIDUAL_BEHAVIORS:
-            if behavior not in CANONICAL_BEHAVIORS:
+            if behavior not in allowed_behaviors:
                 continue
             scores.setdefault((behavior, ids), empty_evidence.copy())
-        scores.setdefault(("isolation", ids), empty_evidence.copy())
+        if "isolation" in allowed_behaviors:
+            scores.setdefault(("isolation", ids), empty_evidence.copy())
     for edge, (left, right) in enumerate(zip(f.pair_i, f.pair_j)):
         if not np.isfinite(f.pair_distance_cm[:, edge]).any():
             continue
         ids = tuple(sorted((int(f.track_ids[left]), int(f.track_ids[right]))))
         for behavior in PAIR_BEHAVIORS:
+            if behavior not in allowed_behaviors:
+                continue
             scores.setdefault((behavior, ids), empty_evidence.copy())
     duration = len(f.valid) / f.fps
     maxima = {
@@ -616,7 +789,7 @@ def build_candidate_table(f: ExportedFeatures, profiles: Sequence[HeuristicParam
             max((float(value.max()) for (name, _), value in scores.items() if name == behavior), default=0.0),
             1e-6,
         )
-        for behavior in CANONICAL_BEHAVIORS
+        for behavior in allowed_behaviors
     }
     candidates, vectors = [], []
     physical: dict[tuple[int, ...], dict[str, float]] = {}
@@ -632,7 +805,13 @@ def build_candidate_table(f: ExportedFeatures, profiles: Sequence[HeuristicParam
         vector["evidence_fraction"] = float(evidence.max() / max(duration, 1e-6))
         vector["evidence_relative"] = float(evidence.max() / maxima[behavior])
         names = tuple(vector)
-        candidates.append(Candidate(behavior, ids, float(evidence.max())))
+        seconds = float(evidence.max())
+        metadata = group_frame_metadata.get((behavior, ids))
+        if metadata is not None and seconds > 0 and seconds == metadata.evidence:
+            candidates.append(Candidate(behavior, ids, seconds,
+                                        metadata.frame_intervals, metadata.support_frame_intervals))
+        else:
+            candidates.append(Candidate(behavior, ids, seconds))
         vectors.append(list(vector.values()))
     if not names:
         # Obtain the same schema without fabricating a positive candidate.
@@ -652,7 +831,12 @@ def predict_table(table: CandidateTable, model: dict[str, Any]) -> Top1Predictio
         return Top1Prediction(None, (), 0.0)
     weights = np.asarray([model["coefficients"][c.behavior] for c in table.candidates])
     scores = np.einsum("ij,ij->i", table.values, weights)
-    eligible = hierarchical_candidate_indices(table.candidates)
+    eligible = [i for i in hierarchical_candidate_indices(table.candidates)
+                if table.candidates[i].behavior not in SUSPENDED_POSTURE_BEHAVIORS
+                and (not model.get("require_positive_evidence", False)
+                     or table.candidates[i].evidence > 0)]
+    if not eligible:
+        return Top1Prediction(None, (), 0.0)
     index = max(eligible, key=lambda candidate_index: scores[candidate_index])
     candidate = table.candidates[index]
     return Top1Prediction(candidate.behavior, candidate.target_ids, float(scores[index]))
@@ -694,7 +878,9 @@ def metric_rank(metrics: dict[str, Any]) -> tuple[float, ...]:
 
 def fit_ranker(tables: Sequence[CandidateTable], labels: Sequence[LabeledClip], *,
                steps: int = 500, regularization: float = 0.01, learning_rate: float = 0.03,
-               seed: int = 42, objective: str = "hard_margin") -> tuple[dict[str, Any], dict[str, Any]]:
+               seed: int = 42, objective: str = "hard_margin",
+               require_positive_evidence: bool = False,
+               target_id_policy: str = "exact") -> tuple[dict[str, Any], dict[str, Any]]:
     """Class-balanced optimization of heuristic scoring coefficients.
 
     ``hard_margin`` focuses each update on the strongest incorrect candidate,
@@ -703,6 +889,9 @@ def fit_ranker(tables: Sequence[CandidateTable], labels: Sequence[LabeledClip], 
     are counted as errors, never inserted as candidates.  No validation data or
     file IO is accepted by this function.
     """
+    from .group_scoring import evaluate_policy, target_ids_match
+    if target_id_policy not in {"exact", "social_clustering_superset", "group_target_superset"}:
+        raise ValueError("unknown target ID policy")
     if objective not in {"hard_margin", "listwise"}:
         raise ValueError("objective must be 'hard_margin' or 'listwise'")
     if (not tables or len(tables) != len(labels) or steps < 1 or regularization < 0
@@ -721,17 +910,20 @@ def fit_ranker(tables: Sequence[CandidateTable], labels: Sequence[LabeledClip], 
     kind = np.asarray([class_index[c.behavior] for table in tables for c in table.candidates], dtype=int)
     gold = np.full(n, -1, dtype=int)
     eligible_by_clip: list[np.ndarray] = []
+    positives_by_clip: list[np.ndarray] = []
     allowed = np.zeros(len(x), dtype=bool)
     for index, (table, label) in enumerate(zip(tables, labels)):
-        eligible = np.asarray(hierarchical_candidate_indices(table.candidates), dtype=int)
+        eligible = np.asarray([j for j in hierarchical_candidate_indices(table.candidates)
+                               if not require_positive_evidence or table.candidates[j].evidence > 0], dtype=int)
         eligible_by_clip.append(eligible)
         allowed[offsets[index] + eligible] = True
-        for j in eligible:
-            c = table.candidates[int(j)]
-            if (c.behavior == label.behavior
-                    and set(label.target_ids).issubset(set(c.target_ids))):
-                gold[index] = offsets[index] + j
-                break
+        positives = np.asarray([offsets[index] + j for j in eligible
+                                if table.candidates[int(j)].behavior == label.behavior
+                                and target_ids_match(label.behavior, label.target_ids,
+                                                     table.candidates[int(j)].target_ids, target_id_policy)], dtype=int)
+        positives_by_clip.append(positives)
+        if positives.size:
+            gold[index] = positives[0]
     counts = {name: sum(label.behavior == name for label in labels) for name in behaviors}
     importance = np.asarray([1 / max(counts[label.behavior], 1) for label in labels])
     importance[gold < 0] = 0
@@ -746,6 +938,9 @@ def fit_ranker(tables: Sequence[CandidateTable], labels: Sequence[LabeledClip], 
     for step in range(1, steps + 1):
         gradient = np.zeros_like(weights)
         scores = np.einsum("ij,ij->i", x, weights[kind])
+        for clip_index, positives in enumerate(positives_by_clip):
+            if positives.size:
+                gold[clip_index] = positives[np.argmax(scores[positives])]
         if objective == "listwise":
             scores = np.where(allowed, scores, -np.inf)
             max_scores = np.full(n, -np.inf)
@@ -753,7 +948,10 @@ def fit_ranker(tables: Sequence[CandidateTable], labels: Sequence[LabeledClip], 
             exponent = np.where(allowed, np.exp(np.clip(scores - max_scores[row], -60, 0)), 0.0)
             denominator = np.bincount(row, weights=exponent, minlength=n)
             residual = np.divide(exponent, denominator[row], out=np.zeros_like(exponent), where=denominator[row] > 0)
-            residual[gold[gold >= 0]] -= 1
+            for positives in positives_by_clip:
+                if positives.size:
+                    positive_sum = exponent[positives].sum()
+                    residual[positives] -= exponent[positives] / max(positive_sum, np.finfo(float).tiny)
             residual *= importance[row]
             for k, positions in enumerate(indices):
                 gradient[k] = x[positions].T @ residual[positions]
@@ -773,7 +971,7 @@ def fit_ranker(tables: Sequence[CandidateTable], labels: Sequence[LabeledClip], 
                 gold_local = int(gold[clip_index] - start)
                 gold_position = int(np.flatnonzero(local_indices == gold_local)[0])
                 gold_scores[clip_index] = local_scores[gold_position]
-                local_scores[gold_position] = -np.inf
+                local_scores[np.isin(start + local_indices, positives_by_clip[clip_index])] = -np.inf
                 if np.isfinite(local_scores).any():
                     local_negative = int(np.argmax(local_scores))
                     negative[clip_index] = start + int(local_indices[local_negative])
@@ -798,7 +996,9 @@ def fit_ranker(tables: Sequence[CandidateTable], labels: Sequence[LabeledClip], 
                      "coefficients": {name: weights[k].tolist() for k, name in enumerate(behaviors)},
                      "regularization": regularization, "optimizer_step": step,
                      "learning_rate": learning_rate, "objective": objective, "seed": seed}
-            metrics = evaluate_top1([(label, predict_table(table, model)) for label, table in zip(labels, tables)])
+            model["require_positive_evidence"] = require_positive_evidence
+            model["target_id_policy"] = target_id_policy
+            metrics = evaluate_policy([(label, predict_table(table, model)) for label, table in zip(labels, tables)], target_id_policy)
             if best_metrics is None or metric_rank(metrics) > metric_rank(best_metrics):
                 best_metrics, best_model = metrics, model
     assert best_metrics is not None

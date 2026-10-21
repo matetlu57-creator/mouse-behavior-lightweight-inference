@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
 
-from mouse_behavior.behavior.static_rule import (
-    bounded_stationary_mask,
-    bridge_gaps_outside_static,
+from mouse_behavior.behavior.individual_rules import (
+    DEFAULT_INDIVIDUAL_CONFIG,
+    SUSPENDED_POSTURE_BEHAVIORS,
+    individual_rule_masks,
 )
 from mouse_behavior.evaluation.exported_dataset_collective import (
     _directional_walker_in_group,
@@ -28,6 +30,10 @@ from mouse_behavior.evaluation.exported_dataset_models import (
     HeuristicParameters,
     INDIVIDUAL_BEHAVIORS,
 )
+from mouse_behavior.evaluation.social_heuristic_config import (
+    DEFAULT_SOCIAL_HEURISTIC_CONFIG,
+    SocialHeuristicConfig,
+)
 from mouse_behavior.evaluation.exported_dataset_temporal import (
     _durations_by_column,
     _isolation_cumulative_durations,
@@ -41,6 +47,7 @@ def predict_features(
     parameters: HeuristicParameters,
     *,
     temporal_only: bool = False,
+    social_config: SocialHeuristicConfig = DEFAULT_SOCIAL_HEURISTIC_CONFIG,
 ) -> dict[str, Any]:
     """Infer behavior evidence for every visible ID without consulting annotations.
 
@@ -68,44 +75,35 @@ def predict_features(
     group_events: list[dict[str, Any]] = []
     core_mode = parameters.group_core_candidate_mode > 0.0
 
-    # Head turning is compatible with Static; speed is derived from the torso
-    # center. Nose motion is separate attack/posture evidence, not locomotion.
-    stationary = valid & motion_valid & (speed <= parameters.stationary_max_speed_cm_s)
-    stationary = bounded_stationary_mask(
-        stationary,
-        features.centers_cm,
-        valid & motion_valid,
-        fps=fps,
-        max_gap_s=parameters.stationary_transient_max_duration_s,
-        max_transient_displacement_cm=parameters.stationary_transient_max_displacement_cm,
-        max_center_radius_cm=parameters.stationary_max_center_radius_cm,
+    individual_config = replace(
+        DEFAULT_INDIVIDUAL_CONFIG,
+        motion_speed_threshold_cm_s=parameters.individual_motion_speed_threshold_cm_s,
+        static_min_duration_s=parameters.stationary_min_duration_s,
+        locomotion_min_duration_s=parameters.locomotion_min_duration_s,
+        static_max_radius_cm=parameters.stationary_max_center_radius_cm,
+        static_transient_max_s=parameters.stationary_transient_max_duration_s,
+        static_transient_max_displacement_cm=parameters.stationary_transient_max_displacement_cm,
+        locomotion_pause_max_s=parameters.locomotion_stop_gap_s,
     )
-    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion（用户决策/文档）：移动 = 速度高于静止上限（负定义中理毛/站立攀爬证据门在 Step 5-A 启用）。
-    locomotion = valid & motion_valid & (speed > parameters.stationary_max_speed_cm_s)
-    locomotion_gap_frames = max(
-        0, int(np.floor(max(float(parameters.locomotion_stop_gap_s), 0.0) * fps))
+    individual = individual_rule_masks(
+        features.centers_cm, valid, fps,
+        keypoints_cm=features.collective_keypoints_cm,
+        reference_body_cm=features.reference_body_cm,
+        config=individual_config,
     )
-    if locomotion_gap_frames:
-        locomotion = bridge_gaps_outside_static(
-            locomotion,
-            stationary,
-            max_gap_frames=locomotion_gap_frames,
-        )
-    # The Static rule owns its bounded transient frames; gap recovery only
-    # bridges movement when the intervening observations are not Static.
-    locomotion &= ~stationary
-    stationary_durations = _durations_by_column(stationary, fps)
-    locomotion_durations = _durations_by_column(locomotion, fps)
-    for slot, track_id in enumerate(track_ids):
-        identity_scores[str(track_id)]["stationary"] = _qualifying_score(
-            stationary_durations[slot], parameters.stationary_min_duration_s, fps
-        )
-        identity_scores[str(track_id)]["locomotion"] = _qualifying_score(
-            locomotion_durations[slot], parameters.locomotion_min_duration_s, fps
-        )
-        # Grooming/Rearing 检测器待 Step 5-A 无监督标定后启用，此处占位 0。
-        identity_scores[str(track_id)]["grooming"] = 0.0
-        identity_scores[str(track_id)]["rearing"] = 0.0
+    locomotion = individual.masks['locomotion']
+    for behavior, mask in individual.masks.items():
+        if behavior in SUSPENDED_POSTURE_BEHAVIORS:
+            continue
+        durations = _durations_by_column(mask, fps)
+        minimum = getattr(individual_config, {
+            'stationary': 'static_min_duration_s',
+            'locomotion': 'locomotion_min_duration_s',
+            'grooming': 'grooming_min_duration_s',
+            'rearing': 'rearing_min_duration_s',
+        }[behavior])
+        for slot, track_id in enumerate(track_ids):
+            identity_scores[str(track_id)][behavior] = _qualifying_score(durations[slot], minimum, fps)
 
     # # [STEP6 2026-10-05] 社交/群体参数按文档 v4 + 用户覆盖落地：Together 速度门删除，pair_*_speed 不再使用。
     # pair_left_speed = speed[:, features.pair_i]
@@ -293,6 +291,23 @@ def predict_features(
         & ~interaction
     )
     together_durations = _durations_by_column(together, fps)
+    if parameters.confirmed_rules_v1 > 0:
+        from .confirmed_rules import pair_rule_masks
+        masks = pair_rule_masks(features, parameters, social_config)
+        approach, attack = masks["approach"], masks["attack"]
+        chasing, together = masks["chasing"], masks["together"]
+        head_contact, tail_contact = masks["head_contact"], masks["tail_contact"]
+        qualifying_approach = approach
+        approach_durations = _durations_by_column(approach, fps)
+        attack_durations = _durations_by_column(attack, fps)
+        chasing_durations = (
+            np.count_nonzero(chasing, axis=0).astype(float) / max(fps, 1e-9)
+            if parameters.confirmed_rules_v1 > 0
+            else _durations_by_column(chasing, fps)
+        )
+        together_durations = _durations_by_column(together, fps)
+        nose_head_cumulative = masks["head_contact_seconds"]
+        nose_tail_cumulative = masks["tail_contact_seconds"]
     if temporal_only:
         # Initial screening needs boundaries, not clip-wide ranking. These
         # masks reuse the predictor's exact geometry and preserve visual IDs.
@@ -302,9 +317,11 @@ def predict_features(
             "track_ids": track_ids,
             "pair_ids": [tuple(sorted((track_ids[int(i)], track_ids[int(j)])))
                          for i, j in zip(features.pair_i, features.pair_j)],
-            "individual_masks": {"stationary": stationary, "locomotion": locomotion},
+            "individual_masks": individual.masks,
+            "individual_diagnostics": individual.diagnostics,
             "pair_masks": {"approach": qualifying_approach, "approach_raw": approach,
-                           "attack": attack, "chasing": chasing & ~contact & pair_valid,
+                           "attack": attack, "chasing": (chasing if parameters.confirmed_rules_v1 > 0
+                                                          else chasing & ~contact & pair_valid),
                            "together": together, "contact": contact,
                            "nose_head_contact": head_contact, "nose_tail_contact": tail_contact},
         }
@@ -318,9 +335,13 @@ def predict_features(
     for pair_index, (left_slot, right_slot) in enumerate(zip(features.pair_i, features.pair_j)):
         key = _pair_key(track_ids[int(left_slot)], track_ids[int(right_slot)])
         attack_score = _qualifying_score(
-            attack_durations[pair_index], parameters.pair_min_duration_s, fps
+            attack_durations[pair_index],
+            (parameters.attack_min_event_duration_s
+             if parameters.confirmed_rules_v1 > 0
+             else parameters.pair_min_duration_s),
+            fps,
         )
-        if attack_score <= 0.0:
+        if attack_score <= 0.0 and parameters.confirmed_rules_v1 <= 0:
             contact_frames = np.flatnonzero(attack[:, pair_index])
             endpoint = pair_valid[:, pair_index] & (
                 pair_distance[:, pair_index] <= parameters.attack_endpoint_distance_cm
@@ -367,7 +388,9 @@ def predict_features(
             ),
             "chase": _qualifying_score(
                 chasing_durations[pair_index],
-                parameters.chase_min_duration_s,
+                (parameters.chase_min_directed_support_s
+                 if parameters.confirmed_rules_v1 > 0
+                 else parameters.chase_min_duration_s),
                 fps,
             ),
             # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复
@@ -378,6 +401,7 @@ def predict_features(
         # [STEP6 2026-10-05] Together: recovery 块 mean_speed 条件删除（启用门不再要求 together_mean_max_speed_cm_s），距离条件保留。
         if (
             values["together"] <= 0.0
+            and parameters.confirmed_rules_v1 <= 0
             and values["nose_head_contact"] <= 0.0
             and values["nose_tail_contact"] <= 0.0
             and parameters.together_initial_max_distance_cm > 0.0
@@ -414,6 +438,7 @@ def predict_features(
                     values["together"] = min(len(distances) / fps, 1.5)
         if (
             parameters.attack_contact_score_multiplier > 1.0
+            and parameters.confirmed_rules_v1 <= 0
             and features.nose_speed_cm_s is not None
             and features.nose_acceleration_cm_s2 is not None
         ):
@@ -585,11 +610,22 @@ def predict_features(
             or ",".join(map(str, event["member_ids"])) in huddle_groups
         ]
 
-    isolated = (
-        valid
-        & (valid_count >= 2)[:, None]
-        & (features.nearest_distance_cm >= parameters.isolation_distance_cm)
-    )
+    isolation_distance = (np.isfinite(features.nearest_distance_cm)
+                          & (features.nearest_distance_cm > parameters.isolation_distance_cm))
+    isolated = valid & (valid_count >= 2)[:, None] & isolation_distance
+    if parameters.confirmed_rules_v1 > 0:
+        # Isolation describes the target's spatial relation for the annotated
+        # event. Unknown frames do not count either way, but one observed
+        # nearest-neighbour distance below the fitted minimum contradicts Isolation
+        # for that target in this clip. Individual actions do not change it.
+        comparison_observed = (
+            valid
+            & (valid_count >= 2)[:, None]
+            & np.isfinite(features.nearest_distance_cm)
+        )
+        observed_near = comparison_observed & ~isolation_distance
+        target_contradicted = observed_near.any(axis=0)
+        isolated[:, target_contradicted] = False
     isolation_unknown = ~valid | (valid_count < 2)[:, None]
     isolation_durations = _isolation_cumulative_durations(
         isolated, isolation_unknown, fps, parameters.isolation_max_gap_s
@@ -866,14 +902,43 @@ def predict_features(
             )
         )
 
+    if parameters.confirmed_rules_v1 > 0:
+        # The public current profile must execute the same group rules as the
+        # direct audit/scorer. Historical legacy masks above cannot override it.
+        from .group_event_rules import group_rule_candidates
+        current = group_rule_candidates(features, parameters, ())
+        grouped = {name: {} for name in ("huddle", "social_clustering", "group_locomotion", "dispersal")}
+        group_events = []
+        for candidate in current:
+            key = ",".join(map(str, candidate.target_ids))
+            grouped[candidate.behavior][key] = max(
+                grouped[candidate.behavior].get(key, 0.0), float(candidate.evidence))
+            group_events.append({"behavior": candidate.behavior,
+                                 "member_ids": list(candidate.target_ids),
+                                 "score": float(candidate.evidence),
+                                 "evidence_seconds": float(candidate.evidence),
+                                 "temporal_support": "clip_local_half_open_event_frame_intervals",
+                                 "frame_intervals": candidate.frame_intervals,
+                                 "support_frame_intervals": candidate.support_frame_intervals})
+        huddle_groups = grouped["huddle"]
+        cluster_groups = grouped["social_clustering"]
+        locomotion_groups = grouped["group_locomotion"]
+        dispersal_groups = grouped["dispersal"]
+        for values in identity_scores.values():
+            for name in grouped:
+                values[name] = 0.0
+
     # The new movement-phase group rules may occur before/after a sustained
     # isolation interval in one clip. They must not erase the Isolation score.
     for slot, track_id in enumerate(track_ids):
         values = identity_scores[str(track_id)]
+        minimum_isolation_seconds = max(parameters.isolation_min_duration_s, 10.0)
         values["isolation"] = _qualifying_score(
-            isolation_durations[slot], max(parameters.isolation_min_duration_s, 10.0), fps
+            isolation_durations[slot], minimum_isolation_seconds, fps
         )
-        if track_id in legacy_collective_member_ids:
+        if parameters.confirmed_rules_v1 > 0 and isolation_durations[slot] <= minimum_isolation_seconds:
+            values["isolation"] = 0.0
+        if parameters.confirmed_rules_v1 <= 0 and track_id in legacy_collective_member_ids:
             values["isolation"] = 0.0
     group_scores: dict[str, dict[str, float]] = {}
     for slot, track_id in enumerate(track_ids):
@@ -892,10 +957,10 @@ def predict_features(
                 values = identity_scores[track_id]
                 values[behavior] = max(values[behavior], score)
 
-    # [STEP4 2026-10-04] 个体层合并：identity_scores 含 grooming/rearing 占位槽，
-    # scores 初始化必须覆盖 INDIVIDUAL_BEHAVIORS，否则 KeyError。
+    # Keep taxonomy slots for historical readers; suspended posture scores stay
+    # zero and cannot become detected labels before manual review/calibration.
     scores: dict[str, float] = {
-        behavior: 0.0 for behavior in (*CANONICAL_BEHAVIORS, *INDIVIDUAL_BEHAVIORS)
+        behavior: 0.0 for behavior in CANONICAL_BEHAVIORS
     }
     for values in identity_scores.values():
         for behavior, score in values.items():
@@ -906,6 +971,7 @@ def predict_features(
     detected = sorted(behavior for behavior, score in scores.items() if score > 0.0)
 
     return {
+        "suspended_posture_behaviors": sorted(SUSPENDED_POSTURE_BEHAVIORS),
         "detected": detected,
         "scores": {key: float(value) for key, value in scores.items()},
         "track_ids": track_ids,

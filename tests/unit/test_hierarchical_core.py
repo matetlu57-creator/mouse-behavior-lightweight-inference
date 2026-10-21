@@ -121,16 +121,18 @@ def test_locomotion_duration_floor_replaces_the_two_deleted_floors():
     assert long_enough.label == h.MotionLabel.LOCOMOTION.value
 
 
-def test_rearing_and_grooming_evidence_outrank_the_speed_gate():
-    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
-    # Negative definition: posture evidence suppresses the speed-based labels and
-    # Rearing outranks Grooming. Both detectors ship disabled, so their scores are
-    # only reachable through explicit evidence flags.
+def test_summary_adapter_posture_evidence_precedes_motion_only_when_explicit():
+    # This legacy summary adapter accepts explicit offline evidence flags. It
+    # does not enable the suspended canonical detectors or configure the v3
+    # posture engine's separate conflict resolver.
     cfg = h.MotionThresholds()
     base = dict(duration_s=1.2, mean_speed_cm_s=5., path_length_cm=6.,
                 net_displacement_cm=4., active_fraction=.45, center_radius_cm=2.)
     assert h.detect_individual_motion(
         h.MotionWindowStats(1, rearing_evidence=True, grooming_evidence=True, **base),
+        cfg).label == h.MotionLabel.GROOMING.value
+    assert h.detect_individual_motion(
+        h.MotionWindowStats(1, rearing_evidence=True, **base),
         cfg).label == h.MotionLabel.REARING.value
     assert h.detect_individual_motion(
         h.MotionWindowStats(1, grooming_evidence=True, **base),
@@ -139,6 +141,9 @@ def test_rearing_and_grooming_evidence_outrank_the_speed_gate():
         h.MotionWindowStats(1, **base), cfg).label == h.MotionLabel.LOCOMOTION.value
     assert h.MotionLabel.GROOMING.value == "Grooming"
     assert h.MotionLabel.REARING.value == "Rearing"
+    from mouse_behavior.behavior.individual_rules import DEFAULT_INDIVIDUAL_CONFIG
+
+    assert DEFAULT_INDIVIDUAL_CONFIG.enable_posture_screen is False
 
 
 def test_static_accepts_only_bounded_brief_body_displacement():
@@ -439,8 +444,9 @@ def test_default_config_uses_core_schema_and_hard_duration_floors():
     assert thresholds.social.chasing_min_duration_s == 1.
     assert thresholds.social.chasing_max_distance_cm == 16.05
     assert thresholds.social.min_heading_similarity == .707
-    # [STEP6 2026-10-05] Together [3,6] cm 带；Approach 终点 [2,5] cm + closing≥2 cm/s。
-    assert thresholds.social.together_max_distance_cm == 8.025
+    # This legacy core block retains its explicit adapter distance settings;
+    # current social inference owns an independent SocialHeuristicConfig.
+    assert thresholds.social.together_max_distance_cm == 7.0
     assert thresholds.social.together_min_distance_cm == 4.0125
     assert thresholds.social.together_min_duration_s == 1.
     assert thresholds.social.approach_final_distance_cm == 6.6875

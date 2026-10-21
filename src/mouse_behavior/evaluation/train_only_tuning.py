@@ -86,12 +86,14 @@ def predict_rows(
 
 def candidate_oracle_metrics(
     rows: Sequence[tuple[LabeledClip, Sequence[Candidate]]],
+    *, require_positive_evidence: bool = False,
 ) -> dict[str, Any]:
     """Upper bound for ranking at fixed rule thresholds, on training labels."""
 
     per_behavior: dict[str, dict[str, int]] = {}
     for label, candidates in rows:
-        selectable = [candidates[index] for index in hierarchical_candidate_indices(candidates)]
+        selectable = [candidates[index] for index in hierarchical_candidate_indices(candidates)
+                      if not require_positive_evidence or candidates[index].evidence > 0]
         values = per_behavior.setdefault(
             label.behavior, {"support": 0, "target_candidate": 0, "behavior_candidate": 0,
                              "id_candidate": 0}
@@ -99,7 +101,7 @@ def candidate_oracle_metrics(
         values["support"] += 1
         values["target_candidate"] += int(any(
             item.behavior == label.behavior
-            and set(label.target_ids).issubset(set(item.target_ids))
+            and tuple(sorted(label.target_ids)) == tuple(sorted(item.target_ids))
             for item in selectable
         ))
         values["behavior_candidate"] += int(any(item.behavior == label.behavior for item in selectable))
@@ -111,6 +113,15 @@ def candidate_oracle_metrics(
     return {
         "n_samples": total,
         "target_candidate_rate": target_candidate / total if total else 0.0,
+        "primary_metric": "strict_exact_selectable_candidate_coverage",
+        "requires_positive_evidence": require_positive_evidence,
+        "enumerated_exact_candidate_rate": sum(any(
+            c.behavior == label.behavior and tuple(sorted(c.target_ids)) == tuple(sorted(label.target_ids))
+            for c in candidates) for label, candidates in rows) / total if total else 0.0,
+        "positive_exact_candidate_rate": sum(any(
+            c.evidence > 0 and c.behavior == label.behavior
+            and tuple(sorted(c.target_ids)) == tuple(sorted(label.target_ids))
+            for c in candidates) for label, candidates in rows) / total if total else 0.0,
         "per_behavior": {
             name: {**value, "target_candidate_rate": value["target_candidate"] / value["support"]}
             for name, value in sorted(per_behavior.items())

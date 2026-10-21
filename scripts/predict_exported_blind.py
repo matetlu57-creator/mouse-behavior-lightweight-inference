@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Run one frozen Top-1 model on a label-free trajectory manifest.
+"""Run a historical frozen Top-1 model on a label-free trajectory manifest.
 
 The input CSV schema is exactly ``sample_id,tracks_path,fps``.  This program
 cannot accept annotations or ground-truth target IDs.  It refuses to run until
-the train-only readiness gate has produced a frozen model.
+the train-only readiness gate has produced a frozen model. This compatibility
+command is not the current v27 canonical detector; select --historical-model
+explicitly. Current video inference uses run_canonical_behavior_video.py.
 """
 
 from __future__ import annotations
@@ -76,7 +78,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--blind-manifest", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    return parser.parse_args()
+    parser.add_argument("--historical-model", action="store_true",
+                        help="Explicitly select historical frozen-model inference, not current v27 rules")
+    args = parser.parse_args()
+    if not args.historical_model:
+        parser.error("this is the historical frozen-model route; use run_canonical_behavior_video.py "
+                     "for current rules, or explicitly select --historical-model")
+    return args
 
 
 def main() -> int:
@@ -153,6 +161,7 @@ def main() -> int:
         writer.writeheader()
         writer.writerows(debug_rows)
     receipt = {
+        "policy_scope": "historical_frozen_model_not_current_canonical_v27",
         "count": len(clips),
         "prediction_count": len(clips),
         "predictions_sha256": _sha256(predictions_path),

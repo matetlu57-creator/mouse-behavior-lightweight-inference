@@ -40,7 +40,7 @@ _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "configs" / "default.yaml"
 #: Centimetre scale era of artefacts serialized before ``reference_body_cm``
 #: existed.  Only used as a documented dataclass default so historical exports
 #: keep describing their own era; new builds always write the resolved value.
-LEGACY_REFERENCE_BODY_CM = 8.0
+LEGACY_REFERENCE_BODY_CM = 7.918
 
 VALID_MODES = ("calibration", "fixed", "body_length")
 

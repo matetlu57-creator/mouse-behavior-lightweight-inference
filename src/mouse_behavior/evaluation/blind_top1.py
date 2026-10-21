@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .event_frames import FrameIntervals, validate_intervals
+
 from .exported_dataset import (
     CANONICAL_BEHAVIORS,
     GROUP_BEHAVIORS,
@@ -32,6 +34,8 @@ class LabeledClip:
     recording_session: str
     behavior: str
     target_ids: tuple[int, ...]
+    scale_receipt_path: str = ""
+    scale_receipt_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,17 @@ class Candidate:
     behavior: str
     target_ids: tuple[int, ...]
     evidence: float
+    # None preserves the legacy score-only contract. Empty tuples explicitly
+    # mean no event frames; neither the ranker nor old constructors need masks.
+    frame_intervals: FrameIntervals | None = None
+    support_frame_intervals: FrameIntervals | None = None
+
+    def __post_init__(self) -> None:
+        for intervals in (self.frame_intervals, self.support_frame_intervals):
+            if intervals is not None:
+                if not isinstance(intervals, tuple):
+                    raise ValueError("frame intervals must be an immutable tuple")
+                validate_intervals(intervals)
 
 
 @dataclass(frozen=True)
@@ -115,6 +130,8 @@ def load_training_manifest(path: str | Path) -> list[LabeledClip]:
                     recording_session=session,
                     behavior=behavior,
                     target_ids=target_ids,
+                    scale_receipt_path=row.get("scale_receipt_path", ""),
+                    scale_receipt_sha256=row.get("scale_receipt_sha256", ""),
                 )
             )
             seen_ids.add(sample_id)
@@ -199,6 +216,16 @@ def candidates_from_evidence(prediction: Mapping[str, Any]) -> tuple[Candidate, 
     candidates: list[Candidate] = []
     identity_scores = dict(prediction.get("identity_scores", {}))
     pair_scores = dict(prediction.get("pair_scores", {}))
+    event_frames = {}
+    for event in prediction.get("group_events", ()):
+        intervals = event.get("frame_intervals")
+        support = event.get("support_frame_intervals")
+        if intervals is not None:
+            key = (event["behavior"], tuple(sorted(map(int, event["member_ids"]))))
+            event_frames[(key, float(event.get("evidence_seconds", event.get("score", 0.))))] = (
+                tuple(tuple(pair) for pair in intervals),
+                tuple(tuple(pair) for pair in support) if support is not None else None,
+            )
     for text_id, raw_scores in identity_scores.items():
         track_id = int(text_id)
         values = dict(raw_scores)
@@ -222,9 +249,10 @@ def candidates_from_evidence(prediction: Mapping[str, Any]) -> tuple[Candidate, 
                 raise ValueError(f"invalid visual-ID group in prediction: {text_ids!r}")
             for behavior in GROUP_BEHAVIORS:
                 score = _positive_score(dict(raw_scores).get(behavior, 0.0))
-                minimum_size = 1 if behavior == "isolation" else 3
+                minimum_size = 1 if behavior == "isolation" else 2 if behavior == "dispersal" else 3
                 if score and len(ids) >= minimum_size:
-                    candidates.append(Candidate(behavior, ids, score))
+                    frames, support = event_frames.get(((behavior, ids), score), (None, None))
+                    candidates.append(Candidate(behavior, ids, score, frames, support))
     else:
         # Compatibility for older rule evidence without explicit components.
         for behavior in GROUP_BEHAVIORS:
@@ -239,7 +267,7 @@ def candidates_from_evidence(prediction: Mapping[str, Any]) -> tuple[Candidate, 
                 for track_id, values in identity_scores.items()
             )
             members = [(track_id, score) for track_id, score in positive if score]
-            minimum_size = 1 if behavior == "isolation" else 3
+            minimum_size = 1 if behavior == "isolation" else 2 if behavior == "dispersal" else 3
             if len(members) >= minimum_size:
                 candidates.append(
                     Candidate(behavior, tuple(track_id for track_id, _ in members),
@@ -297,9 +325,8 @@ def evaluate_top1(
 ) -> dict[str, Any]:
     """Score Top-1 behavior for the labeled target IDs.
 
-    A prediction is correct when it names the labeled behavior and includes
-    every annotated target ID. Extra predicted group members are retained as
-    an auxiliary exact-set diagnostic, not treated as target-behavior errors.
+    Correctness requires the behavior and the complete unordered ID set.
+    Subset ID coverage remains an auxiliary diagnostic only.
     """
 
     per_behavior: dict[str, dict[str, int]] = {}
@@ -316,8 +343,8 @@ def evaluate_top1(
         values["support"] += 1
         behavior_ok = prediction.behavior == record.behavior
         ids_ok = set(record.target_ids).issubset(set(prediction.target_ids))
-        exact_ids_ok = tuple(sorted(prediction.target_ids)) == record.target_ids
-        joint_ok = behavior_ok and ids_ok
+        exact_ids_ok = tuple(sorted(prediction.target_ids)) == tuple(sorted(record.target_ids))
+        joint_ok = behavior_ok and exact_ids_ok
         # [SUSPENDED-STEP3 2026-10-04] dual-label credit removed: Together now
         # allows contact without interaction, so the Together-vs-contact
         # alternative no longer exists; compatible_exact mirrors strict exact-ID.
@@ -334,7 +361,7 @@ def evaluate_top1(
         values["exact_id_correct"] += int(exact_ids_ok)
         if not joint_ok:
             errors[
-                "wrong_ids" if behavior_ok else "wrong_behavior" if ids_ok else "both_wrong"
+                "wrong_ids" if behavior_ok else "wrong_behavior" if exact_ids_ok else "both_wrong"
             ] += 1
         confusion[(record.behavior, prediction.behavior or "<none>")] += 1
     total = len(rows)
@@ -353,6 +380,7 @@ def evaluate_top1(
     }
     return {
         "n_samples": total,
+        "primary_metric": "strict_behavior_and_exact_visual_id_set",
         "joint_top1_accuracy": joint / total if total else 0.0,
         "compatible_exact_top1_accuracy": compatible_exact / total if total else 0.0,
         "macro_joint_top1_accuracy": (

@@ -18,6 +18,7 @@ from mouse_behavior.evaluation.calibrated_rule_ranker import (
 from mouse_behavior.evaluation.exported_dataset import (
     CANONICAL_BEHAVIORS,
     HeuristicParameters,
+    config_seed_parameters,
     load_exported_features,
 )
 
@@ -52,7 +53,7 @@ def test_missing_exact_group_candidate_is_not_credited_or_added_by_training():
     assert predict_table(table, model).target_ids == (1, 2, 3)
 
 
-def test_training_gold_candidate_matches_all_labeled_targets_without_exact_group_set():
+def test_training_does_not_credit_a_candidate_with_extra_group_members():
     table = CandidateTable(
         (Candidate("huddle", (1, 2, 3, 4), 5.0),),
         np.asarray([[1.0, 1.0]], dtype=np.float32), ("bias", "evidence"),
@@ -61,8 +62,9 @@ def test_training_gold_candidate_matches_all_labeled_targets_without_exact_group
 
     model, metrics = fit_ranker([table], [label], steps=5, regularization=0.01)
 
-    assert metrics["joint_top1_accuracy"] == 1.0
+    assert metrics["joint_top1_accuracy"] == 0.0
     assert metrics["exact_id_set_accuracy"] == 0.0
+    assert predict_table(table, model).target_ids == (1, 2, 3, 4)
 
 
 def test_empty_candidates_produce_abstention():
@@ -302,13 +304,13 @@ def test_huddling_onset_resting_gate_is_deleted(tmp_path):
 
 
 def test_together_distance_profiles_stay_within_the_calibrated_band():
-    # [STEP6 2026-10-05] Together 上限新默认 6 cm；训练可选 profile bank 只在
-    # [6,8] cm 内探索，且下限 together_min_distance_cm 固定 3 cm，与上限探索解耦。
-    profiles = rule_profiles(HeuristicParameters())
+    # The current profile bank uses the confirmed distance definition, rather
+    # than reviving the historical 8.025/10.7 cm training alternatives.
+    profiles = rule_profiles(config_seed_parameters({}))
 
-    assert profiles[0].together_max_distance_cm == 8.025
-    assert {profile.together_max_distance_cm for profile in profiles} <= {8.025, 10.7}
-    assert all(profile.together_min_distance_cm == 4.0125 for profile in profiles)
+    assert len(profiles) == 1
+    assert profiles[0].together_max_distance_cm == 5.318182945251465
+    assert profiles[0].together_min_distance_cm == 0.0
 
 
 def test_group_candidates_retain_core_despite_temporary_extra_track(tmp_path):

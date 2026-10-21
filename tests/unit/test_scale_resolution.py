@@ -26,7 +26,7 @@ from mouse_behavior.preprocessing.scale_resolution import (
 )
 
 QUAD = np.array([[0.0, 0.0], [775.0, 0.0], [775.0, 775.0], [0.0, 775.0]])
-ARENA_CPP = 0.1290353622512599
+ARENA_CPP = 0.09548616806593231
 
 
 def _make_calibration(tmp_path, *, with_subject=True, source_video=None, name="rig.json"):
@@ -128,15 +128,15 @@ def test_relative_calibration_path_resolves_from_project_root(tmp_path, monkeypa
     monkeypatch.chdir(tmp_path)
     resolved = resolve_scale({"mode": "calibration", "calibration_file": "configs/scale/rig_a.json"})
     assert resolved.cm_per_pixel == pytest.approx(ARENA_CPP, rel=1e-9)
-    assert resolved.reference_body_cm == pytest.approx(10.7)
+    assert resolved.reference_body_cm == pytest.approx(7.918)
 
 
 def test_default_scale_config_is_unified_per_video_body_length():
     cfg = default_scale_config()
     assert cfg["mode"] == "body_length"
     resolved = resolve_scale(cfg, reference_body_px=82.45)
-    assert resolved.cm_per_pixel == pytest.approx(10.7 / 82.45)
-    assert resolved.reference_body_cm == pytest.approx(10.7)
+    assert resolved.cm_per_pixel == pytest.approx(7.918 / 82.45)
+    assert resolved.reference_body_cm == pytest.approx(7.918)
 
 
 def test_scale_block_of_accepts_full_config_or_block():
@@ -186,15 +186,15 @@ def test_load_exported_features_uses_unified_default_scale(tmp_path):
     tracks_path = tmp_path / "tracks.json"
     _tiny_tracks(tracks_path)
     features = load_exported_features(tracks_path, fps=30.0)
-    # 合成轨迹鼻-尾基 = 16 px；默认逐视频尺度 = 10.7 cm / 16 px。
-    assert features.cm_per_pixel == pytest.approx(10.7 / 16.0)
-    assert features.reference_body_cm == pytest.approx(10.7)
+    # The current 74 cm arena calibration provides the shared 7.918 cm ruler.
+    assert features.cm_per_pixel == pytest.approx(7.918 / 16.0)
+    assert features.reference_body_cm == pytest.approx(7.918)
 
 
-def test_legacy_era_default_is_documented_on_the_dataclass():
-    assert LEGACY_REFERENCE_BODY_CM == 8.0
+def test_dataclass_default_uses_the_current_reference_scale():
+    assert LEGACY_REFERENCE_BODY_CM == 7.918
     field = ExportedFeatures.__dataclass_fields__["reference_body_cm"]
-    assert field.default == 8.0
+    assert field.default == 7.918
 
 def test_robust_reference_body_px_rejects_pose_broken_tracks():
     from mouse_behavior.preprocessing.scale_resolution import robust_reference_body_px

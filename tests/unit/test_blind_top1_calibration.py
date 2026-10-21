@@ -110,18 +110,24 @@ def test_blind_compatible_top1_mirrors_strict_after_dual_removal() -> None:
     assert metrics["per_behavior"]["together"]["compatible_exact_correct"] == 0
 
 
-def test_target_behavior_top1_allows_extra_group_members_but_requires_labeled_ids() -> None:
+def test_target_behavior_top1_requires_the_exact_group_member_set() -> None:
     label = _clip("huddle", (1, 2, 3))
     prediction = Top1Prediction("huddle", (1, 2, 3, 4), 1.0)
     metrics = evaluate_top1([(label, prediction)])
 
-    assert metrics["joint_top1_accuracy"] == 1.0
+    assert metrics["joint_top1_accuracy"] == 0.0
+    # ID coverage is retained as a diagnostic, not the strict joint metric.
     assert metrics["id_top1_accuracy"] == 1.0
     assert metrics["exact_id_set_accuracy"] == 0.0
+
+    exact = evaluate_top1([(label, Top1Prediction("huddle", (3, 1, 2), 1.0))])
+    assert exact["joint_top1_accuracy"] == 1.0
+    assert exact["id_top1_accuracy"] == 1.0
 
     missing_target = Top1Prediction("huddle", (1, 2, 4), 1.0)
     missed = evaluate_top1([(label, missing_target)])
     assert missed["joint_top1_accuracy"] == 0.0
+    assert missed["id_top1_accuracy"] == 0.0
 
 
 def test_group_candidate_requires_at_least_three_positive_members() -> None:
@@ -214,19 +220,19 @@ def test_training_manifest_rejects_validation_rows(tmp_path) -> None:
 
 
 def test_hierarchical_behavior_schema_contains_all_active_labels_and_layers():
-    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复：活跃标签 16 -> 14。
-    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
-    # Step 4 merges the two annotated motion labels into one, so the annotatable
-    # label count goes 16 -> 14 (Step 3) -> 13. Grooming/Rearing are individual
-    # *slots* in INDIVIDUAL_BEHAVIORS (detectors off, score always 0) and are
-    # deliberately not annotation labels, so they stay out of CANONICAL_BEHAVIORS.
-    assert len(LABEL_TO_CANONICAL) == len(CANONICAL_BEHAVIORS) == 13
+    # The taxonomy can read/report posture labels while default inference keeps
+    # both posture detectors suspended pending human review.
+    from mouse_behavior.behavior.individual_rules import SUSPENDED_POSTURE_BEHAVIORS
+
+    assert len(LABEL_TO_CANONICAL) == len(CANONICAL_BEHAVIORS) == 15
     assert set(CANONICAL_BEHAVIORS) == {
-        "locomotion", "stationary", "isolation",
+        "locomotion", "stationary", "grooming", "rearing", "isolation",
         "approach", "together", "chase", "attack",
         "nose_head_contact", "nose_tail_contact",
         "huddle", "social_clustering", "dispersal", "group_locomotion",
     }
+    assert SUSPENDED_POSTURE_BEHAVIORS == {"grooming", "rearing"}
+    assert len(set(CANONICAL_BEHAVIORS) - SUSPENDED_POSTURE_BEHAVIORS) == 13
     assert LABEL_TO_CANONICAL["Locomotion"] == "locomotion"
     for legacy in ("Walking", "Running"):
         assert legacy not in LABEL_TO_CANONICAL

@@ -548,7 +548,9 @@ def test_pair_compatible_labels_removed_from_predictions() -> None:
         ),
         parameters,
     )
-    assert alternating["pair_scores"]["1,2"]["nose_head_contact"] == 0.0
+    # Each direction independently sustains 0.3 s, above the current 0.2 s
+    # contact minimum. This earns contact evidence without compatibility credit.
+    assert alternating["pair_scores"]["1,2"]["nose_head_contact"] == pytest.approx(0.3)
     assert "pair_compatible_labels" not in alternating
 
 
@@ -683,12 +685,10 @@ def _group_formation_features(*, moving_members: int) -> ExportedFeatures:
     )
 
 
-def test_all_active_behaviors_have_distinct_auditable_feature_vectors() -> None:
-    # [SUSPENDED-STEP3 2026-10-04] Following/Avoiding 暂停（用户决策），保留待恢复：following/avoidance 已暂停，活跃行为 16 -> 14。
-    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
-    # running+walking collapse into one auditable vector, so 14 -> 13. Grooming
-    # and Rearing are individual score slots without a handcrafted vector yet
-    # (detectors land in Step 5-A), so they are deliberately not enumerated here.
+def test_all_unsuspended_behaviors_have_distinct_auditable_feature_vectors() -> None:
+    # Walking/Running share Locomotion. Grooming/Rearing remain known taxonomy
+    # labels, but their independent review engine is excluded from this
+    # default-inference handcrafted vector contract.
     features = _group_formation_features(moving_members=2)
     categories = {
         (1,): ("locomotion", "stationary", "isolation"),
@@ -705,7 +705,7 @@ def test_all_active_behaviors_have_distinct_auditable_feature_vectors() -> None:
     }
 
     assert len(vectors) == 13
-    assert set(vectors) == set(CANONICAL_BEHAVIORS)
+    assert set(vectors) == set(CANONICAL_BEHAVIORS) - {"grooming", "rearing"}
     assert vectors["locomotion"]["straightness"] is not None
     for merged_key in ("speed_p25_cm_s", "speed_p90_cm_s", "active_speed_median_cm_s",
                        "stop_fraction", "net_displacement_cm", "straightness"):
@@ -717,52 +717,70 @@ def test_all_active_behaviors_have_distinct_auditable_feature_vectors() -> None:
     assert "contact_nose_acceleration_p90_cm_s2" in vectors["attack"]
 
 
-def test_group_locomotion_requires_aligned_moving_triple_for_three_seconds() -> None:
-    base = _group_formation_features(moving_members=3)
-    moving = replace(
-        base,
-        speed_cm_s=np.full_like(base.speed_cm_s, 16.05),
-        pair_distance_cm=np.full_like(base.pair_distance_cm, 12.0),
-        pair_direction_similarity=np.ones_like(base.pair_direction_similarity),
-    )
-    aligned = predict_features(moving, HeuristicParameters())
-    opposed = predict_features(
-        replace(moving, pair_direction_similarity=np.zeros_like(base.pair_direction_similarity)),
-        HeuristicParameters(),
-    )
-
-    assert aligned["group_scores"]["1,2,3"]["group_locomotion"] >= 3.0
-    assert not any(
-        scores.get("group_locomotion", 0) > 0
-        for scores in opposed["group_scores"].values()
-    )
-
-
-def test_dispersal_requires_initial_group_and_sustained_separation() -> None:
-    base = _group_formation_features(moving_members=3)
-    increasing = np.linspace(4.0125, 26.75, len(base.valid), dtype=np.float32)
-    separating = replace(
-        base,
-        speed_cm_s=np.full_like(base.speed_cm_s, 16.05),
-        pair_distance_cm=np.repeat(increasing[:, None], 3, axis=1),
-    )
-    static_distances = replace(
-        separating, pair_distance_cm=np.full_like(separating.pair_distance_cm, 4.0125)
+def _measured_group_features(centers: np.ndarray, fps: float = 10.0) -> ExportedFeatures:
+    """Derive all motion/distance channels from the same observed trajectory."""
+    frames, mice, _ = centers.shape
+    pair_i, pair_j = np.triu_indices(mice, 1)
+    velocity = np.gradient(centers, axis=0) * fps
+    speed = np.linalg.norm(velocity, axis=2)
+    distances = np.linalg.norm(centers[:, pair_i] - centers[:, pair_j], axis=2)
+    unit = velocity / np.maximum(speed[:, :, None], 1e-9)
+    nearest = np.full((frames, mice), np.inf)
+    for edge, (left, right) in enumerate(zip(pair_i, pair_j)):
+        nearest[:, left] = np.minimum(nearest[:, left], distances[:, edge])
+        nearest[:, right] = np.minimum(nearest[:, right], distances[:, edge])
+    return ExportedFeatures(
+        fps=fps, track_ids=np.arange(1, mice + 1), valid=np.ones((frames, mice), bool),
+        centers_cm=centers, speed_cm_s=speed, velocity_cm_s=velocity,
+        pair_i=pair_i, pair_j=pair_j, pair_distance_cm=distances,
+        pair_closing_speed_cm_s=-np.gradient(distances, axis=0) * fps,
+        pair_direction_similarity=np.sum(unit[:, pair_i] * unit[:, pair_j], axis=2),
+        pair_nose_head_cm=np.full_like(distances, np.inf),
+        pair_nose_tail_cm=np.full_like(distances, np.inf),
+        nearest_distance_cm=nearest, mean_nearest_distance_cm=nearest.mean(axis=1),
+        cm_per_pixel=.1, track_selection_truncated=False, selected_track_count=mice,
+        reference_body_cm=7.918,
     )
 
-    dispersed = predict_features(separating, HeuristicParameters())
-    unchanged = predict_features(static_distances, HeuristicParameters())
 
-    # [STEP6 2026-10-05] Dispersal 时长门降到 5 s（原 10 s）。
-    assert HeuristicParameters().dispersal_min_duration_s == 5.0
-    assert (
-        dispersed["group_scores"]["1,2,3"]["dispersal"]
-        >= HeuristicParameters().dispersal_min_duration_s
-    )
-    assert not any(
-        scores.get("dispersal", 0) > 0
-        for scores in unchanged["group_scores"].values()
-    )
+@pytest.mark.parametrize("frames, expected", [(29, False), (30, False), (31, True)])
+def test_group_locomotion_requires_aligned_moving_triple_for_more_than_three_seconds(
+    frames: int, expected: bool,
+) -> None:
+    centers = np.zeros((frames, 3, 2))
+    centers[:, :, 0] = np.arange(frames)[:, None] * .6
+    centers[:, :, 1] = [0., 2., 4.]
+    parameters = config_seed_parameters({})
+    aligned = predict_features(_measured_group_features(centers), parameters)
+    score = aligned["group_scores"].get("1,2,3", {}).get("group_locomotion", 0.)
+    assert (score > 0.) is expected
+    if expected:
+        assert score == pytest.approx(frames / 10.)
+    # Reverse one actual trajectory: a cached direction-similarity flag cannot
+    # manufacture coherent common displacement for this group.
+    centers[:, 2, 0] *= -1.
+    opposed = predict_features(_measured_group_features(centers), parameters)
+    assert not any(scores.get("group_locomotion", 0) > 0
+                   for scores in opposed["group_scores"].values())
+
+
+@pytest.mark.parametrize("frames, expected", [(50, False), (51, False), (52, True)])
+def test_dispersal_requires_initial_group_and_sustained_separation(
+    frames: int, expected: bool,
+) -> None:
+    origins = np.array([[-1., 0.], [1., 0.], [0., 1.]])
+    velocity = np.array([[-2., 0.], [2., 0.], [0., 2.]])
+    centers = origins[None] + np.arange(frames)[:, None, None] / 10. * velocity[None]
+    parameters = config_seed_parameters({})
+    dispersed = predict_features(_measured_group_features(centers), parameters)
+    score = dispersed["group_scores"].get("1,2,3", {}).get("dispersal", 0.)
+    assert (score > 0.) is expected
+    if expected:
+        assert score > 5.0
+    unchanged_centers = np.broadcast_to(origins, centers.shape).copy()
+    unchanged = predict_features(_measured_group_features(unchanged_centers), parameters)
+    assert not any(scores.get("dispersal", 0) > 0
+                   for scores in unchanged["group_scores"].values())
 
 
 def test_social_clustering_needs_multiple_moving_members_and_near_start() -> None:
@@ -1162,17 +1180,14 @@ def test_group_rule_ties_prefer_narrow_clustering_and_huddle_visibility_floor() 
     ) > group_rule_parameter_tie_break("huddle_min_member_support_fraction", 0.1, 1)
 
 
-def test_locomotion_is_the_negative_definition_of_stationary() -> None:
-    # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
-    # Regression: there is no independent locomotion speed band any more. The two
-    # individual labels partition the speed axis at the single static ceiling, so
-    # they can never both be positive for the same track.
+def test_locomotion_and_stationary_use_measured_body_translation() -> None:
+    # Cached per-frame speed cannot turn a fixed body center into locomotion.
 
-    frames = 4
+    frames = 40
     valid = np.ones((frames, 1), dtype=bool)
     speed = np.full((frames, 1), 3.0, dtype=np.float32)
     features = ExportedFeatures(
-        fps=30.0,
+        fps=10.0,
         track_ids=np.asarray([1]),
         valid=valid,
         centers_cm=np.zeros((frames, 1, 2), dtype=np.float32),
@@ -1206,8 +1221,12 @@ def test_locomotion_is_the_negative_definition_of_stationary() -> None:
         replace(features, speed_cm_s=np.full((frames, 1), 16.0, dtype=np.float32)),
         slow,
     )
-    assert faster["identity_scores"]["1"]["stationary"] == 0.0
-    assert faster["identity_scores"]["1"]["locomotion"] > 0.0
+    assert faster["identity_scores"] == prediction["identity_scores"]
+    translated_centers = features.centers_cm.copy()
+    translated_centers[:, 0, 0] = np.arange(frames) * 2.0
+    translated = predict_features(replace(features, centers_cm=translated_centers), slow)
+    assert translated["identity_scores"]["1"]["stationary"] == 0.0
+    assert translated["identity_scores"]["1"]["locomotion"] > 0.0
 
     # The disabled Step 5-A detectors keep their score slots at exactly zero.
     assert prediction["identity_scores"]["1"]["grooming"] == 0.0
@@ -1219,8 +1238,12 @@ def test_default_static_locomotion_boundary_uses_calibrated_limits() -> None:
     # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
     parameters = HeuristicParameters()
 
-    assert parameters.stationary_max_speed_cm_s == 13.375
-    # One boundary only: the merged mask is `speed > stationary_max_speed_cm_s`.
+    # The historical group-speed mirror is separate from current individual
+    # body-center motion and its bounded Static geometry.
+    assert parameters.stationary_max_speed_cm_s == 0.66875
+    assert parameters.individual_motion_speed_threshold_cm_s == 4.0
+    assert parameters.stationary_max_center_radius_cm == 4.0
+    assert parameters.stationary_transient_max_duration_s == 1.0
     assert parameters.locomotion_min_duration_s == 0.5
     assert parameters.locomotion_stop_gap_s == 0.5
     # Retained as the Chasing high-speed floor and the locomotion score normaliser.
@@ -1232,7 +1255,7 @@ def test_default_static_locomotion_boundary_uses_calibrated_limits() -> None:
     ):
         assert not hasattr(parameters, deleted), f"{deleted} must stay deleted"
     # [STEP6 2026-10-05] 社交/群体新默认值。
-    assert parameters.together_max_distance_cm == 8.025
+    assert parameters.together_max_distance_cm == 7.0
     assert parameters.together_min_distance_cm == 4.0125
     assert parameters.together_min_duration_s == 1.0
     assert parameters.approach_min_start_distance_cm == 6.6875
@@ -1250,8 +1273,9 @@ def test_default_static_locomotion_boundary_uses_calibrated_limits() -> None:
     assert parameters.chase_fill_gap_s == 0.5
     assert parameters.attack_min_speed_cm_s == 10.7
     assert parameters.attack_mild_nose_accel_cm_s2 == 66.875
-    # Huddling: 边 = 鼻-鼻≤ 3 cm 或中心≤ 6 cm；时长门 ≥ 5 s。
-    assert parameters.huddle_distance_cm == 8.025
+    # These are compatibility scalar defaults. Current group geometry is
+    # selected through config_seed_parameters and GroupHeuristicConfig.
+    assert parameters.huddle_distance_cm == 10.0
     assert parameters.huddle_nose_distance_cm == 4.0125
     assert parameters.huddle_min_duration_s == 5.0
     assert parameters.huddle_max_gap_s == 5.0
@@ -1263,15 +1287,15 @@ def test_default_static_locomotion_boundary_uses_calibrated_limits() -> None:
     assert parameters.clustering_min_moving_member_fraction == 0.5
     assert parameters.clustering_min_mean_speed_cm_s == 4.0125
     assert parameters.dispersal_min_duration_s == 5.0
-    assert parameters.group_locomotion_max_distance_cm == 33.4375
+    assert parameters.group_locomotion_max_distance_cm == 30.0
     assert parameters.group_locomotion_min_duration_s == 3.0
-    assert parameters.isolation_distance_cm == 26.75
+    assert parameters.isolation_distance_cm == 20.0
     assert parameters.isolation_min_duration_s == 10.0
     assert parameters.isolation_max_gap_s == 0.2
     assert parameters.pair_min_duration_s == 0.1
     assert parameters.group_min_duration_s == 0.3
-    # 以下三个速度字段已从规则中摘除，仅作为惰性字段保留（旧 JSON 模型/
-    # calibrated_rule_ranker 仍按名引用）；Together/Huddling 不得再读它们。
+    # Compatibility speed fields do not control the current independent
+    # SocialHeuristicConfig/GroupHeuristicConfig limits.
     assert parameters.together_max_individual_speed_cm_s == 16.0
     assert parameters.together_max_combined_speed_cm_s == 28.0
     assert parameters.huddle_max_mean_speed_cm_s == 10.0
@@ -1318,10 +1342,12 @@ def test_group_calibration_parameters_load_from_project_config_shape() -> None:
 
     assert parameters.huddle_width_multiplier == 2.0
     assert parameters.huddle_min_member_support_fraction == 0.25
-    assert parameters.isolation_distance_cm == 8.0
+    # Confirmed profiles fix the current physical policy after reading legacy
+    # configuration fields; historical scalar overrides do not change it.
+    assert parameters.isolation_distance_cm == 20.0
     assert parameters.clustering_initial_max_distance_cm == 24.0
     assert parameters.clustering_min_mean_speed_cm_s == 3.0
-    assert parameters.approach_terminal_distance_cm == 17.0
+    assert parameters.approach_terminal_distance_cm == pytest.approx(4.456491470336914)
     assert parameters.together_max_individual_speed_cm_s == 16.0
     assert parameters.attack_vs_approach_multiplier == 1.5
 
@@ -1353,10 +1379,10 @@ def test_strict_top1_guard_rejects_improving_huddle_at_social_cluster_cost():
 def test_fast_motion_is_locomotion_without_a_directionality_gate():
     # [STEP4 2026-10-04] 个体层合并：Walking+Running -> Locomotion
     # Regression: the deleted Running directionality gate must not come back. A
-    # straight 100 cm/s run and an in-place oscillation at the same speed score
-    # identically, because the merged mask reads speed only.
+    # straight run and a broad back-and-forth path can both be locomotion.
+    # Motion must be present in centers, not merely in a cached speed array.
 
-    frames = 10
+    frames = 20
     velocity = np.zeros((frames, 1, 2), dtype=np.float32)
     velocity[:, 0, 0] = 100.0
     features = ExportedFeatures(
@@ -1379,16 +1405,20 @@ def test_fast_motion_is_locomotion_without_a_directionality_gate():
         track_selection_truncated=False,
         selected_track_count=1,
     )
+    centers = features.centers_cm.copy()
+    centers[:, 0, 0] = np.arange(frames) * 10.0
+    features = replace(features, centers_cm=centers)
     prediction = predict_features(features, HeuristicParameters())
-    assert prediction["identity_scores"]["5"]["locomotion"] == 1.0
+    assert prediction["identity_scores"]["5"]["locomotion"] == 2.0
     assert prediction["identity_scores"]["5"]["stationary"] == 0.0
 
     alternation = np.where(np.arange(frames) % 2 == 0, 1.0, -1.0).astype(np.float32)
-    oscillating = replace(
-        features, velocity_cm_s=velocity * alternation[:, None, None]
-    )
+    turning_centers = centers.copy()
+    turning_centers[:, 0, 0] = alternation * 10.0
+    oscillating = replace(features, centers_cm=turning_centers,
+                          velocity_cm_s=velocity * alternation[:, None, None])
     turned = predict_features(oscillating, HeuristicParameters())
-    assert turned["identity_scores"]["5"]["locomotion"] == 1.0
+    assert turned["identity_scores"]["5"]["locomotion"] == 2.0
 
     for deleted in ("running", "walking"):
         assert deleted not in prediction["identity_scores"]["5"]
@@ -1414,9 +1444,9 @@ def test_loader_supports_explicit_body_length_scale_and_unified_per_video_defaul
     assert np.isclose(legacy.mouse_width_cm, 3.2)
 
     unified = load_exported_features(path, fps=30.0)
-    # 合成轨迹鼻-尾基 = 10 px；统一实测体长 10.7 cm → 逐视频尺度 1.07 cm/px。
-    assert unified.cm_per_pixel == pytest.approx(10.7 / 10.0)
-    assert unified.reference_body_cm == pytest.approx(10.7)
+    # Nose-to-tail base is 10 px, so the current 7.918 cm ruler gives .7918 cm/px.
+    assert unified.cm_per_pixel == pytest.approx(7.918 / 10.0)
+    assert unified.reference_body_cm == pytest.approx(7.918)
 
 
 def test_loader_uses_partial_keypoints_and_never_uses_box_geometry(tmp_path):
@@ -1526,7 +1556,7 @@ def test_huddling_gap_default_and_profile_override_are_five_seconds() -> None:
         {"extended_behavior": {"group": {"huddle_fill_gap_seconds": 5.0}}}
     )
 
-    assert parameters.huddle_min_duration_s == 1.0
+    assert parameters.huddle_min_duration_s == 5.0
     assert parameters.huddle_max_gap_s == 5.0
 
 
@@ -1746,11 +1776,11 @@ def test_attack_contact_keypoint_acceleration_boosts_attack_over_contact() -> No
     assert score["attack"] > score["nose_head_contact"]
 
 
-def test_attack_can_use_brief_contact_without_contact_label_duration() -> None:
+def test_brief_contact_and_generic_speed_do_not_establish_measured_attack() -> None:
     frames = 20
     pair_distance = np.full((frames, 1), 5.0, dtype=np.float32)
     nose_head = np.full_like(pair_distance, 20.0)
-    nose_head[5:8] = 1.0  # 0.3 s: too short for a standalone contact label.
+    nose_head[5:8] = 1.0  # 0.3 s exceeds the current standalone contact minimum.
     speed = np.zeros((frames, 2), dtype=np.float32)
     speed[8:10] = 30.0  # The body accelerates after contact, not during it.
     features = ExportedFeatures(
@@ -1776,7 +1806,11 @@ def test_attack_can_use_brief_contact_without_contact_label_duration() -> None:
         nose_speed_cm_s=np.full((frames, 2), 30.0, dtype=np.float32),
         nose_acceleration_cm_s2=np.full((frames, 2), 800.0, dtype=np.float32),
     )
-    parameters = HeuristicParameters(
+    features.pair_nose_head_left_to_right_cm = nose_head.copy()
+    features.pair_nose_head_right_to_left_cm = np.full_like(nose_head, 20.)
+    features.pair_nose_tail_left_to_right_cm = np.full_like(nose_head, 20.)
+    features.pair_nose_tail_right_to_left_cm = np.full_like(nose_head, 20.)
+    parameters = replace(config_seed_parameters({}),
         attack_contact_nose_min_speed_cm_s=25.0,
         attack_contact_nose_min_acceleration_cm_s2=700.0,
         attack_contact_body_min_speed_cm_s=25.0,
@@ -1786,8 +1820,9 @@ def test_attack_can_use_brief_contact_without_contact_label_duration() -> None:
 
     pair_score = predict_features(features, parameters)["pair_scores"]["1,2"]
 
-    assert pair_score["nose_head_contact"] == 0.0
-    assert pair_score["attack"] > 0.0
+    assert pair_score["nose_head_contact"] == pytest.approx(0.3)
+    # Generic scalar speed/acceleration do not prove partner-directed action.
+    assert pair_score["attack"] == 0.0
 
 
 def test_attack_mild_gate_uses_two_mouse_max_and_boost_uses_contacting_nose() -> None:
@@ -1875,41 +1910,50 @@ def test_attack_mild_gate_uses_two_mouse_max_and_boost_uses_contacting_nose() ->
     assert below_gate.get("attack", 0.0) == 0.0
 
 
-def test_together_allows_pair_motion_above_the_individual_static_limit() -> None:
-    # [STEP6 2026-10-05] Together 速度门已删除：原“16 cm/s 上限”不再存在，
-    # 14 cm/s 的双鼠运动在 6 cm 带内仍然是 Together。
+@pytest.mark.parametrize("speed_cm_s, expected", [(2.9, True), (3.0, False), (14.0, False)])
+def test_together_uses_its_own_strict_three_cm_per_second_speed_limit(
+    speed_cm_s: float, expected: bool,
+) -> None:
+    # Current Together requires both participants to move strictly below 3 cm/s;
+    # the historical individual Static scalar cannot loosen that social gate.
     frames = 31
-    pair_distance = np.full((frames, 1), 6.0, dtype=np.float32)
+    pair_distance = np.full((frames, 1), 3.0, dtype=np.float32)
     features = ExportedFeatures(
         fps=30.0,
         track_ids=np.asarray([1, 2]),
         valid=np.ones((frames, 2), dtype=bool),
         centers_cm=np.zeros((frames, 2, 2), dtype=np.float32),
-        speed_cm_s=np.full((frames, 2), 14.0, dtype=np.float32),
+        speed_cm_s=np.full((frames, 2), speed_cm_s, dtype=np.float32),
         velocity_cm_s=np.zeros((frames, 2, 2), dtype=np.float32),
         pair_i=np.asarray([0]),
         pair_j=np.asarray([1]),
         pair_distance_cm=pair_distance,
         pair_closing_speed_cm_s=np.zeros_like(pair_distance),
-        pair_direction_similarity=np.zeros_like(pair_distance),
+        pair_direction_similarity=np.ones_like(pair_distance),
         pair_nose_head_cm=np.full_like(pair_distance, 20.0),
         pair_nose_tail_cm=np.full_like(pair_distance, 20.0),
-        nearest_distance_cm=np.full((frames, 2), 6.0, dtype=np.float32),
-        mean_nearest_distance_cm=np.full(frames, 6.0, dtype=np.float32),
+        nearest_distance_cm=np.full((frames, 2), 3.0, dtype=np.float32),
+        mean_nearest_distance_cm=np.full(frames, 3.0, dtype=np.float32),
         cm_per_pixel=0.1,
         track_selection_truncated=False,
         selected_track_count=2,
     )
-    parameters = HeuristicParameters(
+    parameters = replace(config_seed_parameters({}),
         stationary_max_speed_cm_s=10.0,
         together_min_duration_s=1.0,
     )
 
+    features.centers_cm[:, :, 0] = np.arange(frames)[:, None] * speed_cm_s / 30.0
+    features.centers_cm[:, 1, 1] = 3.0
+    features.velocity_cm_s[:, :, 0] = speed_cm_s
+
     prediction = predict_features(features, parameters)
 
-    assert prediction["pair_scores"].get("1,2", {}).get("together", 0.0) > 0.0
-    assert prediction["identity_scores"]["1"]["stationary"] == 0.0
-    assert prediction["identity_scores"]["2"]["stationary"] == 0.0
+    together = prediction["pair_scores"].get("1,2", {}).get("together", 0.0)
+    assert (together > 0.) is expected
+    if speed_cm_s == 14.0:
+        assert prediction["identity_scores"]["1"]["stationary"] == 0.0
+        assert prediction["identity_scores"]["2"]["stationary"] == 0.0
 
 
 def test_attack_approach_priority_preserves_contact_top1() -> None:

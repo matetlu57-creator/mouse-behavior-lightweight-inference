@@ -34,7 +34,7 @@ extended_behavior:
     # 10 cm. The default profile is intentionally stricter at 8 cm; Beiyi uses
     # the documented boundary while retaining the full one-second duration
     # and low-motion gates.
-    together_max_distance_cm: 8.025
+    together_max_distance_cm: 7.0
     together_min_distance_cm: 4.0125  # # [STEP6 2026-10-05] 与文档 v4 统一
     approach_min_duration_seconds: 1.0
     avoidance_min_duration_seconds: 1.0
@@ -248,12 +248,12 @@ extended_behavior:
       max_identity_bridge_participants: 3
       max_identity_bridge_segments: 2
   group:
-    huddle_distance_cm: 8.025
+    huddle_distance_cm: 10.0
     huddle_nose_distance_cm: 4.0125
     huddle_min_duration_seconds: 5.0  # # [STEP6 2026-10-05] 与文档 v4 统一
     huddle_fill_gap_seconds: 5.0
     huddle_event_min_overlap_fraction: 0.75
-    isolation_distance_cm: 26.75
+    isolation_distance_cm: 5.520760536193848
     isolation_min_duration_seconds: 10.0
     isolation_fill_gap_seconds: 0.2
     # Isolation means one or at most two mice separated from a meaningful
@@ -283,8 +283,8 @@ extended_behavior:
     huddle_body_length_cap_enabled: false
     huddle_max_pair_distance_body_lengths: 1.75
 contact_detection:
-  nose_head_min_cumulative_duration_seconds: 0.5
-  nose_tail_min_cumulative_duration_seconds: 0.5
+  nose_head_min_cumulative_duration_seconds: 0.2
+  nose_tail_min_cumulative_duration_seconds: 0.2
   # 这是关键点几何抖动容错，不是把未知的真实厘米尺度写死。北医短片中
   # 鼻头距离在阈值附近时允许有限放宽，并只桥接同一几何状态的短缺口。
   nose_head_distance_multiplier: 1.5
