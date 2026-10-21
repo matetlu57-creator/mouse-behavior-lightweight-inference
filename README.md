@@ -93,6 +93,26 @@ start_frame,end_frame,visual_track_id,animal_id,identity_confidence
 
 更完整的数据契约、输出语义和模块边界见 `docs/index.md` 与 `docs/adr/0001-external-tracking-and-rfid-identity.md`。
 
+## 独立姿态候选与完整视频导出
+
+理毛 Grooming、站立 Rearing（包括扶墙站立）使用独立规则与事件提取，默认保留停用策略；显式审核模式才输出待审核姿态候选。当前关键点证据的识别精确率较低，不能把候选当作人工确认结果，也不会自动修改 A1/A2。
+
+已有视频和轨迹样本可直接生成完整渲染及分类四件套：
+
+```powershell
+python scripts/review_posture_sample.py --sample <样本目录> --track-id <视觉ID> --output <全新输出目录>
+```
+
+已有绑定来源的 pose cache 可通过完整视频管线运行：
+
+```powershell
+python scripts/run_canonical_behavior_video.py --video <源视频> --pose-cache <缓存目录> --source-receipt <来源绑定JSON> --posture-mode v3_review --output <全新输出目录>
+```
+
+每个分类包包含 `clip.mp4`、`annotation.json`、`metadata.json`、`tracks.json`。参与鼠以绿色粗框和原始视觉 ID 标注；缺失目标不伪造位置。独立事件在角色拆分、分段边界和编码前后按实际有效配置检查时长，保留严格 `>` 与 `>=` 的区别。
+
+详细证据和边界见 [姿态接入与时长修复](docs/posture-v3-duration-review-2026-10-21.md) 和 [架构决策](docs/adr/2026-10-21-independent-posture-and-standalone-duration.md)。需要视频编码时安装 `python -m pip install -e .[review]`。
+
 ## 测试和质量门
 
 ```powershell

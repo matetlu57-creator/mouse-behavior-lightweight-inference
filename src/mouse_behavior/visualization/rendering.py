@@ -402,11 +402,13 @@ def extract_four_class_clips(
     min_start_interval_seconds: float = 5.0,
     max_clips_per_class: int = 200,
 ) -> Path:
-    """Extract raw source clips into the four mutually exclusive classes.
+    """Extract fixed-window showcases into the four mutually exclusive classes.
 
     Class IDs follow the established extractor contract:
     ``chase + 2 * attack`` -> 0/1/2/3.  This function never draws boxes,
     skeletons, IDs, labels, or overlays; it writes only source-video crops.
+    A class records event presence within a sample, not an independently
+    qualified behavior process. Use canonical behavior packages for that contract.
     """
     import cv2
 
@@ -494,6 +496,8 @@ def extract_four_class_clips(
                     "source_video": str(video_path),
                     "source_events": str(events_path),
                     "event_level": expected_level,
+                    "clip_contract": "fixed_window_showcase",
+                    "standalone_behavior_qualification": False,
                 }
             )
 
@@ -563,6 +567,8 @@ def extract_four_class_clips(
             for label_id in FOUR_CLASS_NAMES
         },
         "rendered_video": False,
+        "clip_contract": "fixed_window_showcase",
+        "standalone_behavior_qualification": False,
     }
     with (output_dir / "four_class_clip_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
@@ -586,7 +592,7 @@ def extract_behavior_clips(
     min_start_interval_seconds: float = 5.0,
     max_clips_per_behavior: int = 200,
 ) -> Path:
-    """Extract fixed-length raw clips separately for each behavior label.
+    """Extract fixed-window raw showcases separately for each behavior label.
 
     This is the default clip contract for the lightweight ethogram.  It reads
     the already generated behavior-event CSV, builds one frame state per
@@ -594,6 +600,8 @@ def extract_behavior_clips(
     It does not create four mutually exclusive classes and does not draw
     overlays.  ``event_level='all'`` keeps both the extended ethogram rows and
     the weak/strong legacy chase/attack rows.
+    Presence of a label in the sampled window does not qualify its standalone
+    process duration. Canonical behavior packages enforce that semantic contract.
     """
     import cv2
 
@@ -716,6 +724,8 @@ def extract_behavior_clips(
                     "path": str(path),
                     "source_video": str(video_path),
                     "source_events": str(events_path),
+                    "clip_contract": "fixed_window_showcase",
+                    "standalone_behavior_qualification": False,
                 }
             )
 
@@ -784,6 +794,8 @@ def extract_behavior_clips(
         "clip_counts": clip_counts,
         "total_clips": int(len(intervals)),
         "rendered_video": False,
+        "clip_contract": "fixed_window_showcase",
+        "standalone_behavior_qualification": False,
     }
     with (output_dir / "behavior_clip_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
