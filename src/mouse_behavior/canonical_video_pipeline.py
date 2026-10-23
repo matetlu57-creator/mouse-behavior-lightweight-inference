@@ -6,6 +6,7 @@ from the cache, and every published interval is an unconfirmed candidate.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -15,7 +16,7 @@ import sqlite3
 import tempfile
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict, replace
+from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -40,6 +41,69 @@ ENABLED_BEHAVIORS = tuple(value for value in DISPLAY_LABELS if value not in {"gr
 PAIR_LABELS = {"approach": "approach", "chasing": "chase", "attack": "attack",
                "together": "together", "head_contact": "nose_head_contact",
                "tail_contact": "nose_tail_contact"}
+
+
+def rule_execution_binding(parameters, posture_mode: str = "disabled") -> dict:
+    """Portable source closure plus the live values used by qualification.
+
+    Source hashes alone cannot detect an in-memory default replacement. Record
+    both module defaults and bound function defaults, including the full v3
+    temporal configuration, so old events cannot acquire new qualification.
+    """
+    from mouse_behavior.evaluation.exported_dataset import EXPORTED_DATASET_SOURCE_FILES
+    from mouse_behavior.behavior.duration_policy import resolve_duration_policy
+    from mouse_behavior.behavior import individual_rules
+    from mouse_behavior.evaluation import confirmed_rules, group_event_rules, group_heuristic_config, social_heuristic_config
+    modules = [individual_rules, confirmed_rules, group_event_rules, group_heuristic_config, social_heuristic_config]
+    functions = [pair_rule_masks, individual_rule_masks, group_rule_candidates, isolation_candidates]
+    sources = {name.removeprefix("src/").removesuffix(".py").replace("/", ".")
+               for name in EXPORTED_DATASET_SOURCE_FILES}
+    sources.update((__name__, "mouse_behavior.behavior.duration_policy",
+                    "mouse_behavior.visualization.behavior_packages", "mouse_behavior.evaluation.segment_export",
+                    "mouse_behavior.tracking.cache"))
+    if posture_mode == "v3_review":
+        from mouse_behavior.behavior import posture_adapter, posture_measurements, posture_rules
+        modules.extend((posture_adapter, posture_measurements, posture_rules))
+        functions.append(posture_rules.infer_posture)
+        sources.update(module.__name__ for module in (posture_adapter, posture_measurements, posture_rules))
+    defaults = {module.__name__: {name: asdict(value) for name, value in vars(module).items()
+                                 if name.startswith("DEFAULT_") and is_dataclass(value) and not isinstance(value, type)}
+                for module in modules}
+    bound_defaults = {f"{function.__module__}.{function.__name__}": {
+        name: asdict(parameter.default) for name, parameter in inspect.signature(function).parameters.items()
+        if is_dataclass(parameter.default) and not isinstance(parameter.default, type)
+    } for function in functions}
+    policies = {behavior: resolve_duration_policy(behavior, parameters=parameters).as_dict()
+                for behavior in sorted(DISPLAY_LABELS)}
+    runtime = dict(schema_version=1, posture_mode=posture_mode, effective_parameters=asdict(parameters),
+                   module_defaults=defaults, bound_function_defaults=bound_defaults, duration_policies=policies)
+    # Resolve the static adapter closure relative to the installed package, not
+    # the checkout directory. Absolute installation paths are never identity keys.
+    package = Path(__file__).resolve().parent
+    hashes = {}
+    for module in sorted(sources):
+        relative = module.removeprefix("mouse_behavior.").replace(".", "/")
+        path = package / f"{relative}.py"
+        hashes[module] = _sha256(path)
+    return dict(rule_snapshot_schema=1, rule_runtime_snapshot=runtime,
+                rule_source_sha256=hashes, rule_policy=policy_receipt(),
+                effective_parameters=asdict(parameters), posture_mode=posture_mode)
+
+
+def verify_rule_execution_binding(binding: dict, *, required: bool = True) -> None:
+    """Reject unprovable legacy snapshots and changed source/default policies."""
+    claims = {"rule_policy", "rule_source_sha256", "rule_runtime_snapshot", "rule_snapshot_schema"}
+    if not required and not claims.intersection(binding):
+        return
+    if (binding.get("rule_snapshot_schema") != 1 or not isinstance(binding.get("rule_runtime_snapshot"), dict)
+            or not isinstance(binding.get("effective_parameters"), dict)):
+        raise ValueError("legacy rule snapshot is unsafe for rerender/export; rerun inference to migrate")
+    from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
+    expected = rule_execution_binding(HeuristicParameters(**binding["effective_parameters"]),
+                                      binding.get("posture_mode", "disabled"))
+    for key, value in expected.items():
+        if binding.get(key) != value:
+            raise ValueError(f"rule policy/source snapshot changed ({key}); rerun inference")
 
 
 def video_info(video: Path) -> dict[str, Any]:
@@ -436,15 +500,24 @@ def _infer_core_task(spec: tuple) -> tuple[list[dict], dict]:
                 if field.endswith("_frame_intervals"):
                     cropped[field] = [(max(start, a + window_start), min(stop, b + window_start))
                                       for a, b in value if max(start, a + window_start) < min(stop, b + window_start)]
-            if not qualify_event_duration(cropped, fps, parameters=params)["ok"]:
+            loses_endpoint_semantics = (event["canonical_behavior"] in {"approach", "dispersal"}
+                                       and (start != event["start_frame"] + window_start
+                                            or stop != event["end_frame"] + window_start))
+            loses_duration = not qualify_event_duration(cropped, fps, parameters=params)["ok"]
+            if loses_endpoint_semantics or loses_duration:
                 # A complete qualified parent is real inferred evidence. Retain
-                # it instead of padding its shortened core fragment.
+                # it instead of padding a shortened fragment. Approach's final
+                # proximity and Dispersal's confirmed separation belong to the
+                # complete process; duration alone cannot certify a core cut.
                 cropped = {**event, "start_frame": event["start_frame"] + window_start,
                            "end_frame": event["end_frame"] + window_start}
                 for field, value in event.items():
                     if field.endswith("_frame_intervals"):
                         cropped[field] = [(a + window_start, b + window_start) for a, b in value]
-                cropped["retained_complete_parent_for_duration"] = True
+                if loses_duration:
+                    cropped["retained_complete_parent_for_duration"] = True
+                if loses_endpoint_semantics:
+                    cropped["retained_complete_parent_for_semantics"] = True
             if qualify_event_duration(cropped, fps, parameters=params)["ok"]:
                 events.append(cropped)
     return events, audit
@@ -499,7 +572,7 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
     return merged, dict(windows=audits, core_seconds=core_seconds, context_seconds=context_seconds,
                                      global_posture_resolution=posture_resolution,
                                      workers=workers, track_truncation=False, boundary_approximation=True,
-                                     boundary_note="Bounded context can change events requiring history beyond the context. A complete qualified parent may extend beyond the core when its shortened child fails duration qualification; no frames are fabricated. Measured support remains separate.")
+                                     boundary_note="Bounded context can change events requiring history beyond the context. A complete qualified parent may extend beyond the core when its shortened child loses duration qualification or Approach/Dispersal endpoint semantics; no frames are fabricated. Measured support remains separate.")
 
 
 def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
@@ -541,6 +614,7 @@ def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
             for name in ("events.json", "tracks.sqlite", "scale_receipt.json", "input_binding.json"):
                 if name not in ledger or _sha256(events_from / name) != ledger[name]:
                     raise ValueError(f"render-only input changed: {name}")
+            verify_rule_execution_binding(binding)
             events = json.loads((events_from / "events.json").read_text(encoding="utf-8"))
             shutil.copy2(events_from / "tracks.sqlite", output / "tracks.sqlite")
             store = TrackStore(output / "tracks.sqlite")
@@ -555,17 +629,7 @@ def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
                                         expected_source_sha256=expected_source_sha256)
             store = TrackStore(output / "tracks.sqlite")
             params = config_seed_parameters(load_config(config))
-            binding["rule_policy"] = policy_receipt()
-            binding["posture_mode"] = posture_mode
-            binding["effective_parameters"] = asdict(params)
-            binding["rule_source_sha256"] = {
-                str(Path(function.__code__.co_filename).resolve()): _sha256(Path(function.__code__.co_filename))
-                for function in (pair_rule_masks, individual_rule_masks, group_rule_candidates, infer_video_events, qualify_event_duration)
-            }
-            if posture_mode == "v3_review":
-                from mouse_behavior.behavior import posture_adapter, posture_measurements, posture_rules
-                binding["rule_source_sha256"].update({str(Path(module.__file__).resolve()): _sha256(Path(module.__file__))
-                                                       for module in (posture_adapter, posture_measurements, posture_rules)})
+            binding.update(rule_execution_binding(params, posture_mode))
             events, audit = infer_video_events(store, binding, scale, params, core_seconds=core_seconds,
                                                context_seconds=context_seconds, workers=workers, posture_mode=posture_mode)
             receipt.update(inference_audit=audit, seeded_parameters=asdict(params), policy=policy_receipt(),

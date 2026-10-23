@@ -240,7 +240,7 @@ def test_failed_decode_cleans_only_new_directory(sample, tmp_path, monkeypatch):
     assert _hashes(Path(sample.sample_dir)) == before
 
 
-def test_single_frame_crop_filters_roles_but_retains_all_detections(sample, tmp_path):
+def test_single_frame_crop_drops_roles_for_changed_ids_but_retains_all_detections(sample, tmp_path):
     output = tmp_path / "one"
     export_segment(
         sample,
@@ -254,7 +254,51 @@ def test_single_frame_crop_filters_roles_but_retains_all_detections(sample, tmp_
     assert len(_decode(output / "clip.mp4")) == 1
     annotation = json.loads((output / "annotation.json").read_text())
     assert annotation["frame_range"] == {"start": 0, "end": 0}
-    assert annotation["participants"] == [{"role_name": "Approaching", "track_ids": [1]}]
+    assert "participants" not in annotation
+    tracks = json.loads((output / "tracks.json").read_text())
+    assert [detection["track_id"] for detection in tracks[0]["detections"]] == [1, 2, 9]
+
+
+@pytest.mark.parametrize("mouse_ids,inherit_roles", [((1, 2), False), ((9, 1, 2), True)])
+def test_crop_only_inherits_role_evidence_for_exact_participant_set(
+    sample, tmp_path, mouse_ids, inherit_roles,
+):
+    annotation_path = Path(sample.annotation_path)
+    original = json.loads(annotation_path.read_text())
+    original.update(
+        mouse_ids=[1, 2, 9],
+        participants=[
+            {"role_name": "Approaching", "track_ids": [1]},
+            {"role_name": "Approached", "track_ids": [2, 9]},
+        ],
+        actor_id=1,
+        target_id=2,
+        role_status="event_direction_with_measured_support",
+        role_support_frame_intervals=[[0, 8]],
+        role_support_frame_count=8,
+    )
+    _json(annotation_path, original)
+    source_hashes = _hashes(Path(sample.sample_dir))
+    output = tmp_path / "roles"
+    export_segment(sample, output, start_frame=2, end_frame=6,
+                   behavior="Approach", mouse_ids=mouse_ids, provenance={})
+
+    cropped = json.loads((output / "annotation.json").read_text())
+    role_fields = {"participants", "actor_id", "target_id", "role_status",
+                   "role_support_frame_intervals", "role_support_frame_count"}
+    if inherit_roles:
+        assert cropped["participants"] == original["participants"]
+        assert (cropped["actor_id"], cropped["target_id"]) == (1, 2)
+        assert cropped["role_status"] == original["role_status"]
+        assert cropped["role_support_frame_intervals"] == [[0, 4]]
+        assert cropped["role_support_frame_count"] == 4
+    else:
+        assert not role_fields.intersection(cropped)
+    metadata = json.loads((output / "metadata.json").read_text())
+    assert metadata["provenance"]["original_annotation"] == original
+    tracks = json.loads((output / "tracks.json").read_text())
+    assert all([d["track_id"] for d in frame["detections"]] == [1, 2, 9] for frame in tracks)
+    assert _hashes(Path(sample.sample_dir)) == source_hashes
 
 
 def test_full_range_copies_video_and_still_verifies(sample, tmp_path, monkeypatch):
@@ -289,3 +333,32 @@ def test_full_range_reencodes_rounded_container_fps_without_changing_frames(samp
     assert manifest["audio_preserved"] is False
     assert manifest["source_sha256"]["clip.mp4"] != manifest["output_sha256"]["clip.mp4"]
     assert len(_decode(tmp_path / "fps_repaired/clip.mp4")) == 8
+
+
+def test_crop_recounts_merged_support_and_drops_unsupported_roles(sample, tmp_path):
+    annotation_path = Path(sample.annotation_path)
+    annotation = json.loads(annotation_path.read_text())
+    annotation.update(actor_id=1, target_id=2, role_status="event_direction_with_measured_support",
+                      role_support_frame_intervals=[[0, 2]], role_support_frame_count=2,
+                      observed_all_participants_frame_intervals=[[0, 4], [2, 8]],
+                      observed_all_participants_frame_count=10,
+                      inferred_or_partially_unobserved_frame_count=99,
+                      parent_candidate_frame_intervals=[[-2, 12]])
+    annotation_path.write_text(json.dumps(annotation))
+    export_segment(sample, tmp_path / "unsupported", start_frame=3, end_frame=6,
+                   behavior="Approach", mouse_ids=(1, 2), provenance={})
+    cropped = json.loads((tmp_path / "unsupported/annotation.json").read_text())
+    assert cropped["role_support_frame_intervals"] == []
+    assert cropped["role_support_frame_count"] == 0
+    assert cropped["role_status"] == "unknown_in_cropped_interval"
+    assert not {"actor_id", "target_id", "participants", "parent_candidate_frame_intervals"}.intersection(cropped)
+    assert cropped["observed_all_participants_frame_intervals"] == [[0, 3]]
+    assert cropped["observed_all_participants_frame_count"] == 3
+    assert cropped["inferred_or_partially_unobserved_frame_count"] == 0
+
+
+def test_crop_cannot_invent_visual_track_ids(sample, tmp_path):
+    with pytest.raises(ValueError, match="existing source visual track IDs"):
+        export_segment(sample, tmp_path / "invented", start_frame=0, end_frame=4,
+                       behavior="Static", mouse_ids=(12345,), provenance={})
+    assert not (tmp_path / "invented").exists()

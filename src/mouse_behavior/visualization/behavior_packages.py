@@ -44,6 +44,14 @@ def _duration_parameters(binding: dict):
     return HeuristicParameters(**effective)
 
 
+def _verify_rule_binding(binding: dict, events: list[dict]) -> None:
+    from mouse_behavior.canonical_video_pipeline import verify_rule_execution_binding
+    verify_rule_execution_binding(binding, required=False)
+    if (binding.get("rule_snapshot_schema") == 1 and binding.get("posture_mode") != "v3_review"
+            and any(event.get("posture_engine") == "v3_decoupled" for event in events)):
+        raise ValueError("posture event lacks its authoritative v3 rule snapshot; rerun inference")
+
+
 def _new_directory(path: Path) -> None:
     if path.exists() or path.is_symlink():
         raise FileExistsError(f"refusing to overwrite package: {path}")
@@ -238,6 +246,8 @@ def _metadata(binding: dict, scale: dict, start: int, end: int, video_variant: s
                     rule_policy=binding.get("rule_policy") or dict(social=policy_receipt(), individual_revision=INDIVIDUAL_RULE_REVISION,
                                      group_revision=GROUP_RULE_REVISION),
                     rule_source_sha256=binding.get("rule_source_sha256", {}),
+                    rule_snapshot_schema=binding.get("rule_snapshot_schema"),
+                    rule_runtime_snapshot=binding.get("rule_runtime_snapshot"),
                     video_encoding="H.264/yuv420p; original dimensions; audio omitted",
                     event_half_open=dict(start=start, end=end), scale=scale,
                     raw_observations="all original cached detections, not only event participants",
@@ -254,6 +264,8 @@ def _metadata(binding: dict, scale: dict, start: int, end: int, video_variant: s
             context_seconds=context.get("context_seconds"), core_seconds=context.get("core_seconds"),
             parent_candidate_frame_intervals=event.get("parent_candidate_frame_intervals"),
             source_event_half_open=dict(start=start, end=end),
+            retained_complete_parent_for_semantics=event.get("retained_complete_parent_for_semantics", False),
+            retained_complete_parent_for_duration=event.get("retained_complete_parent_for_duration", False),
             persisted_support_intervals={key: value for key, value in event.items() if key.endswith("_frame_intervals")},
             evidence_support_is_separate_from_process_duration=True,
             source_window_bounds=[{key: window[key] for key in ("window_start", "window_end", "core_start", "core_end")}
@@ -330,6 +342,7 @@ def _package_result(path: Path, event: dict | None, verification: dict, info: di
 
 
 def render_full_package(source: Path, target: Path, store, events: list[dict], binding: dict, scale: dict) -> dict:
+    _verify_rule_binding(binding, events)
     _new_directory(target)
     info = binding["source_video"]
     verification = _render_video(source, target / "clip.mp4", store, events, info)
@@ -344,6 +357,7 @@ def render_full_package(source: Path, target: Path, store, events: list[dict], b
 def reuse_full_package(prior_root: Path, target: Path, previous: dict, events: list[dict],
                        binding: dict, scale: dict) -> dict:
     """Copy a complete verified package; paths alone never authorize reuse."""
+    _verify_rule_binding(binding, events)
     original = prior_root / "full"
     if target.exists() or target.is_symlink():
         raise FileExistsError(f"refusing to overwrite package: {target}")
@@ -428,6 +442,7 @@ def export_packages(root: Path, rendered: Path, store, events: list[dict], bindi
                     scale: dict, *, workers: int = 1, qualification_context: dict | None = None,
                     clip_preset: str = "veryfast") -> list[dict]:
     """Export every event, with bounded FFmpeg concurrency and stable order."""
+    _verify_rule_binding(binding, events)
     if type(workers) is not int or workers < 1:
         raise ValueError("clip workers must be a positive integer")
     if clip_preset not in ("veryfast", "ultrafast"):

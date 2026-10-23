@@ -99,20 +99,17 @@ def assign_event_roles(
     selected: np.ndarray, directed: np.ndarray, measured_facing: np.ndarray,
     track_ids: np.ndarray, left: int, right: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Choose one direction per observed event, leave ambiguous/missing rows -1.
+    """Publish unique measured support from independently qualified directions.
 
-    Direction votes require actual pose support and an eligible directed event.
-    Ties stay unknown rather than inventing biological or visual identities.
-    A short head turn cannot exchange the role of an entire sustained event.
+    Candidate masks already enforce the behavior's sustained motion/pose rules.
+    Preserve each qualified span so canonical events can split at a real role
+    change. Ambiguous or missing rows stay unknown, and a short head turn cannot
+    exchange the role of an entire sustained event.
     """
     actor_ids, target_ids = np.full(len(selected), -1, np.int64), np.full(len(selected), -1, np.int64)
-    for start, end in runs(selected):
-        support = directed[:, start:end] & measured_facing[:, start:end]
-        votes = support.sum(axis=1)
-        if votes[0] == votes[1]:
-            continue
-        direction = int(np.argmax(votes))
-        actor, target = ((left, right), (right, left))[direction]
-        rows = np.arange(start, end)[support[direction]]
+    support = directed & measured_facing & np.asarray(selected, bool)[None, :]
+    unique = support.sum(axis=0) == 1
+    for direction, (actor, target) in enumerate(((left, right), (right, left))):
+        rows = unique & support[direction]
         actor_ids[rows], target_ids[rows] = int(track_ids[actor]), int(track_ids[target])
     return actor_ids, target_ids

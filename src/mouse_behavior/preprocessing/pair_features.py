@@ -119,7 +119,10 @@ def _pair_dataframe(
     behavior_speed = np.asarray(metrics["behavior_speed"], dtype=float)
     if "reference_body_cm" not in metrics:
         raise ValueError("pair metrics must provide reference_body_cm from kinematics")
-    distance_body_lengths = distance / max(float(metrics["reference_body_cm"]), 1e-6)
+    reference_body_cm = float(metrics["reference_body_cm"])
+    if not np.isfinite(reference_body_cm) or reference_body_cm <= 0:
+        raise ValueError("pair metrics reference_body_cm must be finite and positive")
+    distance_body_lengths = distance / reference_body_cm
     bbox_center_distance = np.asarray(
         metrics.get("bbox_center_distance_body_lengths", np.full(valid.shape, np.inf)),
         dtype=float,
@@ -357,6 +360,13 @@ def _pair_metrics(
     expensive pair features to padded interaction windows while retaining the
     selected pair's full output timeline for the temporal behavior engine.
     """
+    try:
+        reference_body_cm = float(kin["reference_body_cm"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("kinematics must provide a finite positive reference_body_cm") from error
+    if (isinstance(kin["reference_body_cm"], (bool, np.bool_))
+            or not np.isfinite(reference_body_cm) or reference_body_cm <= 0):
+        raise ValueError("kinematics must provide a finite positive reference_body_cm")
     centers = np.asarray(kin["centers_cm"], dtype=float)
     heads = np.asarray(kin["head_cm"], dtype=float)
     kp = np.asarray(kin["keypoints_cm"], dtype=float)
@@ -582,6 +592,7 @@ def _pair_metrics(
     )
     pose_pair_quality[~valid_pair] = 0.0
     metrics = {
+        "reference_body_cm": reference_body_cm,
         "valid_pair": valid_pair,
         "distance": distance,
         "head_distance": head_distance,

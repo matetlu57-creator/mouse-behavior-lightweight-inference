@@ -11,6 +11,7 @@ long video is not accumulated as one Python list in memory.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import logging
 import pickle
@@ -26,6 +27,41 @@ LOGGER = logging.getLogger(__name__)
 
 KEYPOINTS = 7
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".avi", ".mkv", ".wmv", ".m4v"}
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verified_cache_source_binding(video: Path, cache: Path, *, fps: float, frame_count: int) -> dict:
+    """Verify producer-sealed source bytes and every trajectory chunk."""
+    status_path = cache / "yolo_results_status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    source_hash = status.get("source_video_sha256")
+    chunks = status.get("chunk_sha256")
+    if (not isinstance(source_hash, str) or len(source_hash) != 64
+            or not isinstance(chunks, dict) or not chunks):
+        raise ValueError("legacy source/cache binding lacks SHA-256; rerun cache generation and analysis")
+    if not status.get("video") or Path(status["video"]).resolve() != video.resolve():
+        raise ValueError("source path differs from cache binding")
+    if (status.get("status") != "complete" or status.get("total_frames") != frame_count
+            or status.get("next_frame") != frame_count):
+        raise ValueError("source frame count differs from complete cache binding")
+    cache_fps = status.get("fps")
+    if (not isinstance(cache_fps, (int, float)) or not np.isfinite(fps) or fps <= 0
+            or not np.isclose(cache_fps, fps, rtol=1e-6, atol=1e-6)):
+        raise ValueError("source FPS differs from cache binding")
+    if _file_sha256(video) != source_hash:
+        raise ValueError("source SHA-256 changed since cache generation; rerun cache generation and analysis")
+    actual = {path.name: _file_sha256(path) for path in sorted(cache.glob("yolo_results*.pkl.gz"))}
+    if actual != chunks:
+        raise ValueError("trajectory cache chunk binding changed; rerun cache generation and analysis")
+    return dict(source_video_sha256=source_hash, cache_status_sha256=_file_sha256(status_path),
+                cache_chunk_sha256=actual)
 
 
 def _payloads(result: Any) -> list[dict[str, Any]]:
@@ -86,6 +122,9 @@ def build_cache(
     tracker: str = "bytetrack.yaml",
     model: Any | None = None,
 ) -> Path:
+    if (output / "yolo_results_status.json").exists() or any(output.glob("yolo_results*.pkl.gz")):
+        raise FileExistsError(f"refusing to overwrite an existing pose cache: {output}")
+    source_hash = _file_sha256(video)
     output.mkdir(parents=True, exist_ok=True)
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
@@ -161,9 +200,16 @@ def build_cache(
     finally:
         cap.release()
 
+    if frame_index != total_frames:
+        raise ValueError(f"source decode produced {frame_index} frames; expected {total_frames}")
+    if _file_sha256(video) != source_hash:
+        raise ValueError("source video changed during cache generation; rebuild using a stable source")
+
     status = {
         "status": "complete",
         "video": str(video.resolve()),
+        "source_video_sha256": source_hash,
+        "chunk_sha256": {path.name: _file_sha256(path) for path in sorted(output.glob("yolo_results*.pkl.gz"))},
         "model": str(model_path.resolve()),
         "total_frames": int(total_frames),
         "fps": float(fps),

@@ -9,7 +9,7 @@ from mouse_behavior.evaluation import confirmed_rules as rules
 def test_v25_provenance_and_unchanged_acceptance_and_numerical_gates():
     receipt = rules.policy_receipt()
     cfg = rules.DEFAULT_SOCIAL_HEURISTIC_CONFIG
-    assert receipt['version'] == 'confirmed_rules_v28'
+    assert receipt['version'] == 'confirmed_rules_v30'
     assert receipt['attack_acceptance_default_coverage'] == .30
     assert receipt['other_behavior_acceptance_default_coverage'] == .50
     assert cfg.acc_attack_min_cm_s2 == 99.59917210877003

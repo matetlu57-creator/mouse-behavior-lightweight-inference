@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import math
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Sequence
@@ -25,6 +27,8 @@ from ..preprocessing.constants import (
 from ..preprocessing.pair_features import _boolean_runs
 from ..tracking.cache import _cache_total_frames, load_trajectory_cache
 from ..io.csv import _write_csv
+from ..evaluation.segment_export import _sha256, _verify_video
+from ..pose_cache import verified_cache_source_binding
 from .overlay import (
     BoxLabel,
     MouseOverlay,
@@ -43,6 +47,33 @@ from .overlay import (
 )
 
 LOGGER = logging.getLogger("mouse_behavior.lightweight_behavior_inference")
+
+
+def _verify_render_source(video: Path, cache: Path, metadata: dict, fps: float, count: int) -> dict:
+    """Refuse missing/mismatched source timelines instead of truncating them."""
+    status_path = cache / "yolo_results_status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    if not status.get("video") or not metadata.get("source_video") or not metadata.get("yolo_cache"):
+        raise ValueError("render source binding is missing; rerun cache generation/analysis")
+    if (Path(status["video"]).resolve() != video.resolve()
+            or Path(metadata["source_video"]).resolve() != video.resolve()
+            or Path(metadata["yolo_cache"]).resolve() != cache.resolve()):
+        raise ValueError("render source/cache path differs from saved cache or analysis")
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError("source FPS must be finite and positive")
+    for name, expected in (("cache", status.get("fps")), ("analysis", metadata.get("source_fps"))):
+        if not isinstance(expected, (int, float)) or not math.isclose(fps, expected, rel_tol=1e-6, abs_tol=1e-6):
+            raise ValueError(f"source FPS differs from {name} binding")
+    if count <= 0 or count != status.get("total_frames"):
+        raise ValueError("source frame count differs from complete cache binding")
+    analyzed = metadata.get("source_frames")
+    if type(analyzed) is not int or not 0 < analyzed <= count:
+        raise ValueError("analysis source frame count is missing or invalid")
+    binding = verified_cache_source_binding(video, cache, fps=fps, frame_count=count)
+    if metadata.get("source_binding") != binding:
+        raise ValueError("analysis source/cache binding missing or changed; rerun analysis")
+    return dict(**binding, source_binding_level="sha256_and_path_timebase",
+                analyzed_source_frame_count=analyzed)
 
 
 def _verified_render_identity(metadata_path: Path, explicit_map: Path | None):
@@ -84,8 +115,8 @@ def render_behavior_video(
     video outputs.
     """
     total_cache_frames = _cache_total_frames(cache_dir)
-    if max_frames is not None:
-        total_cache_frames = min(total_cache_frames, max(int(max_frames), 1))
+    if max_frames is not None and (type(max_frames) is not int or max_frames <= 0):
+        raise ValueError("max_frames must be a positive integer")
 
     metadata, identity_map = _verified_render_identity(
         events_path.parent / "lightweight_analysis_metadata.json", identity_map_path,
@@ -97,9 +128,20 @@ def render_behavior_video(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = float(cap.get(cv2.CAP_PROP_FPS))
     video_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
     if width <= 0 or height <= 0:
         cap.release()
         raise RuntimeError(f"无法读取源视频尺寸: {video_path}")
+    source_binding = _verify_render_source(video_path, cache_dir, metadata, fps, video_frame_count)
+    event_hashes = metadata.get("event_files_sha256", {})
+    if not events_path.is_file() or event_hashes.get(events_path.name) != _sha256(events_path):
+        raise ValueError("analysis event CSV binding missing or changed; rerun analysis")
+    if max_frames is None and source_binding["analyzed_source_frame_count"] != total_cache_frames:
+        raise ValueError("partial analysis requires an explicit max_frames preview")
+    if max_frames is not None:
+        total_cache_frames = min(total_cache_frames, max_frames)
+    if total_cache_frames > source_binding["analyzed_source_frame_count"]:
+        raise ValueError("render frames exceed saved analysis source frame count")
     boundary_json = events_path.parent / "阶段一_自适应笼界.json"
     arena_polygon: np.ndarray | None = None
     if boundary_json.exists():
@@ -137,6 +179,8 @@ def render_behavior_video(
     normalized_focus = normalize_focus_behavior(focus_behavior)
     contact_path = contact_events_path or (events_path.parent / "lightweight_contact_events.csv")
     if contact_path.exists():
+        if event_hashes.get(contact_path.name) != _sha256(contact_path):
+            raise ValueError("analysis contact event CSV binding missing or changed; rerun analysis")
         contact_df = pd.read_csv(contact_path)
         event_rows.extend(normalize_contact_events(contact_df.to_dict("records")))
         LOGGER.info("[render] contact events loaded: %s", contact_path)
@@ -153,22 +197,24 @@ def render_behavior_video(
             if resolved_event is not None:
                 event_frame_map[frame_index].append(resolved_event)
 
-    if not np.isfinite(fps) or fps <= 0:
-        fps = 29.329
     frame_limit = total_cache_frames
-    if video_frame_count > 0:
-        frame_limit = min(frame_limit, video_frame_count)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists() or output_path.with_suffix(".identity.json").exists():
+        raise FileExistsError(f"refusing to overwrite render: {output_path}")
+    temporary_output = output_path.with_name(f".{output_path.stem}.{uuid.uuid4().hex}.mp4")
+    cap = cv2.VideoCapture(str(video_path))
     sidebar_width = sidebar_width_for_frame(width, height)
     writer = cv2.VideoWriter(
-        str(output_path),
+        str(temporary_output),
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
         (width + sidebar_width, height),
     )
     if not writer.isOpened():
         cap.release()
+        writer.release()
+        temporary_output.unlink(missing_ok=True)
         raise RuntimeError(f"无法创建渲染视频: {output_path}")
 
     skeleton_edges = SKELETON_EDGES
@@ -183,7 +229,7 @@ def render_behavior_video(
         while frame_index < frame_limit:
             ok, frame = cap.read()
             if not ok:
-                break
+                raise RuntimeError(f"source decode ended at {frame_index}; expected {frame_limit} frames")
             active_events = event_frame_map[frame_index]
             focus_active = bool(
                 normalized_focus
@@ -352,11 +398,27 @@ def render_behavior_video(
                     frame_limit,
                     frame_index / max(frame_limit, 1) * 100,
                 )
+        if frame_limit == video_frame_count and cap.read()[0]:
+            raise RuntimeError("source decodes more frames than its bound frame count")
+    except BaseException:
+        cap.release()
+        writer.release()
+        temporary_output.unlink(missing_ok=True)
+        raise
     finally:
         cap.release()
         writer.release()
-    if frame_index <= 0 or not output_path.exists() or output_path.stat().st_size <= 0:
-        raise RuntimeError(f"渲染没有产生有效视频: {output_path}")
+    try:
+        verification = _verify_video(temporary_output, frame_limit, fps)
+        if _verify_render_source(video_path, cache_dir, metadata, fps, video_frame_count) != source_binding:
+            raise ValueError("source/cache binding changed during rendering")
+        for path in (events_path, contact_path):
+            if path.exists() and event_hashes.get(path.name) != _sha256(path):
+                raise ValueError("event CSV binding changed during rendering")
+        temporary_output.replace(output_path)
+    except BaseException:
+        temporary_output.unlink(missing_ok=True)
+        raise
     LOGGER.info(
         "[render] completed: %s (%.2f GB, %dx%d including sidebar)",
         output_path,
@@ -377,6 +439,11 @@ def render_behavior_video(
             "identity_source": tracks["identity_source"], "identity_labels": identity_labels,
             "identity_map": tracks.get("identity_map"),
             "identity_map_sha256": tracks.get("identity_map_sha256"),
+            **source_binding,
+            "render_contract": "explicit_preview" if max_frames is not None else "complete_analysis",
+            "requested_max_frames": max_frames, "source_frame_count": video_frame_count,
+            "rendered_frame_count": frame_index, "source_fps": fps,
+            "source_frame_range_half_open": [0, frame_index], "verification": verification,
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
     )
     return output_path
@@ -419,6 +486,62 @@ def _clip_intervals_from_state(
         if len(intervals) >= max_clips:
             break
     return intervals
+
+
+def _write_showcase_videos(video_path: Path, intervals: list[dict], total_frames: int,
+                           fps: float, width: int, height: int) -> None:
+    """Decode and verify the whole batch before publishing any final clip."""
+    if not intervals:
+        return
+    paths = [Path(interval["path"]) for interval in intervals]
+    if any(path.exists() for path in paths):
+        raise FileExistsError("refusing to overwrite an existing showcase clip")
+    temporary = {str(path): path.with_name(f".{path.stem}.{uuid.uuid4().hex}.mp4") for path in paths}
+    start_map: dict[int, list[dict]] = defaultdict(list)
+    for interval in intervals:
+        start_map[interval["start_frame"]].append(interval)
+    active = {}
+    published = []
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"cannot open showcase source: {video_path}")
+        for frame_index in range(total_frames):
+            ok, frame = cap.read()
+            if not ok:
+                raise RuntimeError(f"source decode ended at {frame_index}; expected {total_frames} frames")
+            for interval in start_map.get(frame_index, []):
+                writer = cv2.VideoWriter(str(temporary[interval["path"]]), cv2.VideoWriter_fourcc(*"mp4v"),
+                                         fps, (width, height))
+                if not writer.isOpened():
+                    writer.release()
+                    raise RuntimeError(f"cannot create showcase clip: {interval['path']}")
+                active[interval["path"]] = (writer, interval)
+            for path, (writer, interval) in list(active.items()):
+                writer.write(frame)
+                if frame_index == interval["end_frame"]:
+                    writer.release()
+                    del active[path]
+        if cap.read()[0]:
+            raise RuntimeError("showcase source decodes more frames than its bound frame count")
+        cap.release()
+        for interval in intervals:
+            verified = _verify_video(temporary[interval["path"]], interval["frame_count"], fps)
+            interval.update(encoded_fps=verified["fps"], duration_s=verified["duration_s"],
+                            decoded_frame_count=verified["frame_count"])
+        for path in paths:
+            temporary[str(path)].rename(path)
+            published.append(path)
+    except BaseException:
+        for writer, _ in active.values():
+            writer.release()
+        for path in [*temporary.values(), *published]:
+            path.unlink(missing_ok=True)
+        raise
+    finally:
+        cap.release()
+        for writer, _ in active.values():
+            writer.release()
 
 
 def extract_four_class_clips(
@@ -515,6 +638,7 @@ def extract_four_class_clips(
                     "clip_index": clip_index,
                     "label_id": label_id,
                     "label_name": class_name,
+                    "frame_count": end - start + 1,
                     "start_frame": start,
                     "end_frame": end,
                     "start_time_s": start / fps,
@@ -529,53 +653,11 @@ def extract_four_class_clips(
                 }
             )
 
-    # One sequential source read serves every clip; no annotations are drawn.
-    start_map: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for interval in intervals:
-        start_map[int(interval["start_frame"])].append(interval)
-    active: dict[str, tuple[Any, dict[str, Any]]] = {}
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"无法重新打开源视频: {video_path}")
-    frame_index = 0
-    try:
-        while frame_index < total_frames:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            for interval in start_map.get(frame_index, []):
-                writer = cv2.VideoWriter(
-                    interval["path"],
-                    cv2.VideoWriter_fourcc(*"mp4v"),
-                    fps,
-                    (width, height),
-                )
-                if not writer.isOpened():
-                    writer.release()
-                    raise RuntimeError(f"无法创建分类片段: {interval['path']}")
-                active[interval["path"]] = (writer, interval)
-            finished: list[str] = []
-            for path, (writer, interval) in active.items():
-                writer.write(frame)
-                if frame_index >= int(interval["end_frame"]):
-                    writer.release()
-                    finished.append(path)
-            for path in finished:
-                active.pop(path, None)
-            frame_index += 1
-            if frame_index == 1 or frame_index % 1000 == 0 or frame_index == total_frames:
-                LOGGER.info(
-                    "[four-class clips] source %d/%d frames",
-                    frame_index,
-                    total_frames,
-                )
-    finally:
-        cap.release()
-        for writer, _interval in active.values():
-            writer.release()
-
+    _write_showcase_videos(video_path, intervals, total_frames, fps, width, height)
     manifest_path = output_dir / "four_class_clip_manifest.csv"
-    _write_csv(manifest_path, intervals)
+    _write_csv(manifest_path, intervals, columns=list(intervals[0]) if intervals else [
+        "clip_index", "label_name", "start_frame", "end_frame", "frame_count", "duration_s", "path",
+    ])
     summary = {
         "source_video": str(video_path),
         "events_csv": str(events_path),
@@ -585,6 +667,7 @@ def extract_four_class_clips(
         "clip_seconds": float(clip_seconds),
         "min_start_interval_seconds": float(min_start_interval_seconds),
         "max_clips_per_class": int(max_clips_per_class),
+        "insufficient_source_policy": "skip_incomplete_fixed_window",
         "used_event_rows": int(used_event_rows),
         "state_frame_counts": {
             FOUR_CLASS_NAMES[label_id]: int((state == label_id).sum())
@@ -630,6 +713,8 @@ def extract_behavior_clips(
     the weak/strong legacy chase/attack rows.
     Presence of a label in the sampled window does not qualify its standalone
     process duration. Canonical behavior packages enforce that semantic contract.
+    Sources shorter than the requested fixed window yield zero clips. Every
+    published clip is decoded to verify its complete requested frame range.
     """
     import cv2
 
@@ -724,6 +809,8 @@ def extract_behavior_clips(
             event_rows_by_behavior[behavior],
             key=lambda row: (int(row["peak_frame"]), int(row["start_frame"])),
         ):
+            if total_frames < clip_frames or max_clips_per_behavior <= 0:
+                break
             center = int(event["peak_frame"])
             start = max(0, min(center - clip_frames // 2, total_frames - clip_frames))
             end = start + clip_frames - 1
@@ -749,6 +836,7 @@ def extract_behavior_clips(
                     "start_time_s": start / fps,
                     "end_time_s": end / fps,
                     "duration_s": (end - start + 1) / fps,
+                    "frame_count": end - start + 1,
                     "path": str(path),
                     "source_video": str(video_path),
                     "source_events": str(events_path),
@@ -757,53 +845,11 @@ def extract_behavior_clips(
                 }
             )
 
-    # One sequential source read serves all behavior clips; no annotations are drawn.
-    start_map: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for interval in intervals:
-        start_map[int(interval["start_frame"])].append(interval)
-    active: dict[str, tuple[Any, dict[str, Any]]] = {}
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"无法重新打开源视频: {video_path}")
-    frame_index = 0
-    try:
-        while frame_index < total_frames:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            for interval in start_map.get(frame_index, []):
-                writer = cv2.VideoWriter(
-                    interval["path"],
-                    cv2.VideoWriter_fourcc(*"mp4v"),
-                    fps,
-                    (width, height),
-                )
-                if not writer.isOpened():
-                    writer.release()
-                    raise RuntimeError(f"无法创建行为片段: {interval['path']}")
-                active[interval["path"]] = (writer, interval)
-            finished: list[str] = []
-            for path, (writer, interval) in active.items():
-                writer.write(frame)
-                if frame_index >= int(interval["end_frame"]):
-                    writer.release()
-                    finished.append(path)
-            for path in finished:
-                active.pop(path, None)
-            frame_index += 1
-            if frame_index == 1 or frame_index % 1000 == 0 or frame_index == total_frames:
-                LOGGER.info(
-                    "[behavior clips] source %d/%d frames",
-                    frame_index,
-                    total_frames,
-                )
-    finally:
-        cap.release()
-        for writer, _interval in active.values():
-            writer.release()
-
+    _write_showcase_videos(video_path, intervals, total_frames, fps, width, height)
     manifest_path = output_dir / "behavior_clip_manifest.csv"
-    _write_csv(manifest_path, intervals)
+    _write_csv(manifest_path, intervals, columns=list(intervals[0]) if intervals else [
+        "clip_index", "behavior", "start_frame", "end_frame", "frame_count", "duration_s", "path",
+    ])
     summary = {
         "source_video": str(video_path),
         "events_csv": str(events_path),
@@ -821,6 +867,7 @@ def extract_behavior_clips(
         },
         "clip_counts": clip_counts,
         "total_clips": int(len(intervals)),
+        "insufficient_source_policy": "skip_incomplete_fixed_window",
         "rendered_video": False,
         "clip_contract": "fixed_window_showcase",
         "standalone_behavior_qualification": False,

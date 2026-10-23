@@ -70,9 +70,67 @@ def _verify_video(path: Path, count: int, fps: float) -> dict[str, Any]:
             "width": width,
             "height": height,
             "bytes": size,
+            "duration_s": decoded / actual_fps,
         }
     finally:
         capture.release()
+
+
+def _cropped_annotation(original: dict, start: int, end: int, behavior: str,
+                        mouse_ids: tuple[int, ...]) -> dict:
+    """Only understood annotation fields become active claims in a new crop.
+
+    Extension fields and the original event ID remain in provenance. Interval
+    fields follow the canonical schema's clip-local half-open contract; counts
+    are always recomputed from their intersected union, never copied.
+    """
+    common = {"confidence", "screening_status", "requires_review"}
+    result = {key: copy.deepcopy(value) for key, value in original.items() if key in common}
+    if behavior != original.get("behavior"):
+        return result
+    if "canonical_behavior" in original:
+        result["canonical_behavior"] = original["canonical_behavior"]
+    # Evidence for a different participant set must be re-evaluated upstream.
+    if set(mouse_ids) != set(original.get("mouse_ids", [])):
+        return result
+    if "participants" in original:
+        result["participants"] = [
+            {**participant, "track_ids": [i for i in participant.get("track_ids", []) if i in mouse_ids]}
+            for participant in original["participants"]
+            if any(i in mouse_ids for i in participant.get("track_ids", []))
+        ]
+    for field in ("actor_id", "target_id", "role_status", "posture_engine", "posture_profile", "posture_revision"):
+        if field in original:
+            result[field] = copy.deepcopy(original[field])
+    for field, value in original.items():
+        if not field.endswith("_frame_intervals") or field == "parent_candidate_frame_intervals":
+            continue
+        if not isinstance(value, list):
+            raise ValueError(f"{field} must contain half-open frame ranges")
+        clipped = []
+        for interval in value:
+            if (not isinstance(interval, (list, tuple)) or len(interval) != 2
+                    or any(type(index) is not int for index in interval)
+                    or not 0 <= interval[0] < interval[1]):
+                raise ValueError(f"invalid half-open range in {field}")
+            left, right = max(start, interval[0]), min(end, interval[1])
+            if left < right:
+                clipped.append([left - start, right - start])
+        union = []
+        for left, right in sorted(clipped):
+            if union and left <= union[-1][1]:
+                union[-1][1] = max(union[-1][1], right)
+            else:
+                union.append([left, right])
+        result[field] = union
+        result[field.replace("_intervals", "_count")] = sum(right - left for left, right in union)
+    if "observed_all_participants_frame_count" in result:
+        result["inferred_or_partially_unobserved_frame_count"] = end - start - result["observed_all_participants_frame_count"]
+    if result.get("role_support_frame_count") == 0:
+        for field in ("actor_id", "target_id", "participants"):
+            result.pop(field, None)
+        result["role_status"] = "unknown_in_cropped_interval"
+    return result
 
 
 def export_segment(
@@ -129,6 +187,10 @@ def export_segment(
     if not isinstance(tracks, list):
         raise ValueError("tracks must use the exported per-frame list schema")
     original_annotation = copy.deepcopy(annotation)
+    original_metadata = copy.deepcopy(metadata)
+    known_ids = {detection.get("track_id") for row in tracks for detection in row.get("detections", [])}
+    if not set(mouse_ids).issubset(known_ids):
+        raise ValueError("mouse_ids must refer to existing source visual track IDs")
     original_source = copy.deepcopy(metadata.get("source", {}))
     if not isinstance(original_source, dict):
         raise ValueError("metadata.source must be a JSON object")
@@ -171,6 +233,7 @@ def export_segment(
             cropped["time"] = cropped["frame"] / fps
             cropped_tracks.append(cropped)
     cropped_tracks.sort(key=lambda entry: entry["frame"])
+    annotation = _cropped_annotation(original_annotation, start_frame, end_frame, behavior, mouse_ids)
     annotation.update(
         behavior=behavior,
         mouse_ids=list(mouse_ids),
@@ -185,19 +248,8 @@ def export_segment(
         }
         if annotation["requires_review"]:
             annotation["confidence"] = "screening_candidate"
-    # Old behavior-specific role names cannot safely describe a new behavior.
-    if behavior != original_annotation.get("behavior"):
-        annotation.pop("participants", None)
-    elif "participants" in annotation:
-        annotation["participants"] = [
-            {
-                **participant,
-                "track_ids": [i for i in participant.get("track_ids", []) if i in mouse_ids],
-            }
-            for participant in annotation["participants"]
-            if any(i in mouse_ids for i in participant.get("track_ids", []))
-        ]
-    metadata.setdefault("clip", {}).update(filename="clip.mp4", fps=fps, frame_count=count)
+    metadata = {key: copy.deepcopy(metadata[key]) for key in ("schema_version", "tracks", "pose", "source") if key in metadata}
+    metadata["clip"] = dict(filename="clip.mp4", fps=fps, frame_count=count)
     metadata.setdefault("tracks", {}).update(frame_origin=0, time_origin=0.0)
     metadata.setdefault("source", {}).update(
         start_frame=recording_start,
@@ -212,7 +264,8 @@ def export_segment(
     metadata["provenance"] = {
         "original_annotation": original_annotation,
         "original_metadata_source": original_source,
-        "original_metadata_provenance": metadata.get("provenance"),
+        "original_metadata_provenance": original_metadata.get("provenance"),
+        "original_metadata": original_metadata,
         "source_sample_id": record.sample_id,
         "source_sha256": source_hashes,
         "offsets": offsets,
@@ -267,7 +320,9 @@ def export_segment(
             # quirks in short crops without discarding or duplicating source frames.
             subprocess.run(command, check=True, capture_output=True, timeout=300)
         verified = _verify_video(target / "clip.mp4", count, fps)
-        metadata["clip"].update(width=verified["width"], height=verified["height"])
+        metadata["clip"].update(width=verified["width"], height=verified["height"],
+                                decoded_duration_s=verified["duration_s"], encoded_fps=verified["fps"],
+                                bytes=verified["bytes"])
         _write_json(target / "annotation.json", annotation)
         _write_json(target / "metadata.json", metadata)
         _write_json(target / "tracks.json", cropped_tracks)

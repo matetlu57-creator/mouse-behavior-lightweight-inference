@@ -25,7 +25,13 @@ def moving_pair(frames=90, speed=20.):
 def test_lower_priority_tail_cannot_prevent_whole_directed_chase_requalification(monkeypatch):
     f = moving_pair()
     f.pair_nose_tail_left_to_right_cm[:, 0] = .5
-    monkeypatch.setattr(social, '_open_approach_mask', lambda f, *a, **k: np.arange(len(f.valid)) < 75)
+
+    def approach_mask(f, *args, retained_mask=None, **kwargs):
+        raw = np.arange(len(f.valid)) < 75
+        # Requalification may only retain frames not claimed by the restored chase.
+        return raw if retained_mask is None else raw & retained_mask
+
+    monkeypatch.setattr(social, '_open_approach_mask', approach_mask)
     monkeypatch.setattr(social, '_chase_mask', lambda f, *a, **k: np.ones(len(f.valid), bool))
     monkeypatch.setattr(social, '_attack_action_mask', lambda f, *a, **k: np.zeros(len(f.valid), bool))
     output = social.pair_rule_masks(f, audit.confirmed_params(), replace(cfg, chasing_min_mean_speed_cm_s=15.))
