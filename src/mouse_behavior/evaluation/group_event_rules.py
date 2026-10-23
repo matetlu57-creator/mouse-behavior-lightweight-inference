@@ -32,7 +32,7 @@ from .clustering_formation import formation_masks
 # episode span, and adds the single-degraded-recipient region-gap fallback.
 # policy_receipt() publishes this string into validation receipts, so a group
 # run is now version-separable from v14.
-GROUP_RULE_REVISION = "2026-10-20-group-v29-observed-formation-and-state-memory"
+GROUP_RULE_REVISION = "2026-10-23-group-v30-episode-bound-departure-origins"
 NEIGHBOR_BODY_LENGTHS = 1.25
 MAX_PROPOSALS = 160
 MIN_MOTION_SUPPORT_SECONDS = 0.15
@@ -550,7 +550,8 @@ def _dispersal_process(distances: np.ndarray, visible: np.ndarray, compact: np.n
                     minimum_outward_speed_cm_s: float = DEFAULT_GROUP_HEURISTIC_CONFIG.dispersal_min_outward_speed_cm_s,
                     pause_max_s: float = DEFAULT_GROUP_HEURISTIC_CONFIG.dispersal_pause_max_s,
                     member_velocity_cm_s: np.ndarray | None = None,
-                    confirmations: list | None = None) -> tuple[np.ndarray, tuple[int, ...], int | None]:
+                    confirmations: list | None = None,
+                    origin_start: int | None = None) -> tuple[np.ndarray, tuple[int, ...], int | None]:
     """Confirm a >5-second actual departure at a measured checkpoint after5s.
 
     A connected observed pair anchors the original pile. At least three IDs
@@ -585,7 +586,12 @@ def _dispersal_process(distances: np.ndarray, visible: np.ndarray, compact: np.n
                            & (observed.sum(axis=1) >= 2))
     if not len(starts):
         return empty, (), None
-    start = int(starts[0])
+    if origin_start is not None:
+        if origin_start not in starts:
+            return empty, (), None
+        start = int(origin_start)
+    else:
+        start = int(starts[0])
     joins, origins = _departure_origins(centers, observed, start, initial_group_radius_cm)
     # Historical explicit checkpoint mode is available for old receipts only.
     # The canonical path requires a measured checkpoint strictly AFTER5s and
@@ -868,6 +874,159 @@ def _initial_compact_components(
     return list(dict.fromkeys(result))
 
 
+def _observed_attempt_end(
+    centers: np.ndarray, observed: np.ndarray, velocity: np.ndarray,
+    leaving: tuple[int, ...], end: int, origin_points: np.ndarray, fps: float,
+    config: GroupHeuristicConfig,
+) -> int | None:
+    """Resolve an unknown bout end only with later measured contradiction.
+
+    A gap is not cessation. After it, a return into the original hull or an
+    entirely observed inactive run exceeding the existing pause allowance
+    closes the attempt. The inactive support never includes unknown frames.
+    """
+    count = len(centers)
+    if end == count or (observed[end, list(leaving)].all()
+                       and np.isfinite(velocity[end, list(leaving)]).all()):
+        return end
+    positions = centers[end:, leaving]
+    valid = observed[end:, leaving] & np.isfinite(positions).all(axis=2)
+    anchor = np.median(origin_points, axis=0)
+    offset = positions - anchor
+    radius = np.linalg.norm(offset, axis=2)
+    radial = np.divide(np.sum(offset * velocity[end:, leaving], axis=2), radius,
+                       out=np.full_like(radius, np.nan), where=radius > 1e-9)
+    measured = valid & np.isfinite(radial)
+    inactive = measured.all(axis=1) & ~np.any(
+        measured & (radial >= config.dispersal_min_outward_speed_cm_s), axis=1)
+    limit = int(np.floor(config.dispersal_pause_max_s * fps + 1e-9))
+    pauses = [low + end for low, high in runs(inactive) if high - low > limit]
+    completion = pauses[0] if pauses else None
+    hull = cv2.convexHull(origin_points.astype(np.float32))
+    # Every leaving member was observed outside at the measured checkpoint.
+    # Its later observed return is sufficient even if another ID stays hidden.
+    for frame in range(end, count if completion is None else completion + 1):
+        for slot in np.flatnonzero(valid[frame - end]):
+            if cv2.pointPolygonTest(hull, tuple(map(float, positions[frame - end, slot])), False) >= 0:
+                return frame
+    return completion
+
+
+def _compact_origin_episodes(
+    f: ExportedFeatures, near: np.ndarray, neighbor_cm: float,
+    *, velocity_cm_s: np.ndarray | None = None,
+    config: GroupHeuristicConfig = DEFAULT_GROUP_HEURISTIC_CONFIG,
+) -> list[tuple[int, int, tuple[int, ...]]]:
+    """Find observed formations without resetting a continuing pile's ID clock.
+
+    Each origin admits a late ID only at that ID's first observation after
+    formation, using the original fixed envelope. A connected ancestor keeps
+    that clock when more IDs appear; an ID first seen outside cannot be made
+    eligible by repeatedly reseeding the same pile. A neighbor graph change
+    does not end a departure: departing mice may reconnect a 10cm edge while
+    still outside the origin. Only a later observed formation after the actual
+    outward bout has ended may retire the old origin. The completed attempt
+    need not pass the final >5s label gate, and the next pile may form elsewhere.
+
+    Scan adjacency once and resolve each origin's first measured departure
+    attempt with the existing motion/return policy. Successive origins then
+    evaluate disjoint slices; neither arbitrary graph flicker nor missing rows
+    can cut off the predecessor before its real confirmation.
+    """
+    visible = f.valid & np.isfinite(f.centers_cm).all(axis=2)
+    count, tracks = visible.shape
+    if not count:
+        return []
+    next_observed = np.minimum.accumulate(
+        np.where(visible, np.arange(count)[:, None], count)[::-1], axis=0)[::-1]
+    velocity = (_observed_departure_velocity(f) if velocity_cm_s is None else velocity_cm_s)
+    origins: list[tuple[int, tuple[int, ...], tuple[int, ...]]] = []
+    departures = {}
+    attempt_ends: dict[int, int] = {}
+    stops: dict[int, int] = {}
+    active: set[int] = set()
+    previous = np.zeros(near.shape[1], bool)
+    for frame in range(count):
+        adjacency = np.zeros((tracks, tracks), bool)
+        edges = np.flatnonzero(near[frame])
+        adjacency[f.pair_i[edges], f.pair_j[edges]] = True
+        adjacency |= adjacency.T
+        # A real measured departure supplies the attempt boundary. Reuse all
+        # endpoint gates and motion rules; only the final duration gate is
+        # deferred so a short first attempt cannot swallow a valid later one.
+        for index in tuple(active):
+            if index in attempt_ends:
+                continue
+            start, _, members = origins[index]
+            centers, observed, joins, points = departures[index]
+            leaving = _departing_member_slots(
+                centers, observed, start, frame,
+                minimum_outward_displacement_cm=4., minimum_visible_fraction=.6,
+                member_starts=joins, origin_points=points)
+            if len(leaving) < 2 or not _dispersal_endpoint_separated(centers[frame, list(leaving)]):
+                continue
+            phase = _departure_process_mask(
+                centers, observed, start, frame, leaving, f.fps,
+                minimum_outward_speed_cm_s=config.dispersal_min_outward_speed_cm_s,
+                pause_max_s=config.dispersal_pause_max_s,
+                velocity_cm_s=velocity[:, members], minimum_duration_s=0.,
+                member_starts=joins, origin_points=points[joins <= frame])
+            if phase.any():
+                end = int(np.flatnonzero(phase)[-1]) + 1
+                completion = _observed_attempt_end(
+                    centers, observed, velocity[:, members], leaving, end,
+                    points[joins <= frame], f.fps, config)
+                if completion is not None:
+                    attempt_ends[index] = completion
+        for seed in _components(adjacency, visible[frame]):
+            if len(seed) < 2:
+                continue
+            seed_set = set(seed)
+            ancestors = [index for index in active
+                         if len(seed_set.intersection(origins[index][2])) >= 2]
+            if ancestors and (len(seed) < 3 or any(
+                    frame < attempt_ends.get(index, count) for index in ancestors)):
+                continue  # Graph reconnection is not proof that a bout ended.
+            internal = np.isin(f.pair_i, seed) & np.isin(f.pair_j, seed)
+            # A long measured pause may confirm cessation after the compact
+            # reappearance edge; that group need not reconnect another edge.
+            completed_here = any(frame == attempt_ends.get(index) for index in ancestors)
+            if not np.any(internal & near[frame] & ~previous) and not completed_here:
+                continue  # A split leaves an old subset, not a new formation.
+            retired = [index for index in ancestors if set(origins[index][2]).issubset(seed_set)]
+            # A regrouped subset can coexist with the remaining old members'
+            # departure. It cannot cancel their independently measured process.
+            for index in retired:
+                stops[index] = frame
+            active.difference_update(retired)
+            anchor = np.median(f.centers_cm[frame, list(seed)], axis=0)
+            first = next_observed[frame]
+            members = set(seed)
+            for slot in np.flatnonzero(first < count):
+                position = f.centers_cm[first[slot], slot]
+                if np.linalg.norm(position - anchor) <= neighbor_cm:
+                    members.add(int(slot))
+            members = tuple(sorted(members))
+            centers, observed = f.centers_cm[:, members], visible[:, members]
+            joins, points = _departure_origins(centers, observed, frame, neighbor_cm)
+            index = len(origins)
+            active.add(index)
+            departures[index] = centers, observed, joins, points
+            origins.append((frame, seed, members))
+        previous = near[frame]
+
+    result = []
+    for index, (start, seed, members) in enumerate(origins):
+        stop = stops.get(index, count)
+        # A later formation cannot backfill the preceding episode's members.
+        admitted = tuple(slot for slot in members if next_observed[start, slot] < stop)
+        if len(admitted) >= 3:
+            result.append((start, stop, admitted))
+        if len(seed) >= 3 and seed != admitted:
+            result.append((start, stop, seed))
+    return sorted(set(result))
+
+
 def _observed_departure_velocity(f: ExportedFeatures) -> np.ndarray:
     """Smoothed member motion, recomputed inside each observed track run."""
     velocity = np.full_like(f.centers_cm, np.nan)
@@ -964,23 +1123,27 @@ def _group_behavior_candidates(f: ExportedFeatures, p: HeuristicParameters,
                 label,
                 tuple(sorted(int(f.track_ids[members[position]]) for position in positions)),
                 duration, process.frames, process.support_frames))
-    for members in (_initial_compact_components(f, near, neighbor)
+    for start, stop, members in (_compact_origin_episodes(
+            f, near, neighbor, velocity_cm_s=velocity, config=config)
                     if behavior == "dispersal" else ()):
-        compact, enough, observed = _geometry(f, members, near)
+        key = "dispersal", members, neighbor
+        if key not in geometry_cache:
+            geometry_cache[key] = _geometry(f, members, near)
+        compact, enough, observed = geometry_cache[key]
         internal = np.isin(f.pair_i, members) & np.isin(f.pair_j, members)
-        pair_observed = f.valid[:, f.pair_i[internal]] & f.valid[:, f.pair_j[internal]]
-        distances = np.where(pair_observed, f.pair_distance_cm[:, internal], np.nan)
+        pair_observed = f.valid[start:stop, f.pair_i[internal]] & f.valid[start:stop, f.pair_j[internal]]
+        distances = np.where(pair_observed, f.pair_distance_cm[start:stop, internal], np.nan)
         confirmations = []
         _dispersal_process(
-            distances, enough, compact, p, f.fps,
-            centers_cm=f.centers_cm[:, members],
-            member_valid=f.valid[:, members] & np.isfinite(f.centers_cm[:, members]).all(axis=2),
+            distances, enough[start:stop], compact[start:stop], p, f.fps,
+            centers_cm=f.centers_cm[start:stop, members],
+            member_valid=observed[start:stop],
             initial_group_radius_cm=neighbor,
             extend_actual_motion=config.dispersal_extend_actual_motion,
             minimum_outward_speed_cm_s=config.dispersal_min_outward_speed_cm_s,
             pause_max_s=config.dispersal_pause_max_s,
-            member_velocity_cm_s=velocity[:, members],
-            confirmations=confirmations,
+            member_velocity_cm_s=velocity[start:stop, members],
+            confirmations=confirmations, origin_start=0,
         )
         for phase, leaving, checkpoint in confirmations:
             endpoints = np.flatnonzero(phase)
@@ -989,8 +1152,9 @@ def _group_behavior_candidates(f: ExportedFeatures, p: HeuristicParameters,
             duration = ((int(endpoints[-1]) - int(endpoints[0])) / f.fps
                         if len(endpoints) > 1 else 0.0)
             if duration > 0:
+                intervals = tuple((low + start, high + start) for low, high in mask_intervals(phase))
                 candidate = Candidate("dispersal", tuple(sorted(int(f.track_ids[members[slot]])
-                                                                for slot in leaving)), duration, mask_intervals(phase))
+                                                                for slot in leaving)), duration, intervals)
                 if candidate not in result:
                     result.append(candidate)
     return tuple(result)

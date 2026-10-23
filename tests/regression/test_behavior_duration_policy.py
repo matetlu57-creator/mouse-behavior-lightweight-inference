@@ -354,3 +354,9 @@ def test_legacy_fixed_windows_explicitly_remain_showcases(tmp_path, four_classes
         manifest = list(csv.DictReader(handle))
     assert manifest and all(row["clip_contract"] == "fixed_window_showcase" for row in manifest)
     assert all(row["standalone_behavior_qualification"] == "False" for row in manifest)
+    from mouse_behavior.evaluation.segment_export import _verify_video
+    for row in manifest:
+        verified = _verify_video(Path(row["path"]), int(row["frame_count"]), float(row["encoded_fps"]))
+        assert int(row["end_frame"]) - int(row["start_frame"]) + 1 == verified["frame_count"]
+        assert int(row["decoded_frame_count"]) == verified["frame_count"]
+        assert float(row["duration_s"]) == verified["duration_s"]

@@ -35,7 +35,7 @@ from .social_event_geometry import (
 
 
 CONFIRMED_POLICY = ScreenPolicy()
-SOCIAL_RULE_REVISION = "2026-10-20-social-v28-closest-endpoint-and-directed-pursuit"
+SOCIAL_RULE_REVISION = "2026-10-23-social-v30-qualified-boundaries-and-directed-role-spans"
 SOCIAL_NOSE_HEAD_CONTACT_DISTANCE_CM = DEFAULT_SOCIAL_HEURISTIC_CONFIG.dist_nose_head_contact_max_cm
 SOCIAL_NOSE_TAIL_CONTACT_DISTANCE_CM = DEFAULT_SOCIAL_HEURISTIC_CONFIG.dist_nose_tail_contact_max_cm
 SOCIAL_ALIGNED_HEADING_COSINE = 0.25
@@ -98,7 +98,7 @@ def policy_receipt(
         "proposal_member_set_budget": GROUP_PROPOSAL_SET_BUDGET,
     }
     receipt = {
-        "version": "confirmed_rules_v28",
+        "version": "confirmed_rules_v30",
         "requested_policy_revision": "2026-10-20-v28-user-overrides-v26-restorations-and-contact-onsets",
         "chasing_mean_speed_contract": "each participant real adjacent eligible path divided by adjacent-step time >= chasing_min_mean_speed_cm_s; no cross-gap jumps, missing time or imputed frames; 15cm/s explicit request, not calibrated optimum",
         "contact_onset_contract": "independent head-triangle and tail-root first-measured onset gates; per-class first-finite annotated-frame p90 from159 head/75 tail samples; onset must survive higher-priority arbitration; no retrospective painting before onset; full-data retrospective fit, no independent validation",
@@ -974,12 +974,14 @@ def _open_approach_mask(
     f: ExportedFeatures, edge: int, p: HeuristicParameters,
     social_config: SocialHeuristicConfig = DEFAULT_SOCIAL_HEURISTIC_CONFIG,
     *, direction_evidence: dict | None = None,
+    retained_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Directed closing with a fitted endpoint envelope, independent of contacts.
 
     v17.1 permits stationary, lateral and receding targets. The actor must still
     move toward the target while mutual distance shrinks. Only the completed
-    candidate prefix supplies onset, endpoint and validity evidence.
+    candidate prefix supplies onset, endpoint and validity evidence. When
+    arbitration removes support, each retained span must qualify on its own.
     """
     result = np.zeros(len(f.valid), bool)
     directed_candidates = np.zeros((2, len(f.valid)), bool)
@@ -995,6 +997,14 @@ def _open_approach_mask(
     ))
     left, right = int(f.pair_i[edge]), int(f.pair_j[edge])
     visible = f.valid[:, left] & f.valid[:, right]
+    retained = (np.ones(len(visible), bool) if retained_mask is None
+                else np.asarray(retained_mask, bool))
+    if retained.shape != visible.shape:
+        raise ValueError("retained Approach support must match the frame axis")
+    # Onset/endpoint geometry belongs to the retained event. Keep the original
+    # lagged motion context, otherwise an exactly minimum-duration prefix would
+    # need one extra frame merely to recompute its closing-speed lag.
+    span_start = np.maximum.accumulate(np.where(~retained, np.arange(len(visible)) + 1, 0))
     distance = np.asarray(f.pair_distance_cm[:, edge], float)
     minimum = max(1, int(np.ceil(social_config.approach_min_duration_s * f.fps - 1e-9)))
     lag = max(1, int(round(social_config.approach_min_duration_s * f.fps)))
@@ -1011,7 +1021,7 @@ def _open_approach_mask(
     orientation = observed_orientations(f)
     ratio = social_config.approach_window_min_valid_ratio
     for direction, (actor, target) in enumerate(((left, right), (right, left))):
-        surface_raw = np.asarray(surfaces[direction], float)
+        surface_raw = np.where(retained, np.asarray(surfaces[direction], float), np.nan)
         surface = _fill_short_nan_gaps(surface_raw, gap_frames)[0]
         offset = f.centers_cm[:, target] - f.centers_cm[:, actor]
         velocity = f.velocity_cm_s[:, actor]
@@ -1024,17 +1034,18 @@ def _open_approach_mask(
         directed &= ~pose_known | facing
         known = visible & np.isfinite(actor_speed) & np.isfinite(velocity).all(axis=1)
         hesitant = known & ~directed & ~(pose_known & ~facing) & np.isfinite(filled_distance)
-        eligible = visible & np.isfinite(filled_distance) & directed & closing
+        eligible = retained & visible & np.isfinite(filled_distance) & directed & closing
         eligible = _bridge_internal_gaps(
             eligible, np.isfinite(filled_distance), f.fps,
             maximum_gap_s=social_config.approach_window_max_gap_s,
             unknown=~known | hesitant,
         )
+        eligible &= retained
         for start, end in runs(eligible):
             # The lag is distance evidence, not a demand that an unmeasured
             # crop-boundary velocity already be directed. Anchor at the first
             # observed directed row inside that bounded lookback instead.
-            lookback = np.arange(max(0, start - lag), start + 1)
+            lookback = np.arange(max(int(span_start[start]), start - lag), start + 1)
             anchors = lookback[
                 visible[lookback] & directed[lookback]
                 & np.isfinite(surface_raw[lookback])
@@ -1466,9 +1477,9 @@ def _base_pair_rule_masks(
                     directed_chase & ~occupied, known, f.centers_cm,
                     left, right, f.fps, social_config)
             result["chasing"][:, edge] |= restored
-            result["approach"][:, edge] = _single_bout_mask(
-                result["approach"][:, edge] & ~restored, f.fps,
-                social_config.approach_min_duration_s)
+            result["approach"][:, edge] = _open_approach_mask(
+                f, edge, p, social_config,
+                retained_mask=result["approach"][:, edge] & ~restored)
             for name, kind, values, cap in (
                 ("head_contact", "head", head_directed, social_config.dist_nose_head_contact_max_cm),
                 ("tail_contact", "tail", tail_directed, social_config.dist_nose_tail_contact_max_cm),

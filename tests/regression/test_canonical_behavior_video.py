@@ -87,6 +87,209 @@ def event(start, end, actor=99, target=1):
                               dict(role_name="Approached", track_ids=[target])])
 
 
+@pytest.mark.parametrize("relabel", [False, True])
+def test_canonical_package_recrop_refreshes_semantics_and_media(source, tmp_path, relabel):
+    from mouse_behavior.evaluation.exported_dataset import discover_samples
+    from mouse_behavior.evaluation.segment_export import export_segment
+    video, cache, _ = source
+    binding, scale = bind_cache(video, cache, tmp_path / "tracks.sqlite",
+                                source_receipt=cache.parent / "source_receipt.json")
+    store = TrackStore(tmp_path / "tracks.sqlite")
+    events = merge_events([event(2, 9)])
+    events[0].update(role_support_frame_intervals=[[3, 8]], role_support_frame_count=5,
+                     role_status="event_direction_with_measured_support")
+    full = render_full_package(video, tmp_path / "full", store, events, binding, scale)
+    export_packages(tmp_path / "packages", Path(full["video_path"]), store, events, binding, scale)
+    record = discover_samples(tmp_path / "packages")[0]
+    annotation_path = Path(record.annotation_path)
+    annotation = json.loads(annotation_path.read_text())
+    annotation["future_semantic_field"] = {"unrecognized": True}
+    annotation_path.write_text(json.dumps(annotation))
+    result = export_segment(record, tmp_path / "recrop", start_frame=2, end_frame=5,
+                            behavior="Static" if relabel else "Approach",
+                            mouse_ids=(1,) if relabel else (1, 99), provenance={})
+    annotation = json.loads((tmp_path / "recrop/annotation.json").read_text())
+    metadata = json.loads((tmp_path / "recrop/metadata.json").read_text())
+    assert metadata["clip"]["decoded_duration_s"] == pytest.approx(.3)
+    assert metadata["clip"]["encoded_fps"] == result["verification"]["fps"]
+    assert "future_semantic_field" not in annotation
+    assert "event_id" not in annotation
+    assert metadata["provenance"]["original_annotation"]["event_id"] == events[0]["event_id"]
+    if relabel:
+        assert not {"canonical_behavior", "actor_id", "target_id", "role_status",
+                    "role_support_frame_intervals", "role_support_frame_count"}.intersection(annotation)
+    else:
+        assert annotation["canonical_behavior"] == "approach"
+        assert annotation["actor_id"] == 99 and annotation["target_id"] == 1
+        assert annotation["role_support_frame_intervals"] == [[0, 3]]
+        assert annotation["role_support_frame_count"] == 3
+
+
+def test_showcase_skips_source_shorter_than_requested_window(source, tmp_path):
+    from mouse_behavior.visualization.rendering import extract_behavior_clips
+    video, _, _ = source
+    events = tmp_path / "events.csv"
+    events.write_text("start_frame,end_frame,candidate_level,behavior\n0,11,individual,stationary\n")
+    output = tmp_path / "showcase"
+    extract_behavior_clips(video, events, output, clip_seconds=5)
+    summary = json.loads((output / "behavior_clip_summary.json").read_text())
+    assert summary["total_clips"] == 0
+    assert summary["insufficient_source_policy"] == "skip_incomplete_fixed_window"
+    assert not list(output.rglob("*.mp4"))
+
+
+@pytest.mark.parametrize("four_classes", [False, True])
+def test_showcase_early_eof_leaves_no_partial_clips(source, tmp_path, monkeypatch, four_classes):
+    from mouse_behavior.visualization import rendering
+    video, _, _ = source
+    events = tmp_path / "events.csv"
+    events.write_text("start_frame,end_frame,candidate_level,behavior\n0,11,strong,attack\n")
+    original = cv2.VideoCapture
+
+    class EarlyEOF:
+        def __init__(self, *args):
+            self.capture = original(*args)
+            self.reads = 0
+
+        def __getattr__(self, name):
+            return getattr(self.capture, name)
+
+        def read(self):
+            self.reads += 1
+            return self.capture.read() if self.reads <= 5 else (False, None)
+
+    monkeypatch.setattr(rendering.cv2, "VideoCapture", EarlyEOF)
+    output = tmp_path / "showcase"
+    extractor = rendering.extract_four_class_clips if four_classes else rendering.extract_behavior_clips
+    with pytest.raises((ValueError, RuntimeError), match="frames|decode"):
+        extractor(video, events, output, clip_seconds=.5)
+    assert not list(output.rglob("*.mp4"))
+    assert not list(output.glob("*manifest.csv"))
+
+
+@pytest.mark.parametrize("provider,field", [
+    ("social_heuristic_config", "approach_min_duration_s"),
+    ("group_heuristic_config", "clustering_final_stability_s"),
+])
+def test_rerender_rejects_runtime_duration_policy_drift(source, tmp_path, monkeypatch, provider, field):
+    from dataclasses import replace
+    import importlib
+    module = importlib.import_module("mouse_behavior.evaluation." + provider)
+    name = "DEFAULT_SOCIAL_HEURISTIC_CONFIG" if provider.startswith("social") else "DEFAULT_GROUP_HEURISTIC_CONFIG"
+    video, cache, _ = source
+    config = Path(__file__).resolve().parents[2] / "configs/default.yaml"
+    run_pipeline(video, cache, tmp_path / "original", config, mode="infer",
+                 source_receipt=cache.parent / "source_receipt.json")
+    monkeypatch.setattr(module, name, replace(getattr(module, name), **{field: .6}))
+    with pytest.raises(ValueError, match="policy|snapshot"):
+        run_pipeline(video, None, tmp_path / "drift", config, mode="full",
+                     events_from=tmp_path / "original")
+    assert not (tmp_path / "drift/full").exists()
+
+
+@pytest.mark.parametrize("change", ["legacy", "source_hash", "policy"])
+def test_rerender_rejects_incompatible_sealed_rule_binding(source, tmp_path, change):
+    video, cache, _ = source
+    config = Path(__file__).resolve().parents[2] / "configs/default.yaml"
+    original = tmp_path / "original"
+    run_pipeline(video, cache, original, config, mode="infer", source_receipt=cache.parent / "source_receipt.json")
+    path = original / "input_binding.json"
+    binding = json.loads(path.read_text())
+    if change == "legacy":
+        binding.pop("rule_runtime_snapshot")
+    elif change == "source_hash":
+        binding["rule_source_sha256"]["mouse_behavior.evaluation.pair_roles"] = "0" * 64
+    else:
+        binding["rule_policy"] = {"old_policy": True}
+    path.write_text(json.dumps(binding))
+    receipt_path = original / "run_receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["payload_sha256"]["input_binding.json"] = _sha256(path)
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="snapshot"):
+        run_pipeline(video, None, tmp_path / "rejected", config, mode="full", events_from=original)
+    assert not (tmp_path / "rejected/full").exists()
+
+
+def test_policy_snapshot_uses_portable_closure_and_full_temporal_defaults():
+    from mouse_behavior.canonical_video_pipeline import rule_execution_binding
+    from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
+    from mouse_behavior.behavior.posture_rules import DEFAULT_GROOMING_TEMPORAL
+    from dataclasses import asdict
+    binding = rule_execution_binding(HeuristicParameters(), "v3_review")
+    hashes = binding["rule_source_sha256"]
+    assert all(key.startswith("mouse_behavior.") and ":" not in key and "/" not in key for key in hashes)
+    assert "mouse_behavior.evaluation.pair_roles" in hashes
+    defaults = binding["rule_runtime_snapshot"]["module_defaults"]
+    assert defaults["mouse_behavior.behavior.posture_rules"]["DEFAULT_GROOMING_TEMPORAL"] == asdict(DEFAULT_GROOMING_TEMPORAL)
+
+
+def test_core_keeps_dispersal_endpoint_confirmation_from_context(tmp_path):
+    import sqlite3
+    from mouse_behavior.evaluation.exported_dataset_config import config_seed_parameters
+    database = tmp_path / "dispersal.sqlite"
+    fps, count = 10., 234
+    shape = np.array([[3.959, 0], [2.5, .8], [2.5, -.8], [1, 0],
+                      [-2, 1], [-2, -1], [-3.959, 0]])
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE frames(frame INTEGER PRIMARY KEY,payload TEXT)")
+        for frame in range(count):
+            time = frame / fps
+            x = 2 * min(time, 5) + .12 * max(time - 5, 0)
+            spread = .5 + max(time - 20, 0)
+            detections = []
+            for track, center in ((100, (x, -spread)), (101, (x, 0)), (102, (x, spread)), (103, (0, 2))):
+                points = (shape + center) * 4
+                detections.append(dict(track_id=track, box=[*points.min(axis=0), *points.max(axis=0)],
+                                       keypoints=[[*points[index], 1.] for index in (0, 2, 1, 3, 4, 5, 6)],
+                                       detection_confidence=1., class_id=0))
+            row = dict(frame=frame, time=time, source_frame=frame, source_fps=fps, detections=detections)
+            connection.execute("INSERT INTO frames VALUES(?,?)", (frame, json.dumps(row)))
+    params = config_seed_parameters({})
+    scale = dict(reference_body_cm=7.918, cm_per_pixel=.25)
+    store = TrackStore(database)
+    parent, _ = infer_window_events(store.window(0, count), fps, scale, params)
+    dispersal = [event for event in parent if event["canonical_behavior"] == "dispersal"]
+    assert dispersal and any(event["end_frame"] == count for event in dispersal)
+    result, _ = infer_video_events(store, {"source_video": {"fps": fps, "frame_count": count}}, scale, params)
+    children = [event for event in result if event["canonical_behavior"] == "dispersal"]
+    assert children and all(event["end_frame"] == count for event in children)
+    assert any(event.get("retained_complete_parent_for_semantics") for event in children)
+
+
+@pytest.mark.parametrize("mice", [1, 3])
+def test_lightweight_analysis_produces_source_cache_and_event_seal(source, tmp_path, mice):
+    import yaml
+    from mouse_behavior.config import load_config
+    from mouse_behavior.lightweight_behavior_inference import analyze
+    from mouse_behavior.pose_cache import verified_cache_source_binding
+    from mouse_behavior.visualization.rendering import render_behavior_video
+    video, cache, rows = source
+    for row in rows:
+        row["pose_detections"] = row["pose_detections"][:mice]
+    with gzip.open(cache / "yolo_results.000000.000000.pkl.gz", "wb") as stream:
+        pickle.dump(rows, stream)
+    status_path = cache / "yolo_results_status.json"
+    status = json.loads(status_path.read_text())
+    status.update(source_video_sha256=_sha256(video),
+                  chunk_sha256={path.name: _sha256(path) for path in cache.glob("*.pkl.gz")})
+    status_path.write_text(json.dumps(status))
+    config = load_config(Path(__file__).resolve().parents[2] / "configs/default.yaml")
+    config["adaptive_arena"]["enabled"] = False
+    config_path = tmp_path / "analysis_config.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    output = analyze(video, cache, config_path, tmp_path / "analysis", expected_mice=mice)
+    metadata = json.loads((output / "lightweight_analysis_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["source_fps"] == 10
+    assert metadata["source_binding"] == verified_cache_source_binding(video, cache, fps=10, frame_count=12)
+    for name, digest in metadata["event_files_sha256"].items():
+        assert digest == _sha256(output / name)
+    render_behavior_video(video, cache, output / "lightweight_behavior_events.csv", tmp_path / "sealed.mp4", expected_mice=mice)
+    receipt = json.loads((tmp_path / "sealed.identity.json").read_text())
+    assert receipt["source_video_sha256"] == _sha256(video)
+    assert receipt["source_binding_level"] == "sha256_and_path_timebase"
+
+
 def test_merge_only_continuous_same_roles_and_ids():
     merged = merge_events([event(0, 3), event(3, 5), event(6, 8), event(8, 10, 1, 99)])
     assert [(r["start_frame"], r["end_frame"]) for r in merged] == [(0, 5), (6, 8), (8, 10)]
@@ -152,7 +355,9 @@ def test_optin_posture_review_runs_real_pipeline_with_source_ledgers(source, tmp
     binding = json.loads((output / "input_binding.json").read_text())
     sources = binding["rule_source_sha256"]
     for filename in ("posture_rules.py", "posture_adapter.py", "posture_measurements.py"):
-        assert any(Path(path).name == filename and digest == _sha256(Path(path)) for path, digest in sources.items())
+        module = "mouse_behavior.behavior." + Path(filename).stem
+        path = Path(__file__).resolve().parents[2] / "src/mouse_behavior/behavior" / filename
+        assert sources[module] == _sha256(path)
     # Opt-in never changes these unreviewed candidates into confirmed labels.
     assert receipt["disabled_behaviors"] == ["grooming", "rearing"]
 

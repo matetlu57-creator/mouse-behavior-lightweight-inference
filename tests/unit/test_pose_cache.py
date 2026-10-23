@@ -3,8 +3,10 @@ from __future__ import annotations
 import gzip
 import json
 import pickle
+import hashlib
 
 import numpy as np
+import pytest
 
 from mouse_behavior.pose_cache import _payloads, build_cache
 
@@ -104,6 +106,7 @@ class _Capture:
 
 def test_build_cache_uses_ultralytics_track_and_persists_visual_ids(tmp_path, monkeypatch):
     monkeypatch.setattr("mouse_behavior.pose_cache.cv2.VideoCapture", lambda _path: _Capture())
+    (tmp_path / "video.mp4").write_bytes(b"mock capture source")
     model = _Model()
 
     output = build_cache(
@@ -120,6 +123,10 @@ def test_build_cache_uses_ultralytics_track_and_persists_visual_ids(tmp_path, mo
     with gzip.open(output / "yolo_results.000000.000000.pkl.gz", "rb") as handle:
         records = pickle.load(handle)
     assert [row["pose_detections"][0]["visual_track_id"] for row in records] == [101, 102]
+    status = json.loads((output / "yolo_results_status.json").read_text())
+    assert status["source_video_sha256"] == hashlib.sha256((tmp_path / "video.mp4").read_bytes()).hexdigest()
+    chunk = output / "yolo_results.000000.000000.pkl.gz"
+    assert status["chunk_sha256"] == {chunk.name: hashlib.sha256(chunk.read_bytes()).hexdigest()}
 
 
 def test_empty_ultralytics_track_frame_does_not_require_ids():
@@ -128,6 +135,7 @@ def test_empty_ultralytics_track_frame_does_not_require_ids():
 
 def test_untracked_detection_without_ultralytics_id_is_omitted(tmp_path, monkeypatch):
     monkeypatch.setattr("mouse_behavior.pose_cache.cv2.VideoCapture", lambda _path: _Capture())
+    (tmp_path / "video.mp4").write_bytes(b"mock capture source")
 
     class ModelWithOneUntrackedFrame(_Model):
         def track(self, frame, **kwargs):
@@ -148,3 +156,18 @@ def test_untracked_detection_without_ultralytics_id_is_omitted(tmp_path, monkeyp
     status = json.loads((output / "yolo_results_status.json").read_text(encoding="utf-8"))
     assert status["untracked_detection_count"] == 1
     assert status["untracked_detection_frame_count"] == 1
+
+
+def test_cache_never_seals_source_that_changed_during_build(tmp_path, monkeypatch):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"mock capture source")
+    monkeypatch.setattr("mouse_behavior.pose_cache.cv2.VideoCapture", lambda _path: _Capture())
+
+    class ChangingModel(_Model):
+        def track(self, frame, **kwargs):
+            video.write_bytes(b"changed bytes under same source filename")
+            return super().track(frame, **kwargs)
+
+    with pytest.raises(ValueError, match="source.*changed"):
+        build_cache(video, tmp_path / "cache", tmp_path / "model.pt", model=ChangingModel())
+    assert not (tmp_path / "cache/yolo_results_status.json").exists()

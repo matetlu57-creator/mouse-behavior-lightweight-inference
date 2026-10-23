@@ -38,6 +38,7 @@ from .config import load_config
 from .logging_config import configure_logging
 from .identity.labels import annotate_identity_labels
 from .identity.mtrack import load_identity_map
+from .pose_cache import _file_sha256, verified_cache_source_binding
 from .utils.rolling import rolling_corr as _rolling_corr  # noqa: F401
 from .utils.rolling import rolling_sum as _rolling_sum  # noqa: F401
 from .utils.timer import Timer
@@ -317,10 +318,7 @@ def analyze(
     ).start()
     output_dir.mkdir(parents=True, exist_ok=True)
     config = load_config(config_path)
-    configured_fps = config.pop("_fps_override", 29.329)
-    source_fps = float(configured_fps if fps_override is None else fps_override)
-    if not np.isfinite(source_fps) or source_fps <= 0.0:
-        raise ValueError(f"视频 FPS 必须是正数，实际为：{source_fps}")
+    configured_fps = config.pop("_fps_override", None)
     sample_stride = max(int(sample_stride), 1)
     total_frames = _cache_total_frames(cache_dir)
     if max_frames is not None:
@@ -335,6 +333,12 @@ def analyze(
     video_cap.release()
     if width <= 0 or height <= 0:
         raise RuntimeError(f"无法读取源视频尺寸: {video_path}")
+    source_fps = float(fps_override if fps_override is not None else (
+        configured_fps if configured_fps is not None else video_fps))
+    if not np.isfinite(source_fps) or source_fps <= 0 or not math.isclose(source_fps, video_fps, rel_tol=1e-6, abs_tol=1e-6):
+        raise ValueError("analysis source FPS must match the video/cache timebase")
+    source_binding = verified_cache_source_binding(video_path, cache_dir, fps=video_fps,
+                                                   frame_count=video_frame_count)
     setup_timer.stop()
 
     arena_timer = Timer(
@@ -566,8 +570,14 @@ def analyze(
         0,
     )
     csv_timer.stop()
+    if verified_cache_source_binding(video_path, cache_dir, fps=video_fps,
+                                     frame_count=video_frame_count) != source_binding:
+        raise ValueError("source/cache binding changed during analysis; rerun analysis")
     metadata = {
         "source_video": str(video_path),
+        "source_binding": source_binding,
+        "event_files_sha256": {name: _file_sha256(output_dir / name) for name in (
+            "lightweight_behavior_events.csv", "lightweight_contact_events.csv")},
         "yolo_cache": str(cache_dir),
         "config": str(config_path),
         "analysis_mode": "behavior_from_external_trajectories",

@@ -2,6 +2,10 @@
 
 ## Responsibility boundary
 
+See the [2026-10-23 boundary and media audit repair](behavior-boundary-media-audit-2026-10-23.md)
+for event arbitration, role changes, late group origins, sealed media inputs,
+recropping, historical rerender compatibility and validation limits.
+
 The system has three explicit layers:
 
 1. Ultralytics reads video frames and emits Pose detections with a persistent `visual_track_id`.

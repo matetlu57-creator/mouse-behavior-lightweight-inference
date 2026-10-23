@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mouse_behavior import lightweight_behavior_inference as lightweight
 
@@ -62,6 +63,7 @@ def test_pair_metrics_subset_preserves_selected_full_pair_columns():
     rng = np.random.default_rng(7)
     frames, mice = 8, 4
     kin = {
+        "reference_body_cm": 9.25,
         "centers_cm": rng.normal(size=(frames, mice, 2)).cumsum(axis=0),
         "head_cm": rng.normal(size=(frames, mice, 2)),
         "keypoints_cm": rng.normal(size=(frames, mice, lightweight.KEYPOINTS, 2)),
@@ -145,6 +147,7 @@ def test_pair_metrics_frame_mask_only_exposes_features_inside_windows():
     rng = np.random.default_rng(11)
     frames, mice = 8, 3
     kin = {
+        "reference_body_cm": 9.25,
         "centers_cm": rng.normal(size=(frames, mice, 2)).cumsum(axis=0),
         "head_cm": rng.normal(size=(frames, mice, 2)),
         "keypoints_cm": rng.normal(size=(frames, mice, lightweight.KEYPOINTS, 2)),
@@ -182,6 +185,13 @@ def test_pair_metrics_frame_mask_only_exposes_features_inside_windows():
     ]
     assert np.isnan(metrics["nose_body_ab"][[0, 1, 6, 7], 0]).all()
     assert (metrics["trajectory_corr"][[0, 1, 6, 7], 0] == 0.0).all()
+
+
+@pytest.mark.parametrize("value", [None, 0, -1, float("nan"), float("inf"), True])
+def test_pair_metrics_rejects_missing_or_invalid_body_reference(value):
+    kin = {} if value is None else {"reference_body_cm": value}
+    with pytest.raises(ValueError, match="reference_body_cm"):
+        lightweight._pair_metrics(kin, 10.)
 
 
 def test_rolling_sum_resets_pair_history_outside_active_windows():

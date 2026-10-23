@@ -215,8 +215,9 @@ def test_pair_contact_feature_boundary_uses_measured_body_basis(gap_cm, contact_
               "pose_quality": np.ones((60, 2)), "body_lengths_px": np.full((60, 2), 100.)}
     kin = _kinematics(tracks, fps=30., reference_body_cm=10.7, cm_per_pixel=.1)
     metrics, pair_i, pair_j = _pair_metrics(kin, 30.)
-    metrics["reference_body_cm"] = kin["reference_body_cm"]
+    assert metrics["reference_body_cm"] == 10.7
     pair = _pair_dataframe(metrics, 0, 0, 1, pair_i, pair_j, 30., .1)
+    np.testing.assert_allclose(pair["center_distance_body_lengths"], metrics["distance"][:, 0] / 10.7)
     assert pair["weak_contact"].all() == contact_expected
     assert not pair["strong_contact"].any()
     assert (metrics["repeated_contact"] > 0).any() == contact_expected

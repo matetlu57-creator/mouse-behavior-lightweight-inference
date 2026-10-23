@@ -14,6 +14,7 @@ def test_pair_workset_preserves_full_pair_to_candidate_index_mapping():
     heading[..., 0] = 1.0
     keypoints = np.repeat(centers[:, :, None, :], lightweight.KEYPOINTS, axis=2)
     kin = {
+        "reference_body_cm": 7.918,
         "centers_cm": centers,
         "head_cm": centers.copy(),
         "keypoints_cm": keypoints,
