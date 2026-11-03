@@ -43,7 +43,7 @@ def source_key(sample_id):
     return hashlib.sha256(sample_id.encode("utf-8")).hexdigest()[:16]
 
 
-def select_windows(windows, all_windows):
+def select_windows(windows, all_windows=True):
     if all_windows:
         return windows
     selected = {}
@@ -377,7 +377,10 @@ def main():
     parser.add_argument("--human-audit", type=Path)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--render-only", action="store_true")
-    parser.add_argument("--all-windows", action="store_true")
+    parser.add_argument("--all-windows", action="store_true", default=True,
+                        help="Export all qualifying behavior windows without restricting to single representative window")
+    parser.add_argument("--single-representative-window", dest="all_windows", action="store_false",
+                        help="Retain only one representative continuous core per behavior/exact ID set")
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
     args.output_dir = args.output_dir.resolve()

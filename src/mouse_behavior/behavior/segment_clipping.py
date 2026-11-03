@@ -225,7 +225,7 @@ def update_segment_bounds(
             updated[key] = clipped
             count_key = key.replace("_intervals", "_count")
             updated[count_key] = int(sum(b - a for a, b in clipped))
-        elif key in ("canonical_support_frame_intervals", "observed_all_participants_frame_intervals"):
+        elif key == "observed_all_participants_frame_intervals":
             updated[key] = [[int(new_start), int(new_end)]]
             updated[key.replace("_intervals", "_count")] = int(new_end - new_start)
 
@@ -608,7 +608,7 @@ def refine_dispersal_segments(
 
         valid_end_indices = [
             i for i in range(best_i + 1, len(frames_arr))
-            if int(frames_arr[i]) >= min_end_frame
+            if int(frames_arr[i]) + 1 >= min_end_frame
             and int(frames_arr[i]) <= max(target_end, min_end_frame + int(round(2.0 * fps)))
             and int(frames_arr[i]) in all_obs_frames
             and (vals_arr[i] - start_rad) >= min_net_gain_px
@@ -616,14 +616,14 @@ def refine_dispersal_segments(
         if not valid_end_indices:
             valid_end_indices = [
                 i for i in range(best_i + 1, len(frames_arr))
-                if int(frames_arr[i]) >= min_end_frame
+                if int(frames_arr[i]) + 1 >= min_end_frame
                 and int(frames_arr[i]) in all_obs_frames
                 and (vals_arr[i] - start_rad) >= min_net_gain_px
             ]
         if not valid_end_indices:
             continue
 
-        end_i = valid_end_indices[0]
+        end_i = min(valid_end_indices, key=lambda idx: abs(int(frames_arr[idx]) + 1 - target_end))
         new_e = int(frames_arr[end_i]) + 1
         if (new_e - new_s) / fps <= min_duration_s:
             continue
@@ -701,7 +701,7 @@ def refine_group_locomotion_segments(
         true_s = start + int(all_obs_indices[0])
         true_e = start + int(all_obs_indices[-1]) + 1
         dur_s = (true_e - true_s) / fps
-        if dur_s <= min_duration_s:
+        if dur_s < min_duration_s - 1e-9:
             continue
 
         cropped = update_segment_bounds(event, true_s, true_e, fps, suffix="gloco_crop")
@@ -904,9 +904,12 @@ def select_behavior_segments(
             mids = tuple(int(m) for m in cand.get("mouse_ids", ()))
             s = int(cand["start_frame"])
             e = int(cand["end_frame"])
+            is_directed = cand.get("canonical_behavior") in {"approach", "chase"}
+            cand_ids = tuple(mids) if is_directed else tuple(sorted(mids))
             if strict_non_overlapping_same_ids:
                 overlaps = any(
-                    tuple(int(m) for m in existing.get("mouse_ids", ())) == mids
+                    (tuple(int(m) for m in existing.get("mouse_ids", ())) if is_directed
+                     else tuple(sorted(int(m) for m in existing.get("mouse_ids", ())))) == cand_ids
                     and not (e <= int(existing["start_frame"]) or s >= int(existing["end_frame"]))
                     for existing in chosen
                 )
@@ -915,7 +918,7 @@ def select_behavior_segments(
                     continue
             if time_bucket_seconds is not None:
                 bucket_frames = max(1, int(round(time_bucket_seconds * fps)))
-                bkey = (mids, s // bucket_frames)
+                bkey = (cand_ids, s // bucket_frames)
                 if bkey in used_buckets:
                     rejected_counts["duplicate_or_overlapping"] += 1
                     continue

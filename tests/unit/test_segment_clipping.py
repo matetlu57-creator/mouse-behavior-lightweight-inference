@@ -404,3 +404,117 @@ def test_segment_clipping_edge_cases_and_error_paths():
     )
     assert len(selected_pairs) == 2
 
+
+def test_exact_duration_boundaries_dispersal_and_group_locomotion():
+    fps = 30.0
+    # Qualified >5.0s dispersal (155 frames > 150 at 30 fps)
+    disp_rows = []
+    for f in range(155):
+        spread = min(60.0, max(0.0, (f - 10) * 1.5))
+        disp_rows.append({
+            "frame": f,
+            "source_frame": f,
+            "time": f / fps,
+            "detections": [
+                _make_detection(1, (200.0 - spread, 200.0)),
+                _make_detection(2, (200.0 + spread, 200.0)),
+                _make_detection(3, (200.0, 200.0 + spread)),
+            ],
+        })
+    disp_ev = {
+        "event_id": "dispersal_qual_155",
+        "canonical_behavior": "dispersal",
+        "behavior": "Dispersal",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": 155,
+    }
+    res_disp = refine_dispersal_segments([disp_ev], _DummyStore(disp_rows), {"source_video": {"fps": fps}})
+    assert len(res_disp) == 1
+    assert (res_disp[0]["end_frame"] - res_disp[0]["start_frame"]) / fps > 5.0
+
+    # Group locomotion with explicit 1.0s duration requirement override
+    gloco_rows = [
+        {
+            "frame": f,
+            "source_frame": f,
+            "time": f / fps,
+            "detections": [
+                _make_detection(1, (50.0 + f * 2.0, 100.0)),
+                _make_detection(2, (60.0 + f * 2.0, 105.0)),
+                _make_detection(3, (55.0 + f * 2.0, 110.0)),
+            ],
+        }
+        for f in range(35)
+    ]
+    gloco_ev = {
+        "event_id": "group_loco_35",
+        "canonical_behavior": "group_locomotion",
+        "behavior": "GroupLocomotion",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": 35,
+        "canonical_support_frame_intervals": [[0, 35]],
+        "canonical_support_frame_count": 35,
+    }
+    binding_1s = {
+        "source_video": {"fps": fps},
+        "effective_parameters": {"group_locomotion_min_duration_s": 1.0},
+    }
+    res_gloco = refine_group_locomotion_segments(
+        [gloco_ev],
+        _DummyStore(gloco_rows),
+        binding_1s,
+        min_duration_s=1.0,
+        min_support_frames=15,
+    )
+    assert len(res_gloco) == 1
+    assert (res_gloco[0]["end_frame"] - res_gloco[0]["start_frame"]) / fps > 1.0
+
+
+def test_symmetrical_mouse_ids_deduplication():
+    fps = 30.0
+    ev1 = {
+        "event_id": "nhc_1",
+        "canonical_behavior": "nose_head_contact",
+        "behavior": "NoseHeadContact",
+        "mouse_ids": [1, 2],
+        "start_frame": 0,
+        "end_frame": 30,
+        "observed_all_participants_frame_count": 30,
+        "canonical_support_frame_count": 30,
+    }
+    # ev2 has reversed mouse_ids [2, 1] and overlaps
+    ev2 = {
+        "event_id": "nhc_2",
+        "canonical_behavior": "nose_head_contact",
+        "behavior": "NoseHeadContact",
+        "mouse_ids": [2, 1],
+        "start_frame": 10,
+        "end_frame": 40,
+        "observed_all_participants_frame_count": 25,
+        "canonical_support_frame_count": 25,
+    }
+    selected, summary = select_behavior_segments(
+        [ev1, ev2],
+        binding={"source_video": {"fps": fps}},
+        require_endpoint_visibility=False,
+    )
+    assert len(selected) == 1
+    assert summary["rejected_counts"]["duplicate_or_overlapping"] == 1
+
+
+def test_update_segment_bounds_does_not_synthesize_canonical_support():
+    fps = 30.0
+    event_without_support = {
+        "event_id": "huddle_test",
+        "canonical_behavior": "huddle",
+        "behavior": "Huddling",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": 150,
+    }
+    updated = update_segment_bounds(event_without_support, 10, 140, fps)
+    assert "canonical_support_frame_intervals" not in updated
+    assert "canonical_support_frame_count" not in updated
+
