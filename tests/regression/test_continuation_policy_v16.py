@@ -163,17 +163,30 @@ def _approaching_pair():
 
 
 @pytest.mark.parametrize("missing_detection", [False, True])
-def test_real_geometry_approach_survives_one_unknown_frame(missing_detection):
+def test_legacy_geometry_approach_survives_one_unknown_frame(missing_detection):
     f = _approaching_pair()
-    control = confirmed_rules._open_approach_mask(f, 0, audit.confirmed_params())
+    # V16 allowed unknown geometry to bridge; V32 explicitly splits there.
+    config = replace(DEFAULT_SOCIAL_HEURISTIC_CONFIG, approach_require_no_body_contact=False)
+    control = confirmed_rules._open_approach_mask(f, 0, audit.confirmed_params(), config)
     assert control.sum() == 60, "a negative-only fixture cannot verify the bridge"
     f.heading_unit[30, 0] = np.nan
     if missing_detection:
         f.valid[30] = False
         f.pair_distance_cm[30] = np.nan
         f.collective_keypoints_cm[30] = np.nan
-    bridged = confirmed_rules._open_approach_mask(f, 0, audit.confirmed_params())
+    bridged = confirmed_rules._open_approach_mask(f, 0, audit.confirmed_params(), config)
     assert np.array_equal(control, bridged)
+
+
+def test_current_approach_does_not_bridge_unknown_body_separation():
+    f = _approaching_pair()
+    assert confirmed_rules._open_approach_mask(f, 0, audit.confirmed_params()).all()
+    f.valid[30] = False
+    f.pair_distance_cm[30] = np.nan
+    f.collective_keypoints_cm[30] = np.nan
+    # Both remaining pieces independently fail strict >1 s; neither may
+    # borrow the unknown frame or the other piece's displacement.
+    assert not confirmed_rules._open_approach_mask(f, 0, audit.confirmed_params()).any()
 
 
 def test_real_geometry_approach_rejects_a_gap_above_the_ratio_and_duration_limits():

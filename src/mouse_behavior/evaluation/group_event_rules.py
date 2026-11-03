@@ -22,6 +22,7 @@ from .screening_signals import ScreenPolicy, runs
 from . import screening_signals
 from .event_frames import FrameIntervals, mask_intervals
 from .clustering_formation import formation_masks
+from mouse_behavior.behavior.reviewed_comparisons import nearest_comparison_distances
 
 
 # [ERA 2026-10-16 group-v16.2] Bumped from
@@ -32,7 +33,7 @@ from .clustering_formation import formation_masks
 # episode span, and adds the single-degraded-recipient region-gap fallback.
 # policy_receipt() publishes this string into validation receipts, so a group
 # run is now version-separable from v14.
-GROUP_RULE_REVISION = "2026-10-23-group-v30-episode-bound-departure-origins"
+GROUP_RULE_REVISION = "2026-10-29-v34.1-member-verified-complete-huddle"
 NEIGHBOR_BODY_LENGTHS = 1.25
 MAX_PROPOSALS = 160
 MIN_MOTION_SUPPORT_SECONDS = 0.15
@@ -58,6 +59,7 @@ class _GroupProcess:
     evidence: float = 0.0
     frames: FrameIntervals = ()
     support_frames: FrameIntervals | None = None
+    participants: tuple[int, ...] | None = None
 
 
 def group_separation(distances: np.ndarray, percentile: float = 75.0) -> np.ndarray:
@@ -308,6 +310,26 @@ def _huddle_event(compact: np.ndarray, enough: np.ndarray,
     return support_frames / fps if support_frames else 0.0
 
 
+def _huddle_windows(compact, enough, observed, fps, minimum_s, maximum_gap_s):
+    """All maximal supported processes, separated by observed contradictions.
+
+    A short unknown interior can preserve a process but supplies no compact
+    evidence. Long unknown interiors split episodes instead of hiding a valid
+    bout on either side. Leading/trailing unknowns never extend its endpoints.
+    """
+    envelope = ~(enough & ~compact)
+    for low, high in runs(~compact):
+        if (high - low) / fps > maximum_gap_s + 1e-9:
+            envelope[low:high] = False
+    windows = []
+    for low, high in runs(envelope):
+        start, stop, support = _huddle_window(compact[low:high], enough[low:high],
+            observed[low:high], fps, minimum_s, max_interior_unknown_s=maximum_gap_s)
+        if support:
+            windows.append((low + start, low + stop, support))
+    return windows
+
+
 def _window_positions(held: np.ndarray, window: tuple[int, int, int]) -> tuple[int, ...]:
     """Member POSITIONS the stable window supports, i.e. its bounded ID union.
 
@@ -435,9 +457,6 @@ def _clustering_process(f: ExportedFeatures, members: tuple[int, ...], near: np.
                 if not len(active):
                     continue
                 onset = int(active[0]) - 1
-                # Restore V26's full observed dense-state window, with a new
-                # measured formation gate. The state window cannot supply
-                # missing actor travel or turn a static pile into formation.
                 for arrival in range(max(low, onset + 1), high - minimum + 1):
                     delta = actor_centers[arrival] - actor_centers[onset]
                     net = float(np.linalg.norm(delta))
@@ -727,13 +746,25 @@ def _departure_process_mask(centers: np.ndarray, observed: np.ndarray,
     # contradictory evidence, so no pause bridge may carry an event across it.
     returns = np.zeros(count, bool)
     outside_seen = np.zeros(len(leaving), bool)
+    start_positions = np.full((len(leaving), 2), np.nan, dtype=float)
+    for slot in range(len(leaving)):
+        valid_slots = np.flatnonzero(valid[start:, slot])
+        if len(valid_slots) > 0:
+            start_positions[slot] = positions[start + valid_slots[0], slot]
+
     for frame in range(start, count):
         for slot in range(len(leaving)):
             if not valid[frame, slot]:
                 continue
-            outside = cv2.pointPolygonTest(
-                hull, tuple(map(float, positions[frame, slot])), False) < 0
-            if outside_seen[slot] and not outside:
+            dist = cv2.pointPolygonTest(
+                hull, tuple(map(float, positions[frame, slot])), True)
+            returned_to_start = (
+                np.isfinite(start_positions[slot]).all()
+                and np.linalg.norm(positions[frame, slot] - start_positions[slot]) <= 0.01
+            )
+            inside = (dist > 0.25) | returned_to_start
+            outside = dist <= 0.0
+            if outside_seen[slot] and inside:
                 returns[frame] = True
             outside_seen[slot] = outside
     active[returns] = False
@@ -1060,8 +1091,10 @@ def _group_behavior_candidates(f: ExportedFeatures, p: HeuristicParameters,
     if behavior == "dispersal":
         velocity = _observed_departure_velocity(f)
     result = []
-    for members in (_proposal_sets(f, near, velocity, speed, p, proposals)
-                    if behavior != "dispersal" else ()):
+    member_proposals = list(_proposal_sets(f, near, velocity, speed, p, proposals)
+                            if behavior != "dispersal" else ())
+    scheduled_members = set(member_proposals)
+    for members in member_proposals:
         # One geometry per proposal. _clustering_event used to rebuild the
         # identical result, and the plain _geometry call here was dead: its
         # compact/enough were discarded and _huddle_geometry returns the same
@@ -1091,38 +1124,49 @@ def _group_behavior_candidates(f: ExportedFeatures, p: HeuristicParameters,
                                         process.evidence, process.frames, process.support_frames))
             continue
         huddle_compact, huddle_enough, observed, _, held = geometry
-        window = _huddle_window(
+        windows = _huddle_windows(
             huddle_compact, huddle_enough, observed, f.fps, p.huddle_min_duration_s,
-            max_interior_unknown_s=p.huddle_max_gap_s,
-        ) if behavior == "huddle" else (0, 0, 0)
-        huddle_positions = _window_positions(held, window)
-        huddle_mask = np.zeros(len(f.valid), bool)
-        huddle_mask[window[0]:window[1]] = huddle_compact[window[0]:window[1]]
-        values = {
-            # Compact support frames, not the unknown episode envelope.
-            "huddle": _GroupProcess(window[2] / f.fps if window[2] else 0.0,
-                                     mask_intervals(huddle_mask)),
-            "social_clustering": _clustering_process(
-                f, members, near, velocity, speed, config,
-                neighbor_cm=neighbor, max_gap_s=p.huddle_max_gap_s,
-                geometry=geometry,
-            ) if behavior == "social_clustering" else _GroupProcess(),
-        }
-        for label, process in values.items():
-            duration = process.evidence
-            if duration <= 0 or label != behavior:
+            p.huddle_max_gap_s,
+        )
+        for window in windows:
+            huddle_positions = _window_positions(held, window)
+            if len(huddle_positions) < 3:
                 continue
-            # Huddling publishes the ID union bounded by its stable window;
-            # the other two keep the whole proposal, whose own gates already
-            # require every member to be simultaneously supported.
-            positions = (huddle_positions if label == "huddle"
-                         else tuple(range(len(members))))
-            if len(positions) < 3 or not observed[:, list(positions)].any(axis=0).all():
+            published_members = tuple(members[position] for position in huddle_positions)
+            if published_members != members:
+                # The omitted mouse may have been a bridge in the proposal's
+                # connectivity graph. Reuse neither its compact mask nor its
+                # endpoints as evidence for the published participant subset.
+                # Derived sets strictly shrink, so this queue terminates; the
+                # geometry cache and scheduled set avoid repeated evaluation.
+                if published_members not in scheduled_members:
+                    scheduled_members.add(published_members)
+                    member_proposals.append(published_members)
+                continue
+            # Preserve the approved bounded ID-union/occlusion semantics.
+            # Simultaneous tracks for every member on every frame would turn
+            # an ordinary detector dropout into a false end of a stable pile.
+            # A member still cannot be backfilled before its first support or
+            # retained beyond its last observed/verified-held position.
+            supported = [np.flatnonzero(held[window[0]:window[1], position]) + window[0]
+                         for position in huddle_positions]
+            first = max(int(indices[0]) for indices in supported)
+            last = min(int(indices[-1]) + 1 for indices in supported)
+            support_mask = np.zeros(len(f.valid), bool)
+            support_mask[first:last] = huddle_compact[first:last]
+            support_count = int(support_mask.sum())
+            # Retain the existing minimum amount of compact evidence, without
+            # demanding an uninterrupted support run or cutting a longer event
+            # down to that minimum. Unknown rows are not credited or filled.
+            if ((last - first) / f.fps + 1e-12 < p.huddle_min_duration_s
+                    or support_count / f.fps + 1e-12 < p.huddle_min_duration_s):
+                continue
+            if not observed[first:last, list(huddle_positions)].any(axis=0).all():
                 continue
             result.append(Candidate(
-                label,
-                tuple(sorted(int(f.track_ids[members[position]]) for position in positions)),
-                duration, process.frames, process.support_frames))
+                "huddle",
+                tuple(sorted(int(f.track_ids[members[position]]) for position in huddle_positions)),
+                support_count / f.fps, ((first, last),), mask_intervals(support_mask)))
     for start, stop, members in (_compact_origin_episodes(
             f, near, neighbor, velocity_cm_s=velocity, config=config)
                     if behavior == "dispersal" else ()):
@@ -1153,10 +1197,69 @@ def _group_behavior_candidates(f: ExportedFeatures, p: HeuristicParameters,
                         if len(endpoints) > 1 else 0.0)
             if duration > 0:
                 intervals = tuple((low + start, high + start) for low, high in mask_intervals(phase))
-                candidate = Candidate("dispersal", tuple(sorted(int(f.track_ids[members[slot]])
-                                                                for slot in leaving)), duration, intervals)
-                if candidate not in result:
-                    result.append(candidate)
+                leaving_subset = tuple(sorted(int(f.track_ids[members[slot]]) for slot in leaving))
+                if not any(c.target_ids == leaving_subset and c.frame_intervals == intervals for c in result):
+                    result.append(Candidate("dispersal", leaving_subset, duration, intervals))
+                full_group = tuple(sorted(int(f.track_ids[m]) for m in members))
+                if full_group != leaving_subset:
+                    displacements = [
+                        float(np.nanmax(np.linalg.norm(f.centers_cm[start:stop, m] - f.centers_cm[start, m], axis=1)))
+                        for m in members if f.valid[start, m]
+                    ]
+                    ref_body = (
+                        float(f.reference_body_cm)
+                        if f.reference_body_cm is not None and f.reference_body_cm > 0
+                        else 7.918
+                    )
+                    min_disp = 0.18 * ref_body
+                    if len(displacements) == len(members) and all(d >= min_disp for d in displacements):
+                        if not any(c.target_ids == full_group and c.frame_intervals == intervals for c in result):
+                            result.append(Candidate("dispersal", full_group, duration, intervals))
+    if behavior == "social_clustering" and len(result) > 1:
+        cand_masks = []
+        for cand in result:
+            m = np.zeros(len(f.valid), bool)
+            for s, e in (cand.frame_intervals or ()):
+                m[s:e] = True
+            cand_masks.append(m)
+        n = len(result)
+        adj = [[] for _ in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                if (cand_masks[i] & cand_masks[j]).any() and len(set(result[i].target_ids) & set(result[j].target_ids)) >= 2:
+                    adj[i].append(j)
+                    adj[j].append(i)
+        visited = set()
+        for i in range(n):
+            if i not in visited:
+                comp = []
+                queue = [i]
+                visited.add(i)
+                while queue:
+                    curr = queue.pop(0)
+                    comp.append(curr)
+                    for nbr in adj[curr]:
+                        if nbr not in visited:
+                            visited.add(nbr)
+                            queue.append(nbr)
+                if len(comp) > 1:
+                    union_ids = set()
+                    union_mask = np.zeros(len(f.valid), bool)
+                    for idx in comp:
+                        union_ids.update(result[idx].target_ids)
+                        union_mask |= cand_masks[idx]
+                    if len(union_ids) > max(len(result[idx].target_ids) for idx in comp):
+                        union_intervals = tuple(mask_intervals(union_mask))
+                        union_duration = sum((e - s) for s, e in union_intervals) / f.fps
+                        if union_duration > 0:
+                            cand = Candidate(
+                                "social_clustering",
+                                tuple(sorted(union_ids)),
+                                union_duration,
+                                union_intervals,
+                            )
+                            if cand not in result:
+                                result.append(cand)
     return tuple(result)
 
 
@@ -1180,11 +1283,12 @@ def group_rule_candidates(f: ExportedFeatures, p: HeuristicParameters,
                  for candidate in _group_behavior_candidates(f, p, proposals, config, name, geometry_cache))
 
 
-def isolation_summaries(f: ExportedFeatures) -> dict[str, dict[str, float | int | None]]:
+def isolation_summaries(f: ExportedFeatures, excluded_pairs=()) -> dict[str, dict[str, float | int | None]]:
     result = {}
-    comparison = f.valid & (f.valid.sum(axis=1) >= 2)[:, None] & np.isfinite(f.nearest_distance_cm)
+    nearest = nearest_comparison_distances(f, excluded_pairs)
+    comparison = f.valid & (f.valid.sum(axis=1) >= 2)[:, None] & np.isfinite(nearest)
     for slot, track in enumerate(f.track_ids):
-        values = f.nearest_distance_cm[comparison[:, slot], slot]
+        values = nearest[comparison[:, slot], slot]
         result[str(int(track))] = {
             "observed_frames": len(values), "minimum_cm": float(values.min()) if len(values) else None,
             "q05_cm": float(np.quantile(values, 0.05)) if len(values) else None,
@@ -1195,13 +1299,20 @@ def isolation_summaries(f: ExportedFeatures) -> dict[str, dict[str, float | int 
 
 
 def isolation_candidates(f: ExportedFeatures, p: HeuristicParameters,
-                         config: GroupHeuristicConfig = DEFAULT_GROUP_HEURISTIC_CONFIG) -> tuple[Candidate, ...]:
+                         config: GroupHeuristicConfig = DEFAULT_GROUP_HEURISTIC_CONFIG, *, excluded_pairs=()) -> tuple[Candidate, ...]:
     result = []
-    for slot, (track, row) in enumerate(isolation_summaries(f).items()):
+    nearest = nearest_comparison_distances(f, excluded_pairs)
+    for slot, (track, row) in enumerate(isolation_summaries(f, excluded_pairs).items()):
         seconds = float(row["observed_frames"]) / f.fps
         if (row["minimum_cm"] is not None and row["minimum_cm"] > p.isolation_distance_cm
                 and seconds > max(p.isolation_min_duration_s, config.isolation_min_duration_s)):
             mask = (f.valid[:, slot] & (f.valid.sum(axis=1) >= 2)
-                    & np.isfinite(f.nearest_distance_cm[:, slot]))
-            result.append(Candidate("isolation", (int(track),), seconds, mask_intervals(mask)))
+                    & np.isfinite(nearest[:, slot]))
+            indices = np.flatnonzero(mask)
+            # The rule has always required total valid comparison time, not
+            # uninterrupted detections. Preserve one observed process envelope
+            # and carry actual comparison rows separately. No pose, identity,
+            # distance, or effective time is filled across the unknown rows.
+            result.append(Candidate("isolation", (int(track),), seconds,
+                ((int(indices[0]), int(indices[-1]) + 1),), mask_intervals(mask)))
     return tuple(result)

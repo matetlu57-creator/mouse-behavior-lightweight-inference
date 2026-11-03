@@ -27,8 +27,8 @@ def _pose(f):
 def _approach(target_motion=(0., 0.)):
     f = audit.features(60, 2, reference_body_cm=7.918)
     time = np.arange(60) / f.fps
-    f.centers_cm[:, 0, 0] = 6.5 * time
-    f.centers_cm[:, 1, 0] = 18. + target_motion[0] * time
+    f.centers_cm[:, 0, 0] = 9. * time
+    f.centers_cm[:, 1, 0] = 24. + target_motion[0] * time
     f.centers_cm[:, 1, 1] = target_motion[1] * time
     audit.sync(f)
     audit.resync_kinematics(f)

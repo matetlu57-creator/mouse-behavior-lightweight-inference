@@ -3,6 +3,8 @@
 import importlib.util
 from pathlib import Path
 
+from tests.regression.legacy_social_profile import LEGACY_SOCIAL
+
 import numpy as np
 import pytest
 
@@ -53,7 +55,7 @@ def test_public_group_outputs_retain_exact_process_frames():
         (group_fixtures._locomotion, "group_locomotion"),
         (lambda: group_fixtures._clustering(140), "social_clustering"),
         (lambda: group_fixtures._dispersal(180), "dispersal"),
-        (group_fixtures._huddle_with_unknown_gaps, "huddle"),
+        (group_fixtures._huddle_with_independently_qualified_bout, "huddle"),
     ]:
         f = fixture()
         candidates = group.group_rule_candidates(f, params, (), behaviors=(behavior,))
@@ -140,7 +142,7 @@ def test_social_priority_preserves_later_nonoverlapping_attack(monkeypatch):
     monkeypatch.setattr(social, "_open_approach_mask", lambda *a, **k: approach)
     monkeypatch.setattr(social, "_attack_action_mask", lambda *a, **k: attack)
     monkeypatch.setattr(social, "_chase_mask", lambda *a, **k: np.zeros(120, bool))
-    result = social.pair_rule_masks(f, audit.confirmed_params())
+    result = social.pair_rule_masks(f, audit.confirmed_params(), LEGACY_SOCIAL)
     np.testing.assert_array_equal(result["approach"][:, 0], approach)
     np.testing.assert_array_equal(result["attack"][:, 0], attack)
     assert not (result["approach"] & result["attack"]).any()
@@ -164,7 +166,7 @@ def test_attack_keeps_directed_deceleration_after_a_real_acceleration_trigger(mo
         return velocity, acceleration
 
     monkeypatch.setattr(social, "_local_quadratic_point_kinematics", measured)
-    result = social._attack_action_mask(f, 0)
+    result = social._attack_action_mask(f, 0, LEGACY_SOCIAL)
     assert result[5:23].all(), "a directed pounce does not end when acceleration turns negative"
     assert not result[:5].any() and not result[23:].any()
 

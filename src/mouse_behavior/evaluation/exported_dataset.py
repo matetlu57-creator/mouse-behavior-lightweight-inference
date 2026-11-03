@@ -90,6 +90,7 @@ from mouse_behavior.evaluation.exported_dataset_config import (
 EXPORTED_DATASET_SOURCE_FILES = (
     'src/mouse_behavior/behavior/collective_state.py',
     'src/mouse_behavior/behavior/individual_rules.py',
+    'src/mouse_behavior/behavior/reviewed_comparisons.py',
     'src/mouse_behavior/behavior/static_rule.py',
     'src/mouse_behavior/config.py',
     'src/mouse_behavior/evaluation/__init__.py',
@@ -116,6 +117,7 @@ EXPORTED_DATASET_SOURCE_FILES = (
     'src/mouse_behavior/evaluation/retrospective_thresholds_v19.py',
     'src/mouse_behavior/evaluation/retrospective_thresholds_v20.py',
     'src/mouse_behavior/evaluation/screening_signals.py',
+    'src/mouse_behavior/evaluation/segment_export.py',
     'src/mouse_behavior/evaluation/social_event_geometry.py',
     'src/mouse_behavior/evaluation/social_heuristic_config.py',
     'src/mouse_behavior/preprocessing/__init__.py',

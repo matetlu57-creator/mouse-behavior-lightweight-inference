@@ -1,4 +1,6 @@
 """Observed membership, degree-one endpoint geometry and channel-specific evidence."""
+from tests.regression.legacy_social_profile import LEGACY_SOCIAL
+
 import numpy as np
 import pytest
 
@@ -96,7 +98,7 @@ def test_light_attack_uses_directed_acceleration_without_point_speed_floor(monke
             acceleration[10:20, 0] = 150.
         return velocity, acceleration
     monkeypatch.setattr(social, '_local_quadratic_point_kinematics', measured)
-    assert social._attack_action_mask(f, 0)[10:20].all()
+    assert social._attack_action_mask(f, 0, LEGACY_SOCIAL)[10:20].all()
 
 
 def test_heavy_attack_needs_repeated_target_box_cycles_with_directed_actor_anchors():
@@ -110,17 +112,17 @@ def test_heavy_attack_needs_repeated_target_box_cycles_with_directed_actor_ancho
     f.collective_boxes_cm[20:25, 1] = np.nan
     f.collective_boxes_cm[32:37, 1] = np.nan
     channels = {}
-    positive = social._attack_action_mask(f, 0, channels=channels)
+    positive = social._attack_action_mask(f, 0, LEGACY_SOCIAL, channels=channels)
     assert positive[19:38].all()
     assert channels['heavy_repeated_target_boxes'][19:38].all()
     assert not channels['light_observed_acceleration'].any()
     f.collective_boxes_cm[32:37, 1] = 1.
-    assert not social._attack_action_mask(f, 0).any(), 'one cycle is not repeated disappearance'
+    assert not social._attack_action_mask(f, 0, LEGACY_SOCIAL).any(), 'one cycle is not repeated disappearance'
     f.collective_boxes_cm[32:37, 1] = np.nan
     f.velocity_cm_s[:, 0] *= -1.
     f.velocity_cm_s[:, 1] = 0.
     f.speed_cm_s[:, 1] = 0.
-    assert not social._attack_action_mask(f, 0).any(), 'bbox flicker alone has no attack direction'
+    assert not social._attack_action_mask(f, 0, LEGACY_SOCIAL).any(), 'bbox flicker alone has no attack direction'
 
 
 def test_alternating_one_cycle_per_target_is_not_two_cycles_for_one_target():
@@ -132,7 +134,7 @@ def test_alternating_one_cycle_per_target_is_not_two_cycles_for_one_target():
     f.collective_boxes_cm = np.ones((90, 2, 4))
     f.collective_boxes_cm[20:25, 0] = np.nan
     f.collective_boxes_cm[32:37, 1] = np.nan
-    assert not social._attack_action_mask(f, 0).any()
+    assert not social._attack_action_mask(f, 0, LEGACY_SOCIAL).any()
 
 
 def test_heavy_target_box_cycles_allow_actor_occlusion_inside_same_id_observed_anchors():
@@ -146,7 +148,7 @@ def test_heavy_target_box_cycles_allow_actor_occlusion_inside_same_id_observed_a
         f.collective_boxes_cm[low:high] = np.nan
         f.valid[low:high] = False
     channels = {}
-    result = social._attack_action_mask(f, 0, channels=channels)
+    result = social._attack_action_mask(f, 0, LEGACY_SOCIAL, channels=channels)
     assert result[19:38].all()
     assert channels['heavy_repeated_target_boxes'][19:38].all()
     assert not channels['light_observed_acceleration'].any()

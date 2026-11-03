@@ -1,4 +1,6 @@
 """A brief coherent impulse may establish measured action, never an unknown span."""
+from tests.regression.legacy_social_profile import LEGACY_SOCIAL
+
 import numpy as np
 
 from tests.regression import test_heuristics_v16_audit as audit
@@ -29,7 +31,7 @@ def impulse_fixture(monkeypatch, *, both_points=True):
 def test_one_coherent_impulse_qualifies_measured_action_and_slowdown(monkeypatch):
     f = impulse_fixture(monkeypatch)
     channels = {}
-    mask = rules._attack_action_mask(f, 0, channels=channels)
+    mask = rules._attack_action_mask(f, 0, LEGACY_SOCIAL, channels=channels)
     assert mask[6:18].all()
     assert not mask[:6].any() and not mask[18:].any()
     assert not channels['center_only_raw'].any()
@@ -39,13 +41,13 @@ def test_one_coherent_impulse_qualifies_measured_action_and_slowdown(monkeypatch
 
 def test_nose_swing_without_complete_head_impulse_does_not_trigger(monkeypatch):
     f = impulse_fixture(monkeypatch, both_points=False)
-    assert not rules._attack_action_mask(f, 0).any()
+    assert not rules._attack_action_mask(f, 0, LEGACY_SOCIAL).any()
 
 
 def test_unknown_row_splits_new_measured_action_and_cannot_be_painted(monkeypatch):
     f = impulse_fixture(monkeypatch)
     f.valid[13, 1] = False
-    mask = rules._attack_action_mask(f, 0)
+    mask = rules._attack_action_mask(f, 0, LEGACY_SOCIAL)
     assert mask[6:13].all()
     assert not mask[13:].any()
 
@@ -54,4 +56,4 @@ def test_surface_proximity_cannot_create_a_coherent_light_onset(monkeypatch):
     f = impulse_fixture(monkeypatch)
     f.centers_cm[:, 1, 0] = 9.
     audit.sync(f)
-    assert not rules._attack_action_mask(f, 0).any()
+    assert not rules._attack_action_mask(f, 0, LEGACY_SOCIAL).any()

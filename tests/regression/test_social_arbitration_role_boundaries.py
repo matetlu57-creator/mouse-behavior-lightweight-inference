@@ -1,5 +1,6 @@
 """Full inference must preserve qualified geometry and sustained role changes."""
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -44,7 +45,7 @@ def _features(rows, tmp_path):
 
 def test_restored_chase_cannot_leave_approach_using_its_excluded_endpoint(tmp_path):
     time = np.arange(66) / FPS
-    rows = _rows(30 * time, 35 + 20 * np.maximum(time - .4, 0))
+    rows = _rows(40 * time, 40 + 30 * np.maximum(time - .4, 0))
     features = _features(rows, tmp_path)
     params = config_seed_parameters({})
     approach = rules._open_approach_mask(features, 0, params)
@@ -61,12 +62,12 @@ def test_restored_chase_cannot_leave_approach_using_its_excluded_endpoint(tmp_pa
             if event["behavior"] == "Chasing"] == [(13, 66)]
 
 
-@pytest.mark.parametrize("departure_s, initial_cm", [(.4, 25.), (.3, 22.)])
+@pytest.mark.parametrize("departure_s, initial_cm", [(1.2, 58.), (1.1, 54.)])
 def test_restored_chase_preserves_independently_valid_approach_prefix(
     tmp_path, departure_s, initial_cm,
 ):
-    time = np.arange(66) / FPS
-    rows = _rows(30 * time, initial_cm + 20 * np.maximum(time - departure_s, 0))
+    time = np.arange(105) / FPS
+    rows = _rows(40 * time, initial_cm + 30 * np.maximum(time - departure_s, 0))
     features = _features(rows, tmp_path)
     params = config_seed_parameters({})
     assert (rules._open_approach_mask(features, 0, params)
@@ -80,7 +81,7 @@ def test_restored_chase_preserves_independently_valid_approach_prefix(
 
 def test_qualified_pursuit_reversal_emits_both_directions(tmp_path):
     time = np.arange(75) / FPS
-    rows = _rows(30 * time, 16.25 + 15 * time, target_y=.1)
+    rows = _rows(45 * time, 16.25 + 30 * time, target_y=.1)
     features = _features(rows, tmp_path)
     evidence = {}
     assert rules._chase_mask(features, 0, direction_evidence=evidence).all()
@@ -107,14 +108,16 @@ def test_roles_require_unique_measured_direction_on_each_selected_frame():
 
 
 def test_retained_approach_cannot_borrow_an_excluded_start_anchor(tmp_path):
-    time = np.arange(60) / FPS
-    features = _features(_rows(6.5 * time, np.full(60, 18.)), tmp_path)
+    time = np.arange(90) / FPS
+    features = _features(_rows(6.5 * time, np.full(90, 22.)), tmp_path)
     params = config_seed_parameters({})
-    original = rules._open_approach_mask(features, 0, params)
-    retained = original & (np.arange(60) >= 30)
+    config = replace(DEFAULT_SOCIAL_HEURISTIC_CONFIG, approach_min_duration_s=.3,
+                     approach_min_actor_path_cm=0., approach_require_no_body_contact=False)
+    original = rules._open_approach_mask(features, 0, params, config)
+    retained = original & (np.arange(90) >= 50)
     assert retained.sum() >= 9
-    assert features.pair_distance_cm[30, 0] < DEFAULT_SOCIAL_HEURISTIC_CONFIG.dist_approach_start_min_cm
-    assert not rules._open_approach_mask(features, 0, params, retained_mask=retained).any()
+    assert features.pair_distance_cm[50, 0] < DEFAULT_SOCIAL_HEURISTIC_CONFIG.dist_approach_start_min_cm
+    assert not rules._open_approach_mask(features, 0, params, config, retained_mask=retained).any()
 
 
 def test_retained_approach_rechecks_its_own_observed_fraction(tmp_path):
@@ -122,8 +125,10 @@ def test_retained_approach_rechecks_its_own_observed_fraction(tmp_path):
     features = _features(_rows(6.5 * time, np.full(60, 18.)), tmp_path)
     features.valid[5:9] = False
     params = config_seed_parameters({})
-    original = rules._open_approach_mask(features, 0, params)
+    config = replace(DEFAULT_SOCIAL_HEURISTIC_CONFIG, approach_min_duration_s=.3,
+                     approach_min_actor_path_cm=0., approach_require_no_body_contact=False)
+    original = rules._open_approach_mask(features, 0, params, config)
     assert original[1:19].all(), "the longer original event qualifies around a bounded gap"
     retained = original & (np.arange(60) < 19)
     assert features.valid[retained].all(axis=1).mean() < .8
-    assert not rules._open_approach_mask(features, 0, params, retained_mask=retained).any()
+    assert not rules._open_approach_mask(features, 0, params, config, retained_mask=retained).any()

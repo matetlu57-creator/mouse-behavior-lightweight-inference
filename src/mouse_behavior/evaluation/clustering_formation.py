@@ -32,8 +32,9 @@ def formation_masks(centers, observed, compact, fps, config: GroupHeuristicConfi
     qualify this channel. The older observed-arrival channel remains available.
     """
     known = observed.all(axis=1)
+    env_cm = neighbor_cm * (1.0 + 0.20 * max(0, centers.shape[1] - 3))
     radius = np.linalg.norm(centers - centers.mean(axis=1)[:, None], axis=2).max(axis=1)
-    dense = compact & known & (radius <= neighbor_cm)
+    dense = compact & known & (radius <= env_cm)
     minimum = max(1, int(np.ceil(config.clustering_final_stability_s * fps - 1e-9)))
     state_envelope = _unknown_envelope(dense, known, fps, config.clustering_unknown_gap_s)
     episodes = [(low, high) for low, high in runs(state_envelope)

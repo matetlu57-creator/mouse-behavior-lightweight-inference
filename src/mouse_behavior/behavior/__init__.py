@@ -12,8 +12,35 @@ from typing import Any
 __all__ = [
     "ParallelBehaviorFSM",
     "apply_standard_behavior_engine",
+    "endpoint_observations",
+    "endpoints_fully_observed",
     "extract_standard_behavior_events",
+    "is_process_boundary_closed",
+    "refine_approach_segments",
+    "refine_attack_segments",
+    "refine_behavior_segments",
+    "refine_dispersal_segments",
+    "refine_group_locomotion_segments",
+    "refine_huddle_segments",
+    "refine_rearing_segments",
+    "select_behavior_segments",
+    "update_segment_bounds",
 ]
+
+_SEGMENT_CLIPPING_EXPORTS = {
+    "endpoint_observations",
+    "endpoints_fully_observed",
+    "is_process_boundary_closed",
+    "refine_approach_segments",
+    "refine_attack_segments",
+    "refine_behavior_segments",
+    "refine_dispersal_segments",
+    "refine_group_locomotion_segments",
+    "refine_huddle_segments",
+    "refine_rearing_segments",
+    "select_behavior_segments",
+    "update_segment_bounds",
+}
 
 
 def __getattr__(name: str) -> Any:
@@ -31,4 +58,8 @@ def __getattr__(name: str) -> Any:
             "apply_standard_behavior_engine": apply_standard_behavior_engine,
             "extract_standard_behavior_events": extract_standard_behavior_events,
         }[name]
+    if name in _SEGMENT_CLIPPING_EXPORTS:
+        from . import segment_clipping
+
+        return getattr(segment_clipping, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

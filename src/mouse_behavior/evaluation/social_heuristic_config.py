@@ -11,11 +11,11 @@ from .retrospective_thresholds_v17 import SOCIAL_EXTREMA
 from .retrospective_thresholds_v18 import SOCIAL_FITTED
 from .requested_thresholds_v28 import (
     APPROACH_CENTER_END_MIN_CM, APPROACH_SURFACE_END_MIN_CM, APPROACH_SURFACE_END_MAX_CM,
-    TOGETHER_MAX_SPEED_CM_S, CONTACT_MIN_DURATION_S, CHASING_MIN_MEAN_SPEED_CM_S,
+    TOGETHER_MAX_SPEED_CM_S, CONTACT_MIN_DURATION_S,
     CONTACT_HEAD_ONSET_DISTANCE_CM, CONTACT_TAIL_ONSET_DISTANCE_CM,
 )
 
-SOCIAL_CONFIG_REVISION = "2026-10-20-v28-contact-context-and-v26-restoration"
+SOCIAL_CONFIG_REVISION = "2026-10-26-v31-observed-action-minima"
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ class SocialHeuristicConfig:
     """
 
     attack_priority: int = 3
-    attack_min_duration_s: float = 0.15
+    attack_min_duration_s: float = 0.7
     dist_attack_max_cm: float = SOCIAL_FITTED["dist_attack_max_cm"]
     # Maximum no-tail footprint gap at the five video-audited center-far
     # contact frames (2b003:18,19,23,52; 892262:12). Retrospective proxy fit.
@@ -145,7 +145,11 @@ class SocialHeuristicConfig:
     chasing_role_turn_grace_s: float = 0.5  # existing bounded leader-turn context
 
     approach_priority: int = 1
-    approach_min_duration_s: float = 0.3
+    approach_min_duration_s: float = 1.0  # strict >, independently checked at export
+    approach_require_no_body_contact: bool = True
+    approach_max_footprint_body_lengths: float = 2.0
+    approach_min_actor_path_cm: float = 10.0
+    approach_closing_window_s: float = 0.3  # motion estimation is not event duration
     dist_approach_start_min_cm: float = 12.0
     dist_approach_end_min_cm: float = APPROACH_CENTER_END_MIN_CM
     dist_approach_end_max_cm: float = SOCIAL_EXTREMA["dist_approach_end_max_cm"]
@@ -189,7 +193,7 @@ class SocialHeuristicConfig:
     # Mean = sum of real adjacent eligible step lengths / adjacent step time.
     # Each mouse must pass; missing rows/jumps across gaps add neither operand.
     # Zero is supported only for explicit historical experiment configurations.
-    chasing_min_mean_speed_cm_s: float = CHASING_MIN_MEAN_SPEED_CM_S
+    chasing_min_mean_speed_cm_s: float = 30.0
     # Separate tail baseline/bridge restore V26 without undoing head's gain.
     nose_tail_min_duration_s: float = 0.5
     contact_tail_bridge_max_gap_s: float = 0.15
@@ -249,6 +253,8 @@ class SocialHeuristicConfig:
         }
 
     def __post_init__(self) -> None:
+        if not isinstance(self.approach_require_no_body_contact, bool):
+            raise ValueError("approach_require_no_body_contact must be bool")
         if not isinstance(self.together_use_smoothed_speed, bool):
             raise ValueError("together_use_smoothed_speed must be bool")
         positive_fields = (
@@ -274,7 +280,8 @@ class SocialHeuristicConfig:
             "contact_head_onset_distance_cm", "contact_tail_onset_distance_cm",
             "contact_bridge_support_max_body_lengths", "contact_signal_max_body_lengths",
             "chasing_min_duration_s", "dist_chasing_max_cm",
-            "approach_min_duration_s",
+            "approach_min_duration_s", "approach_closing_window_s",
+            "approach_max_footprint_body_lengths",
             "chasing_min_net_displacement_cm", "chasing_min_path_displacement_cm",
             "chasing_track_gap_max_s", "chasing_reacquisition_gap_max_s",
             "chasing_role_turn_grace_s",
@@ -295,7 +302,7 @@ class SocialHeuristicConfig:
         for name in ("vel_attack_min_cm_s", "acc_attack_min_cm_s2",
                      "vel_chasing_min_cm_s", "vel_chasing_target_min_cm_s",
                      "dist_approach_end_min_cm", "approach_surface_endpoint_tolerance_cm",
-                     "chasing_min_mean_speed_cm_s"):
+                     "chasing_min_mean_speed_cm_s", "approach_min_actor_path_cm"):
             value = float(getattr(self, name))
             if not isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")

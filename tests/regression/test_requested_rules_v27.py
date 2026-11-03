@@ -29,7 +29,7 @@ def test_requested_defaults_and_profile_mirrors():
     assert cfg.nose_contact_min_duration_s == .1
     assert cfg.contact_head_extension_min_duration_s == .1
     assert cfg.contact_tail_extension_min_duration_s == .15
-    assert cfg.chasing_min_mean_speed_cm_s == 15.
+    assert cfg.chasing_min_mean_speed_cm_s == 30.
     assert params.isolation_distance_cm == 20.
 
 
@@ -94,7 +94,8 @@ def test_contact_after_attack_priority_rechecks_real_measured_minimum(monkeypatc
         monkeypatch.setattr(social, helper, lambda features, *a, **k: np.zeros(len(features.valid), bool))
     monkeypatch.setattr(social, '_attack_action_mask',
                         lambda features, *a, **k: np.arange(len(features.valid)) < 5)
-    masks = social.pair_rule_masks(f, audit.confirmed_params(), allow_contact_extension=extension)
+    masks = social.pair_rule_masks(f, audit.confirmed_params(),
+                                   replace(cfg, attack_min_duration_s=.15), allow_contact_extension=extension)
     assert masks['attack'][:5, 0].all()
     assert not masks['head_contact'].any(), 'priority left only 2 real frames plus1 unknown'
 
@@ -193,7 +194,7 @@ def test_clustering_actor_arrives_into_observed_pair_without_recipient_speed_cap
                                         group.DEFAULT_GROUP_HEURISTIC_CONFIG, neighbor_cm=10., max_gap_s=5.)
     assert process.evidence > 0
     assert process.frames[0][0] == 0, 'V29 includes actual convergence before final density'
-    assert process.frames[-1][1] == len(f.valid)
+    assert process.frames[-1][1] == len(f.valid), 'the proposed new endpoint regressed against manual GT and was not promoted'
 
 
 @pytest.mark.parametrize('translate', [False, True])

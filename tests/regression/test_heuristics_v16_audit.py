@@ -253,7 +253,8 @@ def component_social_config(**overrides) -> SocialHeuristicConfig:
         SocialHeuristicConfig(
             dist_nose_head_contact_max_cm=1.5, dist_nose_tail_contact_max_cm=1.5,
             dist_attack_max_cm=4.0, vel_attack_min_cm_s=4.0,
-            acc_attack_min_cm_s2=25.0,
+            acc_attack_min_cm_s2=25.0, attack_min_duration_s=.15,
+            approach_min_duration_s=.3, approach_min_actor_path_cm=0.,
             nose_contact_min_duration_s=.5, contact_bridge_max_gap_s=.15,
             together_contact_veto_min_duration_s=.15, chasing_min_mean_speed_cm_s=0.,
             vel_chasing_min_cm_s=26.75, vel_chasing_target_min_cm_s=26.75,
@@ -1104,7 +1105,7 @@ def test_defect_grp_8_group_evidence_is_commensurable_in_seconds():
 # ==========================================================================
 # 5. Parameter provenance, policy and validation-gate adequacy
 # ==========================================================================
-PROJECT_ROOT = REPO_ROOT.parents[1]
+PROJECT_ROOT = REPO_ROOT.parents[1] if len(REPO_ROOT.parents) > 1 else REPO_ROOT
 NEW_RUN = REPO_ROOT / "outputs" / "current_validation_20261015_v16_final"
 OLD_RUN = PROJECT_ROOT / "outputs" / "current_heuristic_validation_20261014_v14"
 NEW_SITE = REPO_ROOT / "outputs" / "behavior_error_review_20261015_v16_final"
@@ -1545,7 +1546,7 @@ def test_lock_attack_endpoint_distance_has_a_single_active_source():
         f.collective_boxes_cm = np.ones((60, 2, 4))
         f.collective_boxes_cm[20:25] = np.nan
         # Isolate the distance gate; the fixture's measured speed is 6 cm/s.
-        single_cycle = replace(config, attack_box_reappearance_min_cycles=1,
+        single_cycle = replace(config, attack_min_duration_s=.15, attack_box_reappearance_min_cycles=1,
                                vel_attack_min_cm_s=4.0)
         raw = confirmed_rules_module._attack_action_mask(f, 0, single_cycle)
         assert bool(raw.any()) is (separation == bound), separation
@@ -1862,7 +1863,7 @@ CALIB_SAMPLES = (
      {3382: "rearing", 6: "stationary", 3141: "locomotion"}),
 )
 DATASET_ROOT = REPO_ROOT / "behavior_confirmed_dataset_cleaned_20261014_original_video_v3" / "dataset"
-SCALES_ROOT = REPO_ROOT.parents[1] / "outputs" / "confirmed_calibration_v1_20261010" / "dataset_v2" / "scales"
+SCALES_ROOT = PROJECT_ROOT / "outputs" / "confirmed_calibration_v1_20261010" / "dataset_v2" / "scales"
 
 
 def _load_calibrated_sample(source_key: str, behavior_dir: str, sample_id: str):

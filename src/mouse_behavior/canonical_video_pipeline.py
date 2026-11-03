@@ -25,13 +25,19 @@ import numpy as np
 
 from mouse_behavior.behavior.individual_rules import DEFAULT_INDIVIDUAL_CONFIG, individual_rule_masks
 from mouse_behavior.behavior.duration_policy import qualify_event_duration
+from mouse_behavior.behavior.event_boundaries import EventBoundary
+from mouse_behavior.behavior.reviewed_comparisons import ReviewedComparisonScope, bound_comparison_review, bind_comparison_review
 from mouse_behavior.config import load_config
-from mouse_behavior.evaluation.confirmed_rules import pair_rule_masks, policy_receipt
+from mouse_behavior.evaluation.confirmed_rules import pair_rule_masks, policy_receipt, together_contact_evidence
 from mouse_behavior.evaluation.exported_dataset_config import config_seed_parameters
 from mouse_behavior.evaluation.exported_dataset_features import load_exported_features
 from mouse_behavior.evaluation.exported_dataset_models import LABEL_TO_CANONICAL
 from mouse_behavior.evaluation.group_event_rules import group_rule_candidates, isolation_candidates
+from mouse_behavior.evaluation.group_heuristic_config import DEFAULT_GROUP_HEURISTIC_CONFIG
 from mouse_behavior.evaluation.segment_export import _sha256, _write_json
+from mouse_behavior.evaluation.social_event_geometry import observed_path_and_net, observed_motion_statistics
+from mouse_behavior.evaluation.social_heuristic_config import DEFAULT_SOCIAL_HEURISTIC_CONFIG
+from mouse_behavior.evaluation.approach_events import requalify_approach_event, requalify_source_approach_event
 from mouse_behavior.preprocessing.scale_resolution import robust_reference_body_px
 from mouse_behavior.tracking.cache import _iter_cache_records
 
@@ -59,6 +65,9 @@ def rule_execution_binding(parameters, posture_mode: str = "disabled") -> dict:
     sources = {name.removeprefix("src/").removesuffix(".py").replace("/", ".")
                for name in EXPORTED_DATASET_SOURCE_FILES}
     sources.update((__name__, "mouse_behavior.behavior.duration_policy",
+                    "mouse_behavior.behavior.event_boundaries",
+                    "mouse_behavior.behavior.reviewed_comparisons",
+                    "mouse_behavior.evaluation.approach_events",
                     "mouse_behavior.visualization.behavior_packages", "mouse_behavior.evaluation.segment_export",
                     "mouse_behavior.tracking.cache"))
     if posture_mode == "v3_review":
@@ -66,6 +75,7 @@ def rule_execution_binding(parameters, posture_mode: str = "disabled") -> dict:
         modules.extend((posture_adapter, posture_measurements, posture_rules))
         functions.append(posture_rules.infer_posture)
         sources.update(module.__name__ for module in (posture_adapter, posture_measurements, posture_rules))
+        sources.add("mouse_behavior.behavior.review_reconciliation")
     defaults = {module.__name__: {name: asdict(value) for name, value in vars(module).items()
                                  if name.startswith("DEFAULT_") and is_dataclass(value) and not isinstance(value, type)}
                 for module in modules}
@@ -342,13 +352,16 @@ def _evidence(event: dict, observed: np.ndarray, role_support: np.ndarray | None
 
 
 def _directed_events(mask: np.ndarray, actors: np.ndarray, targets: np.ndarray, ids: list,
-                     canonical: str, observed: np.ndarray, *, fps: float) -> list[dict]:
+                     canonical: str, observed: np.ndarray, *, fps: float,
+                     actor_centers: dict[int, np.ndarray] | None = None,
+                     min_actor_path_cm: float = 0.) -> list[dict]:
     result = []
     for start, end in _runs(mask):
         known = [(frame, int(actors[frame]), int(targets[frame])) for frame in range(start, end)
                  if actors[frame] in ids and targets[frame] in ids and actors[frame] != targets[frame]]
         if not known:
-            result.append(_evidence(_event(canonical, ids, start, end), observed, np.zeros(len(mask), bool)))
+            if canonical != "approach" or actor_centers is None:
+                result.append(_evidence(_event(canonical, ids, start, end), observed, np.zeros(len(mask), bool)))
             continue
         # Unknown rows remain inside the process; only a measured direction
         # reversal starts another event. The raw support ledger is never filled.
@@ -361,11 +374,83 @@ def _directed_events(mask: np.ndarray, actors: np.ndarray, targets: np.ndarray, 
         segments.append((begin, end, actor, target))
         for begin, stop, actor, target in segments:
             support = (actors == actor) & (targets == target) & observed
-            result.append(_evidence(_event(canonical, ids, begin, stop, actor, target), observed, support))
-    return [event for event in result if qualify_event_duration(event, fps)["ok"]]
+            event = _evidence(_event(canonical, ids, begin, stop, actor, target), observed, support)
+            if canonical == "approach" and actor_centers is not None:
+                path, _ = observed_path_and_net(actor_centers[actor][begin:stop], observed[begin:stop])
+                if path + 1e-9 < min_actor_path_cm:
+                    continue
+                event["actor_observed_path_lower_bound_cm"] = path
+            result.append(event)
+    qualified = []
+    for event in result:
+        if not qualify_event_duration(event, fps)["ok"]:
+            continue
+        if canonical == "chase" and actor_centers is not None:
+            start, end = event["start_frame"], event["end_frame"]
+            statistics = [observed_motion_statistics(actor_centers[int(track)][start:end],
+                observed[start:end], fps) for track in ids]
+            if not _chase_travel_qualified(statistics):
+                continue
+        qualified.append(event)
+    return qualified
 
 
-def _individual_config(params):
+def _chase_travel_qualified(statistics: list[dict]) -> bool:
+    config = DEFAULT_SOCIAL_HEURISTIC_CONFIG
+    return all(s["path_cm"] >= config.chasing_min_path_displacement_cm
+               and s["net_cm"] >= config.chasing_min_net_displacement_cm
+               and s["mean_speed_cm_s"] + 1e-9 >= config.chasing_min_mean_speed_cm_s
+               for s in statistics)
+
+
+def whole_range_isolation_audit(store: TrackStore, binding: dict, scale: dict, params) -> dict:
+    """Whole-source distance veto; inference windows cannot hide a near frame.
+
+    Centers use the loader's exact median neck/hips (all-points fallback) and
+    point-confidence>=.25 definition. Visual IDs remain tracker observations.
+    """
+    summaries = {}
+    info = binding["source_video"]
+    review = bound_comparison_review(binding)
+    excluded = set(review.pairs) if review else set()
+    for row in store.rows(0, info["frame_count"]):
+        ids, centers = [], []
+        for detection in row["detections"]:
+            points = np.asarray(detection["keypoints"], float)
+            good = np.isfinite(points).all(axis=1) & (points[:, 2] >= .25)
+            if not good.any():
+                continue
+            body = np.array([3, 4, 5])
+            subset = body[good[body]]
+            center = np.median(points[subset if len(subset) else np.flatnonzero(good), :2], axis=0)
+            ids.append(int(detection["track_id"]))
+            centers.append(center * scale["cm_per_pixel"])
+        if len(ids) < 2:
+            continue
+        centers = np.asarray(centers)
+        distances = np.linalg.norm(centers[:, None] - centers[None, :], axis=2)
+        np.fill_diagonal(distances, np.inf)
+        for left, track in enumerate(ids):
+            for right in range(left+1, len(ids)):
+                if tuple(sorted((track, ids[right]))) in excluded:
+                    distances[left, right] = distances[right, left] = np.inf
+        for track, distance in zip(ids, distances.min(axis=1)):
+            if not np.isfinite(distance):
+                continue
+            item = summaries.setdefault(str(track), dict(minimum_cm=float(distance), comparison_frames=0))
+            item["minimum_cm"] = min(item["minimum_cm"], float(distance))
+            item["comparison_frames"] += 1
+    minimum_s = max(params.isolation_min_duration_s, DEFAULT_GROUP_HEURISTIC_CONFIG.isolation_min_duration_s)
+    for item in summaries.values():
+        item["observed_seconds"] = item["comparison_frames"] / info["fps"]
+        item["qualified"] = (item["minimum_cm"] > params.isolation_distance_cm
+                             and item["observed_seconds"] > minimum_s)
+    return dict(scope="entire_bound_source_video_per_visual_id", distance_cm=params.isolation_distance_cm,
+                comparator=">", minimum_observed_seconds=minimum_s, tracks=summaries,
+                comparison_review=review.as_dict() if review else None)
+
+
+def _individual_config(params, *, enable_posture_screen: bool = False):
     return replace(DEFAULT_INDIVIDUAL_CONFIG,
                    motion_speed_threshold_cm_s=params.individual_motion_speed_threshold_cm_s,
                    static_min_duration_s=params.stationary_min_duration_s,
@@ -373,14 +458,18 @@ def _individual_config(params):
                    static_max_radius_cm=params.stationary_max_center_radius_cm,
                    static_transient_max_s=params.stationary_transient_max_duration_s,
                    static_transient_max_displacement_cm=params.stationary_transient_max_displacement_cm,
-                   locomotion_pause_max_s=params.locomotion_stop_gap_s, enable_posture_screen=False)
+                   locomotion_pause_max_s=params.locomotion_stop_gap_s,
+                   enable_posture_screen=enable_posture_screen)
 
 
 def infer_window_events(rows: list[dict], fps: float, scale: dict, params, *,
-                        posture_mode: str = "disabled") -> tuple[list[dict], dict]:
+                        posture_mode: str = "disabled",
+                        comparison_review: ReviewedComparisonScope | None = None) -> tuple[list[dict], dict]:
     """Run the canonical three domains with every observed visual ID retained."""
-    if posture_mode not in {"disabled", "v3_review"}:
-        raise ValueError("posture_mode must be disabled or v3_review")
+    if posture_mode not in {"disabled", "v3_review", "calibrated"}:
+        raise ValueError("posture_mode must be disabled, v3_review, or calibrated")
+    if comparison_review is not None and not isinstance(comparison_review, ReviewedComparisonScope):
+        raise ValueError("comparisons require an explicit source-bound human review scope")
     track_ids = sorted({d["track_id"] for row in rows for d in row["detections"]})
     audit = dict(track_ids=track_ids, track_truncation=False, frame_count=len(rows))
     if not track_ids:
@@ -397,8 +486,9 @@ def infer_window_events(rows: list[dict], fps: float, scale: dict, params, *,
     individual = individual_rule_masks(
         features.centers_cm, features.valid, fps, keypoints_cm=features.collective_keypoints_cm,
         boxes_cm=features.collective_boxes_cm, reference_body_cm=features.reference_body_cm,
-        config=_individual_config(params)).masks
-    for name in ("stationary", "locomotion"):
+        config=_individual_config(params, enable_posture_screen=(posture_mode == "calibrated"))).masks
+    individual_names = ("stationary", "locomotion", "grooming", "rearing") if posture_mode == "calibrated" else ("stationary", "locomotion")
+    for name in individual_names:
         for slot, track in enumerate(features.track_ids):
             for start, end in _runs(individual[name][:, slot]):
                 result.append(_evidence(_event(name, [track], start, end), features.valid[:, slot]))
@@ -412,11 +502,32 @@ def infer_window_events(rows: list[dict], fps: float, scale: dict, params, *,
             if name in {"approach", "chasing"}:
                 actor = np.asarray(roles[name + "_actor"][:, edge], dtype=int)
                 target = np.asarray(roles[name + "_target"][:, edge], dtype=int)
-                result.extend(_directed_events(mask, actor, target, ids, canonical, observed, fps=fps))
+                directed = _directed_events(mask, actor, target, ids, canonical, observed, fps=fps,
+                    actor_centers={int(features.track_ids[slot]): features.centers_cm[:, slot]
+                                   for slot in (left, right)},
+                    min_actor_path_cm=DEFAULT_SOCIAL_HEURISTIC_CONFIG.approach_min_actor_path_cm)
+                result.extend(child for event in directed
+                    for child in (requalify_approach_event(features, edge, event, params)
+                                  if name == "approach" else [event]))
             else:
+                interaction = together_contact_evidence(features, edge) if name == "together" else None
                 for start, end in _runs(mask):
-                    result.append(_evidence(_event(canonical, ids, start, end), observed))
-    candidates = (*group_rule_candidates(features, params, ()), *isolation_candidates(features, params))
+                    event = _evidence(_event(canonical, ids, start, end), observed)
+                    if interaction is not None:
+                        contact, known = interaction
+                        event.update(
+                            interaction_status=("contact_geometry_present" if contact[start:end].any()
+                                                else "no_contact_geometry_observed" if known[start:end].all()
+                                                else "contact_geometry_unknown"),
+                            contact_geometry_frame_intervals=_runs(contact & mask &
+                                (np.arange(len(mask)) >= start) & (np.arange(len(mask)) < end)),
+                            contact_geometry_known_frame_intervals=_runs(known & mask &
+                                (np.arange(len(mask)) >= start) & (np.arange(len(mask)) < end)),
+                            interaction_semantics="endpoint proximity evidence; physical interaction requires review")
+                    result.append(event)
+    candidates = (*group_rule_candidates(features, params, ()), *isolation_candidates(features, params,
+        excluded_pairs=comparison_review.pairs if comparison_review else ()))
+    audit["isolation_comparison_review"] = comparison_review.as_dict() if comparison_review else None
     slots = {int(track): slot for slot, track in enumerate(features.track_ids)}
     for candidate in candidates:
         if candidate.frame_intervals is None:
@@ -428,10 +539,21 @@ def infer_window_events(rows: list[dict], fps: float, scale: dict, params, *,
                 event["canonical_support_frame_intervals"] = [
                     (max(start, a), min(end, b)) for a, b in candidate.support_frame_intervals
                     if max(start, a) < min(end, b)]
+            if candidate.behavior == "isolation":
+                unknown = np.zeros(len(features.valid), bool)
+                unknown[start:end] = True
+                for low, high in event["canonical_support_frame_intervals"]:
+                    unknown[low:high] = False
+                event["unknown_comparison_frame_intervals"] = _runs(unknown)
+                event["unknown_comparison_frame_count"] = int(unknown.sum())
+                event["unknown_comparisons_are_not_far_evidence"] = True
             result.append(event)
     if posture_mode == "v3_review":
         from mouse_behavior.behavior.posture_adapter import infer_posture_rows
-        posture_events, posture_audit = infer_posture_rows(rows, fps, track_ids=track_ids)
+        # Per-window feature dumps can expand a short video's receipt to GBs.
+        # The independent candidate/support ledgers and events are retained;
+        # optional diagnostic window details do not change classification.
+        posture_events, posture_audit = infer_posture_rows(rows, fps, track_ids=track_ids, diagnostics=False)
         for event in posture_events:
             slot = slots[event["mouse_ids"][0]]
             result.append(_evidence(event, features.valid[:, slot]))
@@ -441,6 +563,8 @@ def infer_window_events(rows: list[dict], fps: float, scale: dict, params, *,
     for event in result:
         qualification = qualify_event_duration(event, fps, parameters=params)
         if qualification["ok"]:
+            event["boundary"] = EventBoundary(event["start_frame"], event["end_frame"],
+                event["start_frame"], event["end_frame"], fps).as_dict()
             qualified.append(event)
         else:
             audit["duration_rejected"].append(dict(event=event, qualification=qualification))
@@ -451,8 +575,9 @@ def merge_events(events: list[dict]) -> list[dict]:
     """Join touching support only for the identical behavior, IDs and roles."""
     groups = defaultdict(list)
     for event in events:
+        confirmation_end = event["end_frame"] if event["canonical_behavior"] == "social_clustering" else None
         key = (event["canonical_behavior"], tuple(event["mouse_ids"]), event.get("actor_id", -1),
-               event.get("target_id", -1), json.dumps(event.get("participants", []), sort_keys=True))
+               event.get("target_id", -1), json.dumps(event.get("participants", []), sort_keys=True), confirmation_end)
         groups[key].append(dict(event))
     merged = []
     for rows in groups.values():
@@ -463,11 +588,16 @@ def merge_events(events: list[dict]) -> list[dict]:
                 for field, value in row.items():
                     if field.endswith("_frame_intervals"):
                         current[field] = sorted(current.get(field, []) + value)
+                    elif field == "inference_parent_contexts":
+                        current[field] = current.get(field, []) + value
             else:
                 current = row
                 merged.append(current)
     merged.sort(key=lambda row: (row["start_frame"], row["end_frame"], row["canonical_behavior"], row["mouse_ids"]))
     for row in merged:
+        if "inference_parent_contexts" in row:
+            row["inference_parent_contexts"] = [json.loads(value) for value in sorted({
+                json.dumps(item, sort_keys=True) for item in row["inference_parent_contexts"]})]
         for field in list(row):
             if field.endswith("_frame_intervals"):
                 intervals = []
@@ -480,15 +610,27 @@ def merge_events(events: list[dict]) -> list[dict]:
                 row[field.replace("_intervals", "_count")] = sum(b - a for a, b in intervals)
         if "observed_all_participants_frame_count" in row:
             row["inferred_or_partially_unobserved_frame_count"] = row["end_frame"] - row["start_frame"] - row["observed_all_participants_frame_count"]
+        if row["canonical_behavior"] == "together":
+            row["interaction_status"] = (
+                "contact_geometry_present" if row.get("contact_geometry_frame_count", 0)
+                else "no_contact_geometry_observed"
+                if row.get("contact_geometry_known_frame_count", 0) == row["end_frame"] - row["start_frame"]
+                else "contact_geometry_unknown")
+        if "boundary" in row:
+            fps = row["boundary"]["fps"]
+            row["boundary"] = EventBoundary(row["start_frame"], row["end_frame"],
+                row["start_frame"], row["end_frame"], fps).as_dict()
         identity = json.dumps(row, sort_keys=True, allow_nan=False).encode()
         row["event_id"] = f"{row['canonical_behavior']}_{row['start_frame']:08d}_{row['end_frame']:08d}_{hashlib.sha256(identity).hexdigest()[:10]}"
     return merged
 
 
 def _infer_core_task(spec: tuple) -> tuple[list[dict], dict]:
-    database, fps, scale, params, begin, end, window_start, window_end, posture_mode = spec
+    database, fps, scale, params, begin, end, window_start, window_end, posture_mode = spec[:9]
+    comparison_review = spec[9] if len(spec) > 9 else None
     rows = TrackStore(Path(database)).window(window_start, window_end)
-    selected, audit = infer_window_events(rows, fps, scale, params, posture_mode=posture_mode)
+    selected, audit = infer_window_events(rows, fps, scale, params, posture_mode=posture_mode,
+                                         comparison_review=comparison_review)
     audit.update(window_start=window_start, window_end=window_end, core_start=begin, core_end=end)
     events = []
     for event in selected:
@@ -500,11 +642,13 @@ def _infer_core_task(spec: tuple) -> tuple[list[dict], dict]:
                 if field.endswith("_frame_intervals"):
                     cropped[field] = [(max(start, a + window_start), min(stop, b + window_start))
                                       for a, b in value if max(start, a + window_start) < min(stop, b + window_start)]
-            loses_endpoint_semantics = (event["canonical_behavior"] in {"approach", "dispersal"}
+            loses_endpoint_semantics = (event["canonical_behavior"] in {"approach", "dispersal", "social_clustering"}
                                        and (start != event["start_frame"] + window_start
                                             or stop != event["end_frame"] + window_start))
             loses_duration = not qualify_event_duration(cropped, fps, parameters=params)["ok"]
-            if loses_endpoint_semantics or loses_duration:
+            loses_complete_boundary = (start != event["start_frame"] + window_start
+                                       or stop != event["end_frame"] + window_start)
+            if loses_complete_boundary:
                 # A complete qualified parent is real inferred evidence. Retain
                 # it instead of padding a shortened fragment. Approach's final
                 # proximity and Dispersal's confirmed separation belong to the
@@ -518,7 +662,14 @@ def _infer_core_task(spec: tuple) -> tuple[list[dict], dict]:
                     cropped["retained_complete_parent_for_duration"] = True
                 if loses_endpoint_semantics:
                     cropped["retained_complete_parent_for_semantics"] = True
+                cropped["retained_complete_parent_for_boundary"] = True
             if qualify_event_duration(cropped, fps, parameters=params)["ok"]:
+                cropped["inference_parent_contexts"] = [dict(
+                    process_start=event["start_frame"] + window_start,
+                    process_end=event["end_frame"] + window_start,
+                    context_start=window_start, context_end=window_end)]
+                cropped["boundary"] = EventBoundary(cropped["start_frame"], cropped["end_frame"],
+                    cropped["start_frame"], cropped["end_frame"], fps).as_dict()
                 events.append(cropped)
     return events, audit
 
@@ -533,10 +684,12 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
         raise ValueError("workers must be a positive integer")
     core, context = max(1, round(core_seconds * fps)), math.ceil(context_seconds * fps)
     specs = []
+    comparison_review = bound_comparison_review(binding)
     for begin in range(0, total, core):
         end = min(total, begin + core)
         window_start, window_end = max(0, begin - context), min(total, end + context)
-        specs.append((str(store.path.resolve()), fps, scale, params, begin, end, window_start, window_end, posture_mode))
+        specs.append((str(store.path.resolve()), fps, scale, params, begin, end, window_start, window_end, posture_mode,
+                      comparison_review))
     # Only small immutable task descriptions cross process boundaries. Each
     # child reads its own bounded context from SQLite in read-only mode.
     completed = []
@@ -566,37 +719,113 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
         posture_events, posture_resolution = resolve_posture_window_audits(audits, fps)
         events = [event for event in events if event.get("posture_engine") != "v3_decoupled"] + posture_events
     merged = merge_events(events)
+    isolation_audit = whole_range_isolation_audit(store, binding, scale, params)
+    # Mean speed is not monotone under overlapping-window unions: two fast
+    # qualifying parents can share their fastest portion. Recheck the union
+    # from the bound observations, rather than borrowing either parent's mean.
+    motion_rejections = []
+    approach_rejections = []
+    retained = []
+    for event in merged:
+        if event["canonical_behavior"] == "approach":
+            children = requalify_source_approach_event(store, event, binding["source_video"], scale, params)
+            if not children:
+                approach_rejections.append(dict(event_id=event["event_id"], reason="merged_approach_lost_own_semantics"))
+            retained.extend(merge_events([child])[0] for child in children)
+            continue
+        if (event["canonical_behavior"] == "isolation"
+                and not all(isolation_audit["tracks"].get(str(track), {}).get("qualified", False)
+                            for track in event["mouse_ids"])):
+            continue
+        if event["canonical_behavior"] == "chase":
+            ids = event["mouse_ids"]
+            rows = store.window(event["start_frame"], event["end_frame"])
+            for row in rows:
+                row["detections"] = [d for d in row["detections"] if d["track_id"] in ids]
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "tracks.json"
+                _write_json(path, rows)
+                features = load_exported_features(path, fps=fps, max_tracks=2,
+                    scale_config=dict(mode="fixed", cm_per_pixel=scale["cm_per_pixel"],
+                                      assumed_mouse_body_length_cm=scale["reference_body_cm"]))
+            joint = features.valid.all(axis=1)
+            statistics = [observed_motion_statistics(features.centers_cm[:, slot], joint, fps)
+                          for slot in range(len(features.track_ids))]
+            if len(statistics) != 2 or not _chase_travel_qualified(statistics):
+                motion_rejections.append(dict(event_id=event["event_id"], statistics=statistics))
+                continue
+            event["observed_motion_by_track"] = {str(int(track)): statistics[slot]
+                for slot, track in enumerate(features.track_ids)}
+        retained.append(event)
+    merged = retained
+    posture_conflicts = {}
+    if posture_mode == "v3_review":
+        from mouse_behavior.behavior.review_reconciliation import defer_static_posture_conflicts
+        formal, review, posture_conflicts = defer_static_posture_conflicts(merged, fps, parameters=params)
+        merged = sorted(formal + review, key=lambda event: (
+            event["start_frame"], event["end_frame"], event["event_id"]))
     for event in merged:
         if not qualify_event_duration(event, fps, parameters=params)["ok"]:
             raise ValueError("merged event lost standalone duration qualification")
+        contexts = event.get("inference_parent_contexts", [])
+        if contexts:
+            start, end = event["start_frame"], event["end_frame"]
+            event["process_boundary_status"] = dict(
+                start_closed_in_context=any(c["process_start"] == start and start > c["context_start"] for c in contexts),
+                end_closed_in_context=any(c["process_end"] == end and end < c["context_end"] for c in contexts),
+                starts_at_source_boundary=start == 0, ends_at_source_boundary=end == total,
+                minimum_duration_used_as_crop_length=False,
+                meaning="Rule-defined endpoints; context/source truncation is not a witnessed biological end")
     return merged, dict(windows=audits, core_seconds=core_seconds, context_seconds=context_seconds,
+                                     merged_chase_motion_rejections=motion_rejections,
+                                     merged_approach_semantic_rejections=approach_rejections,
+                                     whole_range_isolation_audit=isolation_audit,
                                      global_posture_resolution=posture_resolution,
+                                     static_posture_conflicts=posture_conflicts,
                                      workers=workers, track_truncation=False, boundary_approximation=True,
-                                     boundary_note="Bounded context can change events requiring history beyond the context. A complete qualified parent may extend beyond the core when its shortened child loses duration qualification or Approach/Dispersal endpoint semantics; no frames are fabricated. Measured support remains separate.")
+                                     boundary_note="Bounded context can change events requiring history beyond the context. Every qualified parent overlapping a core retains its complete inferred bounds; only identical behavior/IDs/roles can merge overlapping contexts. Minimum duration is a gate, never a requested crop length. No observations are fabricated; measured support remains separate.")
 
 
 def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
                  mode: str = "all", source_receipt: Path | None = None,
                  expected_source_sha256: str | None = None, events_from: Path | None = None,
                  core_seconds: float = 20, context_seconds: float = 10, workers: int = 1,
-                 clip_workers: int = 1, clip_preset: str = "veryfast", posture_mode: str = "disabled") -> dict:
+                 clip_workers: int = 1, clip_preset: str = "veryfast", posture_mode: str = "disabled",
+                 clip_context_seconds: float = 0., original_video: bool = False, clip_codec: str = "libx264",
+                 comparison_reviews: Path | None = None, comparison_sample_id: str | None = None,
+                 comparison_tracks: Path | None = None, target_overlay: bool = False) -> dict:
     """Create a new independently inspectable run; never overwrite a prior run."""
     from mouse_behavior.visualization.behavior_packages import export_packages, render_full_package, reuse_full_package, write_manifests
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"refusing to overwrite run: {output}")
+    review_inputs = (comparison_reviews, comparison_sample_id, comparison_tracks)
+    if any(value is not None for value in review_inputs) and not all(value is not None for value in review_inputs):
+        raise ValueError("comparison review requires its manifest, exact sample ID and original normalized tracks")
+    if comparison_reviews is not None and events_from is not None:
+        raise ValueError("comparison reviews cannot change persisted inference; rerun inference with the review")
     if mode not in {"all", "infer", "full", "clips"}:
         raise ValueError(f"unknown pipeline mode: {mode}")
     if type(clip_workers) is not int or clip_workers < 1:
         raise ValueError("clip workers must be a positive integer")
     if clip_preset not in ("veryfast", "ultrafast"):
         raise ValueError("clip preset must be veryfast or ultrafast")
-    if posture_mode not in {"disabled", "v3_review"}:
-        raise ValueError("posture_mode must be disabled or v3_review")
+    if not math.isfinite(clip_context_seconds) or clip_context_seconds < 0:
+        raise ValueError("clip context seconds must be finite and nonnegative")
+    if type(original_video) is not bool:
+        raise ValueError("original_video must be a boolean")
+    if type(target_overlay) is not bool or (target_overlay and original_video):
+        raise ValueError("target_overlay must be a boolean and cannot be combined with original_video")
+    if clip_codec not in {"libx264", "h264_nvenc"}:
+        raise ValueError("clip codec must be libx264 or h264_nvenc")
+    if posture_mode not in {"disabled", "v3_review", "calibrated"}:
+        raise ValueError("posture_mode must be disabled, v3_review, or calibrated")
     output.mkdir(parents=True)
+    enabled_list = list(DISPLAY_LABELS) if posture_mode == "calibrated" else list(ENABLED_BEHAVIORS)
+    disabled_list = [] if posture_mode == "calibrated" else ["grooming", "rearing"]
     receipt: dict[str, Any] = dict(status="running", mode=mode, requires_review=True,
                                   route="canonical confirmed_rules + individual_rules + group_event_rules",
-                                  enabled_behaviors=list(ENABLED_BEHAVIORS), disabled_behaviors=["grooming", "rearing"])
-    receipt.update(posture_mode=posture_mode, posture_review_behaviors=["grooming", "rearing"] if posture_mode == "v3_review" else [])
+                                  enabled_behaviors=enabled_list, disabled_behaviors=disabled_list)
+    receipt.update(posture_mode=posture_mode, posture_review_behaviors=["grooming", "rearing"] if posture_mode in {"v3_review", "calibrated"} else [])
     _write_json(output / "run_receipt.json", receipt)
     try:
         prior = None
@@ -628,6 +857,8 @@ def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
             binding, scale = bind_cache(video, cache, output / "tracks.sqlite", source_receipt=source_receipt,
                                         expected_source_sha256=expected_source_sha256)
             store = TrackStore(output / "tracks.sqlite")
+            if comparison_reviews is not None:
+                bind_comparison_review(binding, store, comparison_reviews, comparison_sample_id, comparison_tracks)
             params = config_seed_parameters(load_config(config))
             binding.update(rule_execution_binding(params, posture_mode))
             events, audit = infer_video_events(store, binding, scale, params, core_seconds=core_seconds,
@@ -639,25 +870,34 @@ def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
         _write_json(output / "events.json", events)
         rows = []
         if mode != "infer":
-            if mode == "clips" and prior is not None and "full" in prior:
+            if mode == "clips" and (original_video or target_overlay):
+                full = dict(video_path=str(video.resolve()))
+            elif mode == "clips" and prior is not None and "full" in prior:
                 full = reuse_full_package(events_from, output / "full", prior["full"], events, binding, scale)
                 receipt["full_reused_from"] = str((events_from / "full").resolve())
                 receipt["full_reuse_source_receipt_sha256"] = _sha256(events_from / "run_receipt.json")
             else:
                 full = render_full_package(video, output / "full", store, events, binding, scale)
-            receipt["full"] = full
+            if not (mode == "clips" and (original_video or target_overlay)):
+                receipt["full"] = full
             if mode in {"all", "clips"}:
                 receipt["clip_workers"] = clip_workers
                 receipt["clip_ffmpeg_threads"] = 1
                 receipt["clip_preset"] = clip_preset
-                receipt["clip_crf"] = 21
+                receipt["clip_crf" if clip_codec == "libx264" else "clip_cq"] = 21
+                receipt["clip_codec"] = clip_codec
+                receipt["clip_context_seconds"] = clip_context_seconds
+                receipt["clip_original_video"] = original_video
+                receipt["clip_target_overlay"] = target_overlay
                 receipt["clip_verification_decoder_threads"] = 1
                 context_receipt = receipt
                 while "inference_audit" not in context_receipt and isinstance(context_receipt.get("inference_receipt"), dict):
                     context_receipt = context_receipt["inference_receipt"]
                 context = context_receipt.get("inference_audit", {})
                 rows = export_packages(output / "clips", Path(full["video_path"]), store, events, binding, scale,
-                                       workers=clip_workers, qualification_context=context, clip_preset=clip_preset)
+                                       workers=clip_workers, qualification_context=context, clip_preset=clip_preset,
+                                       clip_context_seconds=clip_context_seconds, original_video=original_video,
+                                       clip_codec=clip_codec, target_overlay=target_overlay)
         write_manifests(output, rows)
         receipt.update(status="complete", event_count=len(events), clip_count=len(rows),
                        track_truncation=False, source_preserved_sha256=_sha256(video))

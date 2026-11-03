@@ -1,6 +1,8 @@
 """Measured footprint proximity can rescue center-far action, never unknown rows."""
 from dataclasses import replace
 
+from tests.regression.legacy_social_profile import LEGACY_SOCIAL
+
 import numpy as np
 import pytest
 
@@ -99,24 +101,24 @@ def test_center_far_contact_does_not_expand_unvalidated_light_route(monkeypatch)
         return velocity, acceleration
     monkeypatch.setattr(rules, '_local_quadratic_point_kinematics', measured)
     channels = {}
-    mask = rules._attack_action_mask(f, 0, channels=channels)
+    mask = rules._attack_action_mask(f, 0, LEGACY_SOCIAL, channels=channels)
     assert not mask.any(), 'head motion plus footprint proximity cannot expand the light route'
     assert not channels['center_only_raw'].any()
     assert np.array_equal(channels['observed_contact_rescue'], mask)
     # The original center-near light detector remains available.
     f.centers_cm[:20, 1, 0] = 6.
     audit.sync(f)
-    baseline = rules._attack_action_mask(f, 0)
+    baseline = rules._attack_action_mask(f, 0, LEGACY_SOCIAL)
     assert baseline[10:20].all()
     assert not baseline[:10].any() and not baseline[20:].any()
 
 
 def test_contact_alone_and_bbox_overlap_alone_never_start_attack():
     f = contact_fixture()
-    assert not rules._attack_action_mask(f, 0).any(), 'contact is not an attack trigger'
+    assert not rules._attack_action_mask(f, 0, LEGACY_SOCIAL).any(), 'contact is not an attack trigger'
     f.collective_boxes_cm = np.ones((60, 2, 4))
     f.collective_keypoints_cm[:, 1, :, 0] += 20.
-    assert not rules._attack_action_mask(f, 0).any(), 'coarse boxes are not body contact evidence'
+    assert not rules._attack_action_mask(f, 0, LEGACY_SOCIAL).any(), 'coarse boxes are not body contact evidence'
 
 
 def test_heavy_geometry_rescue_outputs_only_measured_rows_and_cannot_enlarge_missing_support():
@@ -134,7 +136,7 @@ def test_heavy_geometry_rescue_outputs_only_measured_rows_and_cannot_enlarge_mis
         f.collective_boxes_cm[low:high, 1] = np.nan
         f.valid[low:high, 1] = False
     channels = {}
-    mask = rules._attack_action_mask(f, 0, channels=channels)
+    mask = rules._attack_action_mask(f, 0, LEGACY_SOCIAL, channels=channels)
     assert mask[25:32].all()
     assert channels['center_only_raw'].any()
     assert not ((mask & ~channels['center_only_raw']) & ~f.valid.all(axis=1)).any()
@@ -153,7 +155,7 @@ def test_footprint_and_box_cycles_cannot_create_a_new_unanchored_heavy_process()
         f.collective_boxes_cm[low:high, 1] = np.nan
         f.valid[low:high, 1] = False
     channels = {}
-    mask = rules._attack_action_mask(f, 0, channels=channels)
+    mask = rules._attack_action_mask(f, 0, LEGACY_SOCIAL, channels=channels)
     assert not channels['center_only_raw'].any()
     assert not mask.any(), 'new footprint cue only extends an established center-heavy process'
     assert np.array_equal(mask, channels['light_observed_acceleration'] | channels['heavy_repeated_target_boxes'])

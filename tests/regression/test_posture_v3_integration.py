@@ -71,10 +71,10 @@ def test_adapter_preserves_missing_slots_track_ids_and_explicit_point_order():
 
 
 def test_measured_role_reversal_cannot_publish_short_approach_fragments():
-    actor = np.array([7]*9+[8])
-    target = np.array([8]*9+[7])
-    events = _directed_events(np.ones(10, bool), actor, target, [7, 8], "approach", np.ones(10, bool), fps=10.)
-    assert [(e["start_frame"], e["end_frame"]) for e in events] == [(0, 9)]
+    actor = np.array([7]*12+[8])
+    target = np.array([8]*12+[7])
+    events = _directed_events(np.ones(13, bool), actor, target, [7, 8], "approach", np.ones(13, bool), fps=10.)
+    assert [(e["start_frame"], e["end_frame"]) for e in events] == [(0, 12)]
     assert all(qualify_event_duration(event, 10.)["ok"] for event in events)
 
 

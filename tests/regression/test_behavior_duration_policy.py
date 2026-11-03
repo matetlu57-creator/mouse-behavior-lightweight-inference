@@ -29,8 +29,8 @@ def event(behavior, count, start=0, **extra):
 
 
 @pytest.mark.parametrize("behavior,minimum,comparator", [
-    ("stationary", 1., ">="), ("locomotion", .5, ">="), ("approach", .3, ">="),
-    ("together", 1., ">="), ("attack", .15, ">="), ("chase", 1., ">="),
+    ("stationary", 1., ">="), ("locomotion", .5, ">="), ("approach", 1., ">"),
+    ("together", 1., ">="), ("attack", .7, ">="), ("chase", 1., ">="),
     ("nose_head_contact", .1, ">="), ("nose_tail_contact", .15, ">="),
     ("huddle", 5., ">="), ("social_clustering", .5, ">="),
     ("isolation", 10., ">"), ("dispersal", 5., ">"), ("group_locomotion", 3., ">"),
@@ -134,8 +134,8 @@ def test_isolation_preserves_upstream_group_minimum_and_v3_posture_ignores_socia
                          together_min_duration_s=20., attack_min_event_duration_s=20., pair_min_duration_s=20.)
     assert resolve_duration_policy("isolation", parameters=parameters).required_s == 10
     assert require_event_duration(event("chase", 100), 100, parameters=parameters)["required_s"] == 1
-    assert require_event_duration(event("approach", 30), 100, parameters=parameters)["required_s"] == .3
-    assert require_event_duration(event("attack", 15), 100, parameters=parameters)["required_s"] == .15
+    assert require_event_duration(event("approach", 101), 100, parameters=parameters)["required_s"] == 1.
+    assert require_event_duration(event("attack", 70), 100, parameters=parameters)["required_s"] == .7
     assert require_event_duration(event("together", 100), 100, parameters=parameters)["required_s"] == 1
     for behavior in ("grooming", "rearing"):
         result = require_event_duration(event(behavior, 30, posture_engine="v3_decoupled"), 100, parameters=parameters)
@@ -275,13 +275,13 @@ def test_real_export_duration_payloads_and_numbered_frames(tmp_path):
     info = dict(path=str(source), sha256=packages._sha256(source), fps=fps,
                 frame_count=count, width=160, height=96)
     binding = dict(source_video=info, cache_status_sha256="synthetic", chunk_sha256={})
-    row = event("approach", 6, start=17)
+    row = event("locomotion", 10, start=17)
     full = packages.render_full_package(source, tmp_path / "full", Store(), [row], binding, {})
     rows = packages.export_packages(tmp_path / "clips", Path(full["video_path"]), Store(), [row], binding, {})
     package = Path(rows[0]["path"])
     assert {item.name for item in package.iterdir()} == set(packages.PAYLOADS)
     verified = rows[0]["verification"]
-    assert verified["frame_count"] == 6 and verified["duration_s"] == pytest.approx(.3)
+    assert verified["frame_count"] == 10 and verified["duration_s"] == pytest.approx(.5)
     metadata = json.loads((package / "metadata.json").read_text())
     qualification = metadata["provenance"]["event_qualification"]
     assert qualification["standalone_duration_qualification"]["ok"]
@@ -306,7 +306,7 @@ def test_real_export_duration_payloads_and_numbered_frames(tmp_path):
         color = frame[80:, 100:].mean(axis=(0, 1))
         matched.append(int(np.argmin(np.linalg.norm(np.asarray(reference) - color, axis=1))))
     capture.release()
-    assert matched == list(range(17, 23))
+    assert matched == list(range(17, 27))
 
 
 def test_post_encode_rechecks_actual_fps_before_publishing_annotation(tmp_path, monkeypatch):
@@ -318,7 +318,7 @@ def test_post_encode_rechecks_actual_fps_before_publishing_annotation(tmp_path, 
     row = event("approach", 3)
     with pytest.raises(ValueError, match="process_duration_below_requirement"):
         packages._export_one_package(tmp_path, tmp_path / "rendered.mp4", Store(), row,
-                                     {"source_video": dict(fps=10, width=160, height=96)}, {}, 10, None, "veryfast")
+                                     {"source_video": dict(fps=10, width=160, height=96, frame_count=100)}, {}, 10, None, "veryfast")
     assert not (tmp_path / row["behavior"] / row["event_id"] / "annotation.json").exists()
 
 

@@ -30,12 +30,30 @@ from .pair_roles import (
 )
 from .social_event_geometry import (
     body_footprint_distances, endpoint_distances, observed_path_and_net, snout_surface_distances,
-    directed_snout_body_footprint_distances,
+    directed_snout_body_footprint_distances, observed_body_separation,
 )
 
 
 CONFIRMED_POLICY = ScreenPolicy()
-SOCIAL_RULE_REVISION = "2026-10-23-social-v30-qualified-boundaries-and-directed-role-spans"
+
+
+def together_contact_evidence(f: ExportedFeatures, edge: int) -> tuple[np.ndarray, np.ndarray]:
+    """Measured endpoint proximity diagnostics, independent of pair priority.
+
+    These are existing contact-onset geometry limits, not confirmed physical
+    contact. Fully unavailable endpoints remain unknown rather than 'no contact'.
+    """
+    config = DEFAULT_SOCIAL_HEURISTIC_CONFIG
+    contact = np.zeros(len(f.valid), bool)
+    joint = f.valid[:, f.pair_i[edge]] & f.valid[:, f.pair_j[edge]]
+    known = joint.copy()
+    for kind in ("head", "tail"):
+        for values in endpoint_distances(f, edge, kind):
+            measured = joint & np.isfinite(values)
+            known &= measured
+            contact |= measured & (values <= config.contact_onset_cm(kind))
+    return contact, known
+SOCIAL_RULE_REVISION = "2026-10-26-social-v31-observed-action-minima"
 SOCIAL_NOSE_HEAD_CONTACT_DISTANCE_CM = DEFAULT_SOCIAL_HEURISTIC_CONFIG.dist_nose_head_contact_max_cm
 SOCIAL_NOSE_TAIL_CONTACT_DISTANCE_CM = DEFAULT_SOCIAL_HEURISTIC_CONFIG.dist_nose_tail_contact_max_cm
 SOCIAL_ALIGNED_HEADING_COSINE = 0.25
@@ -89,7 +107,7 @@ def policy_receipt(
     }
     groups = {
         "huddling": f"at_least3 observed visual IDs; connected graph center<={DEFAULT_GROUP_HEURISTIC_CONFIG.huddle_neighbor_distance_cm}cm OR nose<=4.0125cm; compact support>=5s; quiet last observed in-pile member held<=5s without reappearance; observed departure or moving pile ends hold; raw missing rows preserved",
-        "isolation": "all finite coobserved target nearest-neighbor distances strictly>20cm; observed support strictly>10s; missing unknown; no individual action gate; sub20 positive exclusions are derived evaluation artifacts only, not runtime identity merges",
+        "isolation": "all finite coobserved target nearest-neighbor distances strictly>20cm throughout the acceptance range; observed support strictly>10s; any measured distance<=20cm rejects the target for that range; no later-far episode rescue, no identity merging or missing-frame distance credit",
         "isolation_distance_cm": GROUP_ISOLATION_DISTANCE_CM,
         "social_clustering": "observed joining or mutual convergence precedes confirmed dense state; adjacent real center path strictly>10cm, measured path/time>=2cm/s, observed vector-sum net>=1cm, adjacent measured distance-drop>=1cm, relative direction cosine>=0.5 and directed support>=0.15s; convergence lookback and toward fraction from group config; final connected all-observed shared-center radius<=10cm requires a contiguous measured run>=0.5s; bounded unknown-only memory retains confirmed state with minimum observed fraction, never combines shorter runs to create stability; output actual all-member-observed formation prefix and dense rows only; no recipient speed cap, cross-gap jumps or missing-frame credit; retained legacy joining channel remains separately qualified; support intervals publish observed directed motion",
         "group_locomotion": f"at_least3 IDs; each smoothed speed>={DEFAULT_GROUP_HEURISTIC_CONFIG.locomotion_active_speed_cm_s}cm/s; synchronized support>={DEFAULT_GROUP_HEURISTIC_CONFIG.locomotion_simultaneous_min_s}s; all pair distances<{DEFAULT_GROUP_HEURISTIC_CONFIG.locomotion_max_pair_distance_cm}cm; velocity and net coherence>={DEFAULT_GROUP_HEURISTIC_CONFIG.locomotion_min_direction_similarity}; each net displacement>={DEFAULT_GROUP_HEURISTIC_CONFIG.locomotion_min_net_displacement_cm}cm; process span>3s",
@@ -97,10 +115,30 @@ def policy_receipt(
         "dispersal_distance_statistic": "maximum_close_neighbor_degree_le1_at_observed_checkpoint_strictly_after5s",
         "proposal_member_set_budget": GROUP_PROPOSAL_SET_BUDGET,
     }
+    rules["approach"] = (
+        f"actor moves toward partner while mutual distance shrinks; event strictly>{social_config.approach_min_duration_s}s; "
+        f"actor adjacent jointly observed path>={social_config.approach_min_actor_path_cm}cm; "
+        "missing comparisons add no path; target may be stationary, lateral or receding; "
+        "measured head/body facing, observed onset, fitted final center/snout-surface envelope "
+        "and >=80percent candidate validity remain required; priority leftovers requalify independently")
+    rules["approach"] += (
+        "; v32 requires known positive projected non-tail body-hull or measured rectangle gap; "
+        "touching/overlap in either known geometry vetoes eligibility; contact and unknown "
+        "separation split eligibility and onset lookback; surviving prefixes requalify independently; "
+        "projected separation is a conservative proxy, not physical contact proof"
+        if social_config.approach_require_no_body_contact else "; explicit historical contact-free opt-out")
+    rules["attack"] = rules["attack"].replace(
+        "legacy trigger>=0.15s", f"legacy trigger>={social_config.attack_min_duration_s}s")
+    rules["chase"] += f"; each participant own adjacent-observed mean speed>={social_config.chasing_min_mean_speed_cm_s}cm/s"
     receipt = {
-        "version": "confirmed_rules_v30",
-        "requested_policy_revision": "2026-10-20-v28-user-overrides-v26-restorations-and-contact-onsets",
-        "chasing_mean_speed_contract": "each participant real adjacent eligible path divided by adjacent-step time >= chasing_min_mean_speed_cm_s; no cross-gap jumps, missing time or imputed frames; 15cm/s explicit request, not calibrated optimum",
+        "version": "confirmed_rules_v31",
+        "requested_policy_revision": "2026-10-26-v31-observed-action-minima-strict-isolation-retained",
+        "approach_rule_revision": "2026-10-26-v32-known-body-separation-no-contact-prefix",
+        "requested_event_minima": dict(approach_duration_s=social_config.approach_min_duration_s,
+            approach_duration_comparator=">", approach_actor_path_cm=social_config.approach_min_actor_path_cm,
+            attack_duration_s=social_config.attack_min_duration_s,
+            chase_each_mean_speed_cm_s=social_config.chasing_min_mean_speed_cm_s),
+        "chasing_mean_speed_contract": f"each participant real adjacent eligible path divided by adjacent-step time >= {social_config.chasing_min_mean_speed_cm_s}cm/s; no cross-gap jumps, missing time or imputed frames; explicit user setting, not calibrated optimum",
         "contact_onset_contract": "independent head-triangle and tail-root first-measured onset gates; per-class first-finite annotated-frame p90 from159 head/75 tail samples; onset must survive higher-priority arbitration; no retrospective painting before onset; full-data retrospective fit, no independent validation",
         "contact_onset_statistics_sha256": "c99e75282843b88844630044e96a98bd29c1d319a47c518190a20ec3b6ed00f6",
         "contact_subtype_competition_contract": "baseline and short extensions compare each measured primary endpoint with both competing subtype directions of the same pair; only the closer subtype survives, unknown competitor supplies no veto, equal distances defer to configured head/tail priority; no endpoint or frame is inferred; selected over broad-head temporal tightening in full234 retrospective ablation, not independent validation",
@@ -288,6 +326,20 @@ def _single_bout_mask(mask: np.ndarray, fps: float, minimum_seconds: float) -> n
         if end - start >= minimum:
             result[start:end] = True
     return result
+
+
+def _keep_bouts_strictly_shorter(mask: np.ndarray, fps: float, maximum_seconds: float) -> np.ndarray:
+    """Keep only continuous bouts strictly shorter than maximum_seconds (< maximum_seconds)."""
+    values = np.asarray(mask, bool)
+    result = np.zeros_like(values)
+    for start, end in runs(values):
+        if (end - start) / float(fps) < float(maximum_seconds) - 1e-9:
+            result[start:end] = True
+    return result
+
+
+keep_bouts_strictly_shorter = _keep_bouts_strictly_shorter
+
 
 
 def _bridge_internal_gaps(mask: np.ndarray, support: np.ndarray, fps: float,
@@ -976,7 +1028,7 @@ def _open_approach_mask(
     *, direction_evidence: dict | None = None,
     retained_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Directed closing with a fitted endpoint envelope, independent of contacts.
+    """Directed closing ending before observed projected body contact.
 
     v17.1 permits stationary, lateral and receding targets. The actor must still
     move toward the target while mutual distance shrinks. Only the completed
@@ -1001,13 +1053,17 @@ def _open_approach_mask(
                 else np.asarray(retained_mask, bool))
     if retained.shape != visible.shape:
         raise ValueError("retained Approach support must match the frame axis")
-    # Onset/endpoint geometry belongs to the retained event. Keep the original
-    # lagged motion context, otherwise an exactly minimum-duration prefix would
-    # need one extra frame merely to recompute its closing-speed lag.
+    # Contact and unknown separation split both eligibility and lookback.
+    # Arbitration may retain earlier motion context, but no anchor crosses a
+    # body-contact boundary or an interval with unmeasured separation.
+    separated = (observed_body_separation(
+        f, edge, max_body_lengths=social_config.approach_max_footprint_body_lengths)
+        if social_config.approach_require_no_body_contact else np.ones(len(visible), bool))
+    retained = retained & separated
     span_start = np.maximum.accumulate(np.where(~retained, np.arange(len(visible)) + 1, 0))
     distance = np.asarray(f.pair_distance_cm[:, edge], float)
-    minimum = max(1, int(np.ceil(social_config.approach_min_duration_s * f.fps - 1e-9)))
-    lag = max(1, int(round(social_config.approach_min_duration_s * f.fps)))
+    minimum = max(1, int(np.floor(social_config.approach_min_duration_s * f.fps + 1e-9)) + 1)
+    lag = max(1, int(round(social_config.approach_closing_window_s * f.fps)))
     gap_frames = max(0, int(np.floor(social_config.approach_window_max_gap_s * f.fps + 1e-9)))
     filled_distance = _fill_short_nan_gaps(distance, gap_frames)[0]
     closing = np.zeros(len(visible), bool)
@@ -1073,6 +1129,10 @@ def _open_approach_mask(
                 event = slice(onset, int(endpoint) + 1)
                 if (visible[event].mean() < ratio or directed[event].mean() < ratio
                         or np.isfinite(surface_raw[event]).mean() < ratio):
+                    continue
+                actor_path, _ = observed_path_and_net(
+                    f.centers_cm[event, actor], visible[event])
+                if actor_path + 1e-9 < social_config.approach_min_actor_path_cm:
                     continue
                 result[event] = True
                 directed_candidates[direction, event] = True
@@ -1397,7 +1457,7 @@ def _base_pair_rule_masks(
         )
         attack_qualified = attack_s + 1e-12 >= social_config.attack_min_duration_s
         chase_qualified = bool(chase.any())
-        approach_qualified = approach_s + 1e-12 >= social_config.approach_min_duration_s
+        approach_qualified = approach_s > social_config.approach_min_duration_s + 1e-12
         together_qualified = together_s + 1e-12 >= social_config.together_min_duration_s
         candidates = {
             "approach": (approach, approach_qualified),
@@ -1430,6 +1490,9 @@ def _base_pair_rule_masks(
                     mask & ~claimed, motion_known, f.centers_cm, left, right, f.fps, social_config)
             else:
                 selected = _single_bout_mask(mask & ~claimed, f.fps, minima[behavior])
+                if behavior == "approach":
+                    selected = _open_approach_mask(
+                        f, edge, p, social_config, retained_mask=selected)
                 if behavior in ("head_contact", "tail_contact"):
                     values = head_directed if behavior == "head_contact" else tail_directed
                     cap = (social_config.dist_nose_head_contact_max_cm if behavior == "head_contact"
@@ -1616,6 +1679,7 @@ def pair_rule_masks(
                 kind, _ = contacts[name]
                 selected = _qualify_contact_channels(
                     selected, joint, endpoints, kind, f.fps, social_config)
+            selected = selected & ~claimed
             result[name][:, edge] = selected
             claimed |= selected
             if name not in contacts:

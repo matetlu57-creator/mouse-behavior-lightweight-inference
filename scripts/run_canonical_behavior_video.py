@@ -27,12 +27,19 @@ def main() -> int:
     parser.add_argument("--export-clips", action="store_true", help="Request clips; full render is their reusable dependency")
     parser.add_argument("--core-seconds", type=float, default=20)
     parser.add_argument("--context-seconds", type=float, default=10)
-    parser.add_argument("--posture-mode", choices=("disabled", "v3_review"), default="disabled",
-                        help="V3.1 independent Grooming/Rearing review candidates; never human-confirmed labels")
+    parser.add_argument("--posture-mode", choices=("disabled", "v3_review", "calibrated"), default="disabled",
+                        help="Posture mode: disabled, v3_review (V3.1 review candidates), or calibrated (all 4 individual rules)")
     parser.add_argument("--workers", type=int, default=1, help="Independent context/core processes; default serial")
     parser.add_argument("--clip-workers", type=int, default=1, help="Independent event exports; each FFmpeg uses one thread, default serial")
     parser.add_argument("--clip-preset", choices=("veryfast", "ultrafast"), default="veryfast",
                         help="Clip H.264 encoding preset; CRF remains 21, full render is unchanged")
+    parser.add_argument("--clip-context-seconds", type=float, default=0., help="Optional review context; default exports only the recognized event; context never qualifies duration")
+    parser.add_argument("--original-video", action="store_true", help="Export original pixels with optional source audio encoded AAC")
+    parser.add_argument("--target-overlay", action="store_true", help="Render each clip directly from the source, highlighting only that event's measured participants")
+    parser.add_argument("--clip-codec", choices=("libx264", "h264_nvenc"), default="libx264")
+    parser.add_argument("--comparison-reviews", type=Path, help="Explicit source-bound human comparator review manifest")
+    parser.add_argument("--comparison-sample-id", help="Exact reviewed sample ID; never applied across samples")
+    parser.add_argument("--comparison-tracks", type=Path, help="Reviewed standardized tracks; must match every bound cache observation")
     args = parser.parse_args()
     mode = args.mode
     if args.render_full or args.export_clips:
@@ -42,7 +49,10 @@ def main() -> int:
                            source_receipt=args.source_receipt, expected_source_sha256=args.source_sha256,
                            events_from=args.events_from, core_seconds=args.core_seconds,
                            context_seconds=args.context_seconds, workers=args.workers, clip_workers=args.clip_workers,
-                           clip_preset=args.clip_preset, posture_mode=args.posture_mode)
+                           clip_preset=args.clip_preset, posture_mode=args.posture_mode,
+                           clip_context_seconds=args.clip_context_seconds, original_video=args.original_video, clip_codec=args.clip_codec,
+                           comparison_reviews=args.comparison_reviews, comparison_sample_id=args.comparison_sample_id,
+                           comparison_tracks=args.comparison_tracks, target_overlay=args.target_overlay)
     logging.info("Complete: %s | events=%d clips=%d", args.output.resolve(), receipt["event_count"], receipt["clip_count"])
     return 0
 

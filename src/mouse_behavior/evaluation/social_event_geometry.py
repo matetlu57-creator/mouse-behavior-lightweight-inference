@@ -131,6 +131,34 @@ def body_footprint_distances(
     return result
 
 
+def observed_body_separation(features: ExportedFeatures, edge: int, *,
+                             max_body_lengths: float) -> np.ndarray:
+    """Known positive projected gap; touching boxes or non-tail hulls veto it.
+
+    This conservative image-plane proxy is not proof of physical separation.
+    Unknown geometry never supplies a positive frame or bridges an episode.
+    """
+    hull_gap = body_footprint_distances(features, edge, max_body_lengths=max_body_lengths)
+    box_gap = np.full(len(features.valid), np.nan)
+    left, right = int(features.pair_i[edge]), int(features.pair_j[edge])
+    boxes = features.collective_boxes_cm
+    if boxes is not None:
+        first, second = np.asarray(boxes[:, left], float), np.asarray(boxes[:, right], float)
+        known = (np.isfinite(first).all(axis=1) & np.isfinite(second).all(axis=1)
+                 & (first[:, 2:] > first[:, :2]).all(axis=1)
+                 & (second[:, 2:] > second[:, :2]).all(axis=1))
+        gaps = np.maximum(0., np.maximum(first[:, :2] - second[:, 2:],
+                                         second[:, :2] - first[:, 2:]))
+        box_gap[known] = np.linalg.norm(gaps[known], axis=1)
+    elif features.pair_box_gap_cm is not None:
+        box_gap = np.asarray(features.pair_box_gap_cm[:, edge], float)
+    hull_known = np.isfinite(hull_gap)
+    box_known = np.isfinite(box_gap)
+    return ((hull_known | box_known) & ~(hull_known & (hull_gap <= 0.))
+            & ~(box_known & (box_gap <= 0.))
+            & features.valid[:, left] & features.valid[:, right])
+
+
 def directed_snout_body_footprint_distances(
     features: ExportedFeatures, edge: int, *, actor: int, max_body_lengths: float,
     frame_mask: np.ndarray | None = None,
@@ -184,3 +212,15 @@ def observed_path_and_net(positions: np.ndarray, observed: np.ndarray) -> tuple[
     path = float(np.linalg.norm(np.diff(positions, axis=0)[adjacent], axis=1).sum())
     net = float(np.linalg.norm(positions[frames[-1]] - positions[frames[0]]))
     return path, net
+
+
+def observed_motion_statistics(positions: np.ndarray, observed: np.ndarray, fps: float) -> dict:
+    """Motion of one published event; absent steps add neither time nor travel."""
+    positions = np.asarray(positions, float)
+    observed = np.asarray(observed, bool) & np.isfinite(positions).all(axis=1)
+    adjacent = observed[1:] & observed[:-1]
+    steps = np.diff(positions, axis=0)[adjacent]
+    seconds = float(adjacent.sum()) / fps
+    path = float(np.linalg.norm(steps, axis=1).sum())
+    return dict(path_cm=path, net_cm=float(np.linalg.norm(steps.sum(axis=0))),
+                adjacent_seconds=seconds, mean_speed_cm_s=path / seconds if seconds else 0.)

@@ -10,7 +10,8 @@ from mouse_behavior.evaluation import confirmed_rules as rules
 
 # Historical .3/.15s extension geometry fixtures remain reproducible.
 # v27 live .1s channel minima have separate positive/negative regressions.
-EXTENSION_TEST_CONFIG = replace(rules.DEFAULT_SOCIAL_HEURISTIC_CONFIG,
+EXTENSION_TEST_CONFIG = replace(rules.DEFAULT_SOCIAL_HEURISTIC_CONFIG, attack_min_duration_s=.15,
+    approach_min_duration_s=.3, approach_min_actor_path_cm=0.,
     nose_contact_min_duration_s=.5, contact_bridge_max_gap_s=.15,
     together_contact_veto_min_duration_s=.15,
     contact_head_extension_min_duration_s=.3, contact_tail_extension_min_duration_s=.15)

@@ -6,9 +6,17 @@ import numpy as np
 import pytest
 
 from tests.regression import test_heuristics_v16_audit as audit
-from mouse_behavior.evaluation.confirmed_rules import _open_approach_mask
+from mouse_behavior.evaluation.confirmed_rules import _open_approach_mask as active_approach_mask
 from mouse_behavior.evaluation.exported_dataset_config import config_seed_parameters
 from mouse_behavior.evaluation.social_heuristic_config import DEFAULT_SOCIAL_HEURISTIC_CONFIG
+
+
+def _open_approach_mask(features, edge, parameters, config=None):
+    # Keep the historical boundary counterexamples at their explicit V17
+    # minima. Current requested >1s/10cm defaults have separate V31 tests.
+    config = replace(config or DEFAULT_SOCIAL_HEURISTIC_CONFIG,
+                     approach_min_duration_s=.3, approach_min_actor_path_cm=0.)
+    return active_approach_mask(features, edge, parameters, config)
 
 
 def _closing_pair():

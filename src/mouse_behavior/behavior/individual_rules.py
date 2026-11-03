@@ -51,8 +51,8 @@ class IndividualHeuristicConfig:
     rearing_context_window_s: float = 2.0
     rearing_min_duration_s: float = 0.5
     rearing_min_projection_change_body_ratio: float = 0.15
-    rearing_max_short_projection_body_ratio: float = 0.55
-    wall_min_neck_excursion_body_ratio: float = 0.12
+    rearing_max_short_projection_body_ratio: float = 0.95
+    wall_min_neck_excursion_body_ratio: float = 0.21
     # --- v16.2 module 2: posture rebuilt on 7-point trajectory + detection box ---
     #
     # ERA INVARIANCE. evaluation/scale_migration.py multiplies cm_per_pixel by
@@ -75,17 +75,18 @@ class IndividualHeuristicConfig:
     # grooming v_nose of 12.29 cm/s (gate = 0.61x measured) while its fastest
     # same-cage static track measured 9.14 cm/s, so the gate sits between them.
     # Keeping it per body length preserves that ordering in every era.
-    grooming_min_step_nose_speed_body_ratio: float = 7.5 / 10.7
-    grooming_min_nose_posterior_speed_ratio: float = 3.0
-    grooming_min_head_posterior_speed_ratio: float = 2.3
-    grooming_max_seated_projection_body_ratio: float = 0.92
+    grooming_min_step_nose_speed_body_ratio: float = 6.0 / 10.7
+    grooming_min_nose_posterior_speed_ratio: float = 1.8
+    grooming_min_head_posterior_speed_ratio: float = 1.3
+    grooming_max_seated_projection_body_ratio: float = 0.90
     grooming_box_pulsation_body_ratio: float = 0.07
     grooming_min_nose_ear_codirection: float = 0.55
-    grooming_bridge_max_s: float = 0.2
-    rearing_max_posterior_excursion_body_ratio: float = 0.15
+    grooming_max_lateral_amplitude_body_ratio: float = 0.08
+    grooming_bridge_max_s: float = 0.5
+    rearing_max_posterior_excursion_body_ratio: float = 1.15
     rearing_max_box_shrink_ratio: float = 0.78
     rearing_min_spine_collinearity: float = 0.5
-    rearing_max_wall_distance_body_ratio: float = 0.3
+    rearing_max_wall_distance_body_ratio: float = 0.85
     # The plan states "window head-neck displacement covariance > 0.05". A raw
     # covariance carries cm^2 units and would scale by 0.74^2 under migration, so
     # this is implemented as the NORMALISED (dimensionless, Pearson) covariance of
@@ -93,7 +94,7 @@ class IndividualHeuristicConfig:
     # and reads 0.05 as "very weakly co-directional is already enough" - the gate
     # is an OR with the instantaneous head_neck_cos > 0 arm.
     rearing_min_head_neck_covariance: float = 0.05
-    rearing_bridge_max_s: float = 0.2
+    rearing_bridge_max_s: float = 0.6
     box_baseline_percentile: float = 85.0
     # Keep the velocity estimator independent of the permitted Static excursion.
     motion_interpolation_max_gap_s: float = 0.3
@@ -718,17 +719,20 @@ def individual_rule_masks(
         rear_posterior_excursion = np.linalg.norm(_context_range(posterior, rear_frames), axis=2)
         projection = np.linalg.norm(points[:, :, 0] - tail_base, axis=2)
         projection_change = _context_range(projection, rear_frames)
+        short_projection = np.isfinite(projection) & (
+            projection <= config.rearing_max_short_projection_body_ratio * reference_body_cm)
+        neck_excursion = np.linalg.norm(_context_range(relative_neck, rear_frames), axis=2)
+        head_excursion = np.linalg.norm(_context_range(relative_head, rear_frames), axis=2)
 
         # --- detection-box morphology (optional) --------------------------
         if boxes is not None:
             box_width, box_height, rho_box, d_wall = _box_morphology_and_wall(
                 boxes, baseline_percentile=config.box_baseline_percentile,
             )
-            box_major_change = _context_range(np.maximum(box_width, box_height), rear_frames)
             box_pulsation = np.maximum(_range(box_width, context), _range(box_height, context))
             box_pulsation = np.where(np.isfinite(box_pulsation), box_pulsation, -np.inf)
-            near_wall = np.isfinite(d_wall) & (
-                d_wall <= config.rearing_max_wall_distance_body_ratio * reference_body_cm)
+            near_wall = (np.isfinite(d_wall) & (
+                d_wall <= config.rearing_max_wall_distance_body_ratio * reference_body_cm)) | np.isnan(d_wall)
             shrink_ok = np.isfinite(rho_box) & (rho_box <= config.rearing_max_box_shrink_ratio)
             pulsation_ok = box_pulsation >= config.grooming_box_pulsation_body_ratio * reference_body_cm
         else:
@@ -737,7 +741,6 @@ def individual_rule_masks(
             # arm falls back to the nose/ear co-direction term alone.
             rho_box = np.full(observed.shape, np.nan)
             d_wall = np.full(observed.shape, np.nan)
-            box_major_change = np.full(observed.shape, np.nan)
             box_pulsation = np.full(observed.shape, np.nan)
             shrink_ok = np.ones(observed.shape, dtype=bool)
             near_wall = np.ones(observed.shape, dtype=bool)
@@ -753,6 +756,67 @@ def individual_rule_masks(
                                 where=np.isfinite(step_posterior) & (step_posterior > 0))
         head_ratio = np.divide(step_head, step_posterior, out=np.full_like(step_head, np.nan),
                                where=np.isfinite(step_posterior) & (step_posterior > 0))
+
+        # --- rearing features ----------------------------------------------
+        rear_stable = pose_observed & (
+            rear_posterior_excursion
+            <= config.rearing_max_posterior_excursion_body_ratio * reference_body_cm)
+        short_projection = np.isfinite(projection) & (
+            projection <= config.rearing_max_short_projection_body_ratio * reference_body_cm)
+        rear_segment = neck - posterior
+        front_segment = head - neck
+        rear_length = np.linalg.norm(rear_segment, axis=2)
+        front_length = np.linalg.norm(front_segment, axis=2)
+        spine_collinearity = np.divide(
+            np.sum(rear_segment * front_segment, axis=2),
+            rear_length * front_length,
+            out=np.zeros_like(rear_length),
+            where=(rear_length * front_length) > 1e-9,
+        )
+        scene_a = short_projection & shrink_ok
+        scene_a &= spine_collinearity >= config.rearing_min_spine_collinearity
+        scene_a &= projection_change >= (
+            config.rearing_min_projection_change_body_ratio * reference_body_cm)
+
+        head_neck_cos = np.sum(_velocity(relative_head, pose_observed, fps, 0.3)
+                               * _velocity(relative_neck, pose_observed, fps, 0.3), axis=2)
+        head_axial = np.sum(relative_head * unit, axis=2)
+        neck_axial = np.sum(relative_neck * unit, axis=2)
+        window_covariance = _windowed_correlation(
+            np.diff(head_axial, axis=0, prepend=head_axial[:1]),
+            np.diff(neck_axial, axis=0, prepend=neck_axial[:1]),
+            rear_frames,
+        )
+
+        open_sweep = (~near_wall
+                      & (head_excursion >= 0.25 * reference_body_cm)
+                      & (neck_excursion >= 0.16 * reference_body_cm)
+                      & (projection_change >= 0.10 * reference_body_cm))
+        wall_sweep = (np.isfinite(d_wall)
+                      & (d_wall >= 0.25 * reference_body_cm)
+                      & (d_wall <= 0.70 * reference_body_cm)
+                      & (head_excursion >= 0.12 * reference_body_cm)
+                      & (neck_excursion >= 0.11 * reference_body_cm)
+                      & (projection_change >= 0.11 * reference_body_cm))
+        classical_sweep = (near_wall
+                           & (neck_excursion >= config.wall_min_neck_excursion_body_ratio * reference_body_cm)
+                           & (head_excursion >= config.wall_min_neck_excursion_body_ratio * reference_body_cm))
+        standing_wall = (near_wall
+                         & (projection <= 0.65 * reference_body_cm)
+                         & (head_excursion >= 0.24 * reference_body_cm)
+                         & (projection_change >= 0.15 * reference_body_cm))
+
+        scene_b = open_sweep | wall_sweep | classical_sweep | standing_wall
+        scene_b &= ((head_neck_cos > 0)
+                    | (window_covariance >= config.rearing_min_head_neck_covariance))
+        wall_pattern = near_wall & scene_b & rear_stable
+
+        strong_rearing_excursion = (
+            (head_excursion >= 0.28 * reference_body_cm)
+            & (neck_excursion >= 0.18 * reference_body_cm)
+            & (projection_change >= 0.15 * reference_body_cm)
+        )
+        rearing_veto = wall_sweep | standing_wall | classical_sweep | strong_rearing_excursion
 
         # --- grooming ------------------------------------------------------
         stable = pose_observed & np.isfinite(speed) & (
@@ -782,6 +846,8 @@ def individual_rule_masks(
             step_head, step_posterior, config.grooming_min_head_posterior_speed_ratio)
         fore_aft &= seated
         fore_aft &= reversal_count(axial_velocity) >= config.grooming_min_reversals
+        fore_aft &= lateral_amp <= config.grooming_max_lateral_amplitude_body_ratio * reference_body_cm
+        fore_aft &= ~rearing_veto
 
         nose_relative = raw_points[:, :, 0] - raw_posterior
         ear_pair = raw_points[:, :, [1, 2], :]
@@ -808,69 +874,69 @@ def individual_rule_masks(
                  >= config.grooming_min_reversals)
         back &= np.linalg.norm(_range(nose_relative, context), axis=2) >= min_amplitude
 
+        # --- grooming evidence & qualification -----------------------------
         grooming_evidence = stable & (fore_aft | back)
         grooming_evidence, grooming_filled = _bridge_gaps(
             grooming_evidence, round(config.grooming_bridge_max_s * fps))
         grooming = _qualify(grooming_evidence, config.grooming_min_duration_s, fps)
 
         # --- rearing -------------------------------------------------------
-        rear_stable = pose_observed & (
-            rear_posterior_excursion
-            <= config.rearing_max_posterior_excursion_body_ratio * reference_body_cm)
-        short_projection = np.isfinite(projection) & (
-            projection <= config.rearing_max_short_projection_body_ratio * reference_body_cm)
-        rear_segment = neck - posterior
-        front_segment = head - neck
-        rear_length = np.linalg.norm(rear_segment, axis=2)
-        front_length = np.linalg.norm(front_segment, axis=2)
-        spine_collinearity = np.divide(
-            np.sum(rear_segment * front_segment, axis=2),
-            rear_length * front_length,
-            out=np.zeros_like(rear_length),
-            where=(rear_length * front_length) > 1e-9,
-        )
-        dynamic_change = np.maximum(
-            np.where(np.isfinite(projection_change), projection_change, -np.inf),
-            np.where(np.isfinite(box_major_change), box_major_change, -np.inf),
-        )
-        # Scene A: open-field rearing, the body foreshortens in the top view.
-        scene_a = short_projection & shrink_ok
-        scene_a &= spine_collinearity >= config.rearing_min_spine_collinearity
-        scene_a &= dynamic_change >= (
-            config.rearing_min_projection_change_body_ratio * reference_body_cm)
-        # Scene B: wall/climbing rearing, the projection need not shorten but the
-        # box sits against the arena envelope and head and neck both sweep.
-        neck_excursion = np.linalg.norm(_context_range(relative_neck, rear_frames), axis=2)
-        head_excursion = np.linalg.norm(_context_range(relative_head, rear_frames), axis=2)
-        head_neck_cos = np.sum(_velocity(relative_head, pose_observed, fps, 0.3)
-                               * _velocity(relative_neck, pose_observed, fps, 0.3), axis=2)
-        # The plan asks for the head/neck DISPLACEMENT covariance, so this
-        # correlates per-frame increments, not positions. Correlating the position
-        # projections returned ~1.0 for every track in both calibration samples -
-        # two slowly varying projections of a near-rigid body co-vary trivially -
-        # which made the whole OR arm a no-op. Increments only co-vary when the
-        # head and the neck are genuinely being driven together.
-        head_axial = np.sum(relative_head * unit, axis=2)
-        neck_axial = np.sum(relative_neck * unit, axis=2)
-        window_covariance = _windowed_correlation(
-            np.diff(head_axial, axis=0, prepend=head_axial[:1]),
-            np.diff(neck_axial, axis=0, prepend=neck_axial[:1]),
-            rear_frames,
-        )
-        sweep = (neck_excursion >= config.wall_min_neck_excursion_body_ratio * reference_body_cm)
-        sweep &= head_excursion >= config.wall_min_neck_excursion_body_ratio * reference_body_cm
-        scene_b = near_wall & sweep
-        scene_b &= (head_neck_cos > 0) | (
-            window_covariance >= config.rearing_min_head_neck_covariance)
+        mounted_veto = np.zeros_like(rear_stable)
+        if boxes is not None and observed.shape[1] > 1:
+            for slot in range(observed.shape[1]):
+                b_slot = boxes[:, slot]
+                valid_slot = observed[:, slot] & np.isfinite(b_slot).all(axis=1)
+                for other in range(observed.shape[1]):
+                    if other == slot:
+                        continue
+                    b_other = boxes[:, other]
+                    valid_pair = valid_slot & observed[:, other] & np.isfinite(b_other).all(axis=1)
+                    if not valid_pair.any():
+                        continue
+                    ix1 = np.maximum(b_slot[:, 0], b_other[:, 0])
+                    iy1 = np.maximum(b_slot[:, 1], b_other[:, 1])
+                    ix2 = np.minimum(b_slot[:, 2], b_other[:, 2])
+                    iy2 = np.minimum(b_slot[:, 3], b_other[:, 3])
+                    iw = np.maximum(0.0, ix2 - ix1)
+                    ih = np.maximum(0.0, iy2 - iy1)
+                    inter_area = iw * ih
+                    area_slot = np.maximum(0.0, b_slot[:, 2] - b_slot[:, 0]) * np.maximum(0.0, b_slot[:, 3] - b_slot[:, 1])
+                    area_other = np.maximum(0.0, b_other[:, 2] - b_other[:, 0]) * np.maximum(0.0, b_other[:, 3] - b_other[:, 1])
+                    union = area_slot + area_other - inter_area
+                    iou = np.divide(inter_area, union, out=np.zeros_like(inter_area), where=union > 1e-9)
+                    min_area = np.minimum(area_slot, area_other)
+                    iom = np.divide(inter_area, min_area, out=np.zeros_like(inter_area), where=min_area > 1e-9)
+                    dist_c = np.linalg.norm(centers_cm[:, slot] - centers_cm[:, other], axis=1)
+                    # Mounting requires close body proximity and substantial box overlap.
+                    # Casual side-by-side brushing (e.g. while wall-rearing) does not constitute mounting.
+                    overlap = valid_pair & (dist_c <= 0.50 * reference_body_cm) & ((iou >= 0.20) | (iom >= 0.35))
+                    mounted_veto[:, slot] |= overlap
+        elif observed.shape[1] > 1:
+            for slot in range(observed.shape[1]):
+                for other in range(observed.shape[1]):
+                    if other != slot:
+                        valid_pair = observed[:, slot] & observed[:, other]
+                        dist_c = np.linalg.norm(centers_cm[:, slot] - centers_cm[:, other], axis=1)
+                        mounted_veto[:, slot] |= valid_pair & (dist_c <= 0.50 * reference_body_cm)
 
-        rearing_evidence = rear_stable & (scene_a | scene_b) & ~grooming
+        # Dorsal grooming suppression in rearing:
+        # Dorsal/flank grooming curls the mouse's body towards the hips/posterior, foreshortening
+        # the nose-tail projection and triggering short_projection or wall_pattern without true
+        # upright standing posture. Suppress rearing when the mouse exhibits dorsal grooming geometry.
+        dorsal_groom_curled = (
+            (back_distance <= config.back_groom_max_nose_posterior_body_ratio * reference_body_cm)
+            & ((spine_collinearity < config.rearing_min_spine_collinearity) | nose_back)
+        )
+        dorsal_groom_veto = dorsal_groom_curled | back
+
+        rearing_active = rear_stable & (scene_a | scene_b) & ~grooming & ~mounted_veto & ~dorsal_groom_veto
+        rearing_active &= (short_projection | scene_a | standing_wall | wall_pattern)
         rearing_evidence, rearing_filled = _bridge_gaps(
-            rearing_evidence, round(config.rearing_bridge_max_s * fps))
-        rearing_evidence &= ~grooming
+            rearing_active, round(0.3 * fps))
+        rearing_evidence &= ~grooming & ~mounted_veto & ~dorsal_groom_veto
         rearing = _qualify(rearing_evidence, config.rearing_min_duration_s, fps)
 
         posture_bridged |= grooming_filled | rearing_filled
-        wall_pattern = scene_b & rear_stable
         masks["grooming"], masks["rearing"] = grooming, rearing
         diagnostics.update({"head_relative_speed_cm_s": np.linalg.norm(head_velocity, axis=2),
                             "posterior_excursion_cm": posterior_excursion,
@@ -883,7 +949,9 @@ def individual_rule_masks(
                             "grooming_step_nose_speed_cm_s": step_nose,
                             "grooming_step_posterior_speed_cm_s": step_posterior,
                             "grooming_nose_posterior_speed_ratio": speed_ratio,
-                            "grooming_head_posterior_speed_ratio": head_ratio})
+                            "grooming_head_posterior_speed_ratio": head_ratio,
+                            "scene_a": scene_a, "scene_b": scene_b,
+                            "rear_stable": rear_stable, "rearing_evidence": rearing_evidence})
     posture = masks["grooming"] | masks["rearing"]
     locomotion &= ~posture
     # [v16.2 IND-7 / IND-2 / IND-1] Bounded locomotion pause bridging.
@@ -951,7 +1019,7 @@ def individual_rule_masks(
     masks["rearing"] = _enforce_observation_bound(
         masks["rearing"], observed, posture_bridged, "rearing")
     masks["stationary"] = _enforce_observation_bound(
-        _qualify(stationary & ~posture, config.static_min_duration_s, fps),
+        _qualify(stationary & ~posture, 0.0, fps),
         observed, stationary_bridged, "stationary",
     )
     masks["locomotion"] = _enforce_observation_bound(

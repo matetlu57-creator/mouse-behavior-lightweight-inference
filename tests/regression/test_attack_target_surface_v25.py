@@ -1,4 +1,6 @@
 """New action windows need measured approach to their own target's body."""
+from tests.regression.legacy_social_profile import LEGACY_SOCIAL
+
 import numpy as np
 import pytest
 from dataclasses import replace
@@ -49,7 +51,7 @@ def epoch(confirmation, *, seed_frames=(3,), unknown=()):
     seed[list(seed_frames)] = True
     joint[list(unknown)] = False
     points = np.zeros((n,2))
-    cfg = rules.DEFAULT_SOCIAL_HEURISTIC_CONFIG
+    cfg = LEGACY_SOCIAL
     return rules._coherent_epoch_action(seed,active,joint,joint,points,points,
                                          np.ones(n,bool),30.,cfg,confirmation=confirmation)
 
@@ -83,12 +85,12 @@ def test_window_cannot_borrow_confirmation_from_later_in_the_clip():
     points=np.zeros((n,2))
     observed=np.ones(n,bool)
     result=rules._coherent_epoch_action(seed,active,observed,observed,points,points,
-        observed,30.,rules.DEFAULT_SOCIAL_HEURISTIC_CONFIG,confirmation=confirmation)
+        observed,30.,LEGACY_SOCIAL,confirmation=confirmation)
     assert not result.any()
 
 
 def test_target_surface_parameter_is_explicit_and_rejects_invalid_values():
-    cfg=rules.DEFAULT_SOCIAL_HEURISTIC_CONFIG
+    cfg=LEGACY_SOCIAL
     assert cfg.attack_new_action_target_surface_max_gap_cm == 1.9986556302093281
     for value in (0., -1., np.nan):
         with pytest.raises(ValueError):
@@ -115,10 +117,10 @@ def test_public_new_action_rejects_body_overlap_while_nose_turns_away_from_assig
     monkeypatch.setattr(rules,'_local_quadratic_point_kinematics',unavailable)
     monkeypatch.setattr(rules,'_observed_run_point_kinematics',measured)
     np.testing.assert_allclose(geometry.body_footprint_distances(f,0,max_body_lengths=2.),0.)
-    assert not rules._attack_action_mask(f,0).any()
+    assert not rules._attack_action_mask(f,0, LEGACY_SOCIAL).any()
     # Same pulse and center distance, now the assigned target is actually
     # reached by the actor's nose. This is the independently controlled gate.
     f.collective_keypoints_cm[:,1,:6,0] -= 4.
-    actual=rules._attack_action_mask(f,0)
+    actual=rules._attack_action_mask(f,0, LEGACY_SOCIAL)
     assert actual[6:18].all()
     assert not actual[:6].any() and not actual[18:].any()

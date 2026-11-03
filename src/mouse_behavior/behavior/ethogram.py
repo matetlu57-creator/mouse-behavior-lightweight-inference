@@ -2342,6 +2342,7 @@ def _extended_individual_and_group_events(
         static_detection_gap_max_s=float(individual_cfg.get('stationary_detection_gap_max_seconds', 1.0)),
         static_transient_max_displacement_cm=float(individual_cfg['stationary_transient_max_displacement_cm']),
         locomotion_pause_max_s=float(individual_cfg.get('locomotion_stop_gap_seconds', 1.0)),
+        enable_posture_screen=bool(individual_cfg.get('enable_posture_screen', False)),
     )
     individual = individual_rule_masks(centers, valid, analysis_fps, keypoints_cm=keypoints,
                                        reference_body_cm=float(kin.get('reference_body_cm', 7.918)),

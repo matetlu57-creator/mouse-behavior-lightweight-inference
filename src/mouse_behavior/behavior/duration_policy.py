@@ -45,15 +45,19 @@ def resolve_duration_policy(behavior: str, *, parameters: HeuristicParameters | 
     canonical = LABEL_TO_CANONICAL.get(behavior, behavior.strip().lower().replace(" ", "_"))
     canonical = {"static": "stationary", "chasing": "chase", "huddling": "huddle",
                  "snout-head_contact": "nose_head_contact", "snout-rear_contact": "nose_tail_contact",
-                 "爬墙": "rearing"}.get(canonical, canonical)
+                 "posturereview": "posture_review", "attackreview": "attack_review",
+                 "dispersalreview": "dispersal_review", "爬墙": "rearing"}.get(canonical, canonical)
     individual, social, group = DEFAULT_INDIVIDUAL_CONFIG, DEFAULT_SOCIAL_HEURISTIC_CONFIG, DEFAULT_GROUP_HEURISTIC_CONFIG
     defaults = HeuristicParameters()
     policies = {
+        "posture_review": (0., ">", "review_positive_integer_frame_interval"),
+        "attack_review": (social.attack_min_duration_s, ">=", "social.attack_min_duration_s"),
+        "dispersal_review": (defaults.dispersal_min_duration_s, ">", "parameters.dispersal_min_duration_s"),
         "stationary": (individual.static_min_duration_s, ">=", "individual.static_min_duration_s"),
         "locomotion": (individual.locomotion_min_duration_s, ">=", "individual.locomotion_min_duration_s"),
         "grooming": (individual.grooming_min_duration_s, ">=", "individual.grooming_min_duration_s"),
         "rearing": (individual.rearing_min_duration_s, ">=", "individual.rearing_min_duration_s"),
-        "approach": (social.approach_min_duration_s, ">=", "social.approach_min_duration_s"),
+        "approach": (social.approach_min_duration_s, ">", "social.approach_min_duration_s"),
         "together": (social.together_min_duration_s, ">=", "social.together_min_duration_s"),
         "attack": (social.attack_min_duration_s, ">=", "social.attack_min_duration_s"),
         "chase": (social.chasing_min_duration_s, ">=", "social.chasing_min_duration_s"),
@@ -74,7 +78,7 @@ def resolve_duration_policy(behavior: str, *, parameters: HeuristicParameters | 
         fields = {
             "stationary": "stationary_min_duration_s", "locomotion": "locomotion_min_duration_s",
             "huddle": "huddle_min_duration_s", "isolation": "isolation_min_duration_s",
-            "dispersal": "dispersal_min_duration_s", "group_locomotion": "group_locomotion_min_duration_s",
+            "dispersal": "dispersal_min_duration_s", "dispersal_review": "dispersal_min_duration_s", "group_locomotion": "group_locomotion_min_duration_s",
         }
         for field in fields.values():
             value = getattr(parameters, field)
@@ -169,6 +173,24 @@ def qualify_event_duration(event: Mapping, fps: float, *, parameters: HeuristicP
         passes = result["actual_s"] > policy.required_s if policy.comparator == ">" else result["actual_s"] >= policy.required_s
         if not passes:
             result["reason"] = "process_duration_below_requirement"
+        elif policy.behavior == "huddle" and "canonical_support_frame_intervals" in event:
+            support = _support_count(event["canonical_support_frame_intervals"], int(start), int(end))
+            result.update(support_frame_count=support, support_actual_s=support/float(fps),
+                          support_required_s=policy.required_s, support_comparator=">=",
+                          support_basis="compact_state_rows_only; unknown_process_interiors_not_credited")
+            if support/float(fps) + 1e-12 >= policy.required_s:
+                result.update(ok=True, reason="qualified")
+            else:
+                result["reason"] = "huddle_compact_support_below_requirement"
+        elif policy.behavior == "isolation" and "canonical_support_frame_intervals" in event:
+            support = _support_count(event["canonical_support_frame_intervals"], int(start), int(end))
+            result.update(support_frame_count=support, support_actual_s=support/float(fps),
+                          support_required_s=policy.required_s, support_comparator=">",
+                          support_basis="actual_finite_nearest_neighbor_comparison_rows_only")
+            if support/float(fps) > policy.required_s:
+                result.update(ok=True, reason="qualified")
+            else:
+                result["reason"] = "isolation_effective_comparison_time_below_requirement"
         elif (policy.support_required_s is not None
               and result["support_actual_s"] < policy.support_required_s):
             result["reason"] = "measured_sync_support_below_requirement"

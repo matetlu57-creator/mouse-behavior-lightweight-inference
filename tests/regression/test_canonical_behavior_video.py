@@ -95,8 +95,8 @@ def test_canonical_package_recrop_refreshes_semantics_and_media(source, tmp_path
     binding, scale = bind_cache(video, cache, tmp_path / "tracks.sqlite",
                                 source_receipt=cache.parent / "source_receipt.json")
     store = TrackStore(tmp_path / "tracks.sqlite")
-    events = merge_events([event(2, 9)])
-    events[0].update(role_support_frame_intervals=[[3, 8]], role_support_frame_count=5,
+    events = merge_events([event(0, 12)])
+    events[0].update(role_support_frame_intervals=[[1, 11]], role_support_frame_count=10,
                      role_status="event_direction_with_measured_support")
     full = render_full_package(video, tmp_path / "full", store, events, binding, scale)
     export_packages(tmp_path / "packages", Path(full["video_path"]), store, events, binding, scale)
@@ -302,7 +302,7 @@ def test_four_files_exact_boundaries_roles_all_ids_and_decode(source, tmp_path):
     binding, scale = bind_cache(video, cache, tmp_path / "tracks.sqlite",
                                 expected_source_sha256=original, source_receipt=cache.parent / "source_receipt.json")
     store = TrackStore(tmp_path / "tracks.sqlite")
-    events = merge_events([event(2, 7)])
+    events = merge_events([dict(event(2, 7), behavior="Locomotion", canonical_behavior="locomotion")])
     full = render_full_package(video, tmp_path / "full", store, events, binding, scale)
     rows = export_packages(tmp_path / "clips", Path(full["video_path"]), store,
                            events, binding, scale)
@@ -339,6 +339,56 @@ def test_actual_canonical_window_keeps_all_ids_and_disabled_postures(source, tmp
     assert audit["track_ids"] == [1, 99, 1000]
     assert audit["track_truncation"] is False
     assert not {"Grooming", "Rearing"}.intersection(r["behavior"] for r in result)
+
+
+def test_raw_clips_pipeline_skips_full_overlay_and_records_export_options(source, tmp_path):
+    video, cache, _ = source
+    config = Path(__file__).resolve().parents[2] / "configs/default.yaml"
+    output = tmp_path / "raw_clips"
+    receipt = run_pipeline(video, cache, output, config, mode="clips", original_video=True,
+                           clip_context_seconds=.25, source_receipt=cache.parent / "source_receipt.json")
+    assert receipt["status"] == "complete"
+    assert receipt["clip_original_video"] is True
+    assert receipt["clip_context_seconds"] == .25
+    assert receipt["clip_codec"] == "libx264"
+    assert "full" not in receipt and not (output / "full").exists()
+
+
+@pytest.mark.parametrize("mismatch", [None, "sample", "cache"])
+def test_normal_pipeline_loads_only_exact_reviewed_comparison_source(source, tmp_path, mismatch):
+    from mouse_behavior.behavior.reviewed_comparisons import ReviewedComparisonScope
+    video, cache, _ = source
+    _, _ = bind_cache(video, cache, tmp_path / "comparison.sqlite",
+        source_receipt=cache.parent / "source_receipt.json")
+    tracks = tmp_path / "reviewed_tracks.json"
+    TrackStore(tmp_path / "comparison.sqlite").write_tracks(tracks, 0, 12)
+    if mismatch == "cache":
+        rows = json.loads(tracks.read_text())
+        rows[0]["detections"][0]["keypoints"][0][0] += 30.
+        tracks.write_text(json.dumps(rows), encoding="utf-8")
+    scope = ReviewedComparisonScope("source_sample", _sha256(tracks), _sha256(video), "a"*64,
+                                     ((1, 99), (1, 1000)))
+    reviews = tmp_path / "reviews.json"
+    reviews.write_text(json.dumps(dict(schema="reviewed_comparisons_exact_sample_assets_v1",
+        scopes={"source_sample": scope.as_dict()})), encoding="utf-8")
+    config = Path(__file__).resolve().parents[2] / "configs/default.yaml"
+    kwargs = dict(mode="infer", source_receipt=cache.parent / "source_receipt.json",
+        comparison_reviews=reviews, comparison_tracks=tracks,
+        comparison_sample_id="wrong_sample" if mismatch == "sample" else "source_sample")
+    output = tmp_path / "with_review"
+    if mismatch:
+        with pytest.raises(ValueError, match="matching sample|differ from bound cache"):
+            run_pipeline(video, cache, output, config, **kwargs)
+        return
+    receipt = run_pipeline(video, cache, output, config, **kwargs)
+    saved = json.loads((output / "input_binding.json").read_text())
+    assert saved["isolation_comparison_review"] == json.loads(json.dumps(scope.as_dict()))
+    audited = receipt["inference_audit"]["whole_range_isolation_audit"]
+    assert "1" not in audited["tracks"], "two reviewed duplicate comparators supply no valid time"
+    assert audited["tracks"]["99"]["minimum_cm"] == 0., "the unreviewed 99/1000 edge remains a real contradiction"
+    assert audited["tracks"]["99"]["comparison_frames"] == 12
+    assert audited["comparison_review"]["sample_id"] == "source_sample"
+    assert _sha256(tracks) == scope.tracks_sha256
 
 
 def test_optin_posture_review_runs_real_pipeline_with_source_ledgers(source, tmp_path):
@@ -397,7 +447,7 @@ def test_unknown_role_rows_do_not_split_process_and_reversal_does():
     mask = np.ones(8, bool)
     actor = np.array([99, 99, -1, -1, 99, 1, -1, 1])
     target = np.array([1, 1, -1, -1, 1, 99, -1, 99])
-    rows = _directed_events(mask, actor, target, [1, 99], "approach", np.ones(8, bool), fps=5.)
+    rows = _directed_events(mask, actor, target, [1, 99], "approach", np.ones(8, bool), fps=2.)
     assert [(r["start_frame"], r["end_frame"], r["actor_id"]) for r in rows] == [(0, 5, 99), (5, 8, 1)]
     assert rows[0]["role_support_frame_intervals"] == [(0, 2), (4, 5)]
     assert rows[0]["role_unknown_frame_intervals"] == [(2, 4)]
@@ -409,7 +459,7 @@ def test_unknown_role_rows_do_not_split_process_and_reversal_does():
 def test_event_inferred_phase_preserved_but_measured_support_separate():
     observed = np.array([True, True, False, False, True, True])
     rows = _directed_events(np.ones(6, bool), np.array([99, 99, -1, -1, 99, 99]),
-                            np.array([1, 1, -1, -1, 1, 1]), [1, 99], "approach", observed, fps=10.)
+                            np.array([1, 1, -1, -1, 1, 1]), [1, 99], "approach", observed, fps=5.)
     assert rows[0]["start_frame"] == 0 and rows[0]["end_frame"] == 6
     assert rows[0]["observed_all_participants_frame_count"] == 4
     assert rows[0]["inferred_or_partially_unobserved_frame_count"] == 2
@@ -438,7 +488,8 @@ def test_accurate_seek_keeps_numbered_source_first_and_last_frames(tmp_path, fps
                 source_fps=info["fps"], detections=[]))))
     store = TrackStore(database)
     binding = dict(source_video=info, cache_status_sha256="synthetic", chunk_sha256={})
-    events = merge_events([event(0, 10), event(17, 27), event(38, 48)])
+    events = [merge_events([dict(event(start, end), behavior="Locomotion", canonical_behavior="locomotion")])[0]
+              for start, end in ((0, 16), (17, 33), (32, 48))]
     full = render_full_package(video, tmp_path / "full", store, events, binding, {})
     manifest = export_packages(tmp_path / "clips", Path(full["video_path"]), store, events, binding, {})
     source_capture = cv2.VideoCapture(full["video_path"])
@@ -610,7 +661,8 @@ def test_clip_parallel_all_four_payload_hashes_equal_serial_for_multiple_positiv
     binding, scale = bind_cache(video, cache, tmp_path / "tracks.sqlite",
                                 source_receipt=cache.parent / "source_receipt.json")
     store = TrackStore(tmp_path / "tracks.sqlite")
-    events = merge_events([event(0, 3), event(4, 8), event(9, 12, 1, 99)])
+    events = [merge_events([dict(event(start, end, actor, target), behavior="Locomotion", canonical_behavior="locomotion")])[0]
+              for start, end, actor, target in ((0, 5, 99, 1), (3, 8, 1, 99), (7, 12, 99, 1))]
     for row in events:
         row["role_status"] = "event_direction_with_measured_support"
         row["role_support_frame_intervals"] = [[row["start_frame"], row["end_frame"]]]

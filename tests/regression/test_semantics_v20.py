@@ -1,5 +1,7 @@
 """Behavior counterexamples for deceleration, departure duration and spatial density."""
 
+from tests.regression.legacy_social_profile import LEGACY_SOCIAL
+
 import numpy as np
 import pytest
 
@@ -33,7 +35,7 @@ def test_attack_trigger_can_slow_below_trigger_speed_and_a_long_trigger_is_not_d
         return velocity, acceleration
 
     monkeypatch.setattr(social, "_local_quadratic_point_kinematics", measured)
-    mask = social._attack_action_mask(f, 0)
+    mask = social._attack_action_mask(f, 0, LEGACY_SOCIAL)
     assert mask[5:stop].all()
     assert not mask[:5].any() and not mask[stop:].any(), "an observed stop ends the event"
 
@@ -155,7 +157,7 @@ def test_attack_continuation_preserves_existing_fast_forward_evidence(monkeypatc
         return velocity, acceleration
 
     monkeypatch.setattr(social, "_local_quadratic_point_kinematics", measured)
-    assert social._attack_action_mask(f, 0)[5:26].all()
+    assert social._attack_action_mask(f, 0, LEGACY_SOCIAL)[5:26].all()
 
 
 def test_subthreshold_constant_speed_without_measured_slowing_does_not_extend_attack(monkeypatch):
@@ -174,5 +176,5 @@ def test_subthreshold_constant_speed_without_measured_slowing_does_not_extend_at
         return velocity, acceleration
 
     monkeypatch.setattr(social, "_local_quadratic_point_kinematics", measured)
-    mask = social._attack_action_mask(f, 0)
+    mask = social._attack_action_mask(f, 0, LEGACY_SOCIAL)
     assert mask[5:11].all() and not mask[11:].any()

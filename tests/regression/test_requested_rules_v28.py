@@ -65,7 +65,8 @@ def test_each_chaser_has_fifteen_cm_s_observed_mean(speed, expected):
     f = moving_pair(speed=speed)
     known = np.ones(len(f.valid), bool)
     assert bool(social._qualify_observed_chase(
-        known, known, f.centers_cm, 0, 1, f.fps, cfg).any()) is expected
+        known, known, f.centers_cm, 0, 1, f.fps,
+        replace(cfg, chasing_min_mean_speed_cm_s=15.)).any()) is expected
 
 
 @pytest.mark.parametrize('travel,expected', [(9.99, False), (10., False), (10.01, True)])
@@ -82,7 +83,7 @@ def test_clustering_actor_travel_is_strictly_greater_than_ten(travel, expected):
                                      group.DEFAULT_GROUP_HEURISTIC_CONFIG, neighbor_cm=10., max_gap_s=5.)
     assert bool(result.frames) is expected
     if expected:
-        assert result.frames[-1][1] == 150, 'restore the observed V26 dense-state window'
+        assert result.frames[-1][1] == 150, 'preserve measured baseline until an endpoint replacement passes manual GT'
 
 
 def test_tail_baseline_and_extension_keep_distinct_v26_durations():

@@ -56,6 +56,14 @@ def _huddle_with_unknown_gaps():
     return _finish(f)
 
 
+def _huddle_with_independently_qualified_bout():
+    f = _base(160)
+    f.valid[:] = False
+    f.valid[10:40] = True
+    f.valid[60:120] = True  # Six uninterrupted seconds independently qualify.
+    return _finish(f)
+
+
 def _clustering(frames):
     f = _base(frames)
     x = np.full(frames, 15.0)
@@ -133,14 +141,18 @@ def _assert_evidence_and_fractions(f, candidates, table):
             candidate.evidence / duration, abs=1e-6)
 
 
-def test_huddle_evidence_counts_compact_support_not_unknown_episode_envelope(parameters):
+def test_huddle_unknown_interior_preserves_process_without_inventing_support(parameters):
     f = _huddle_with_unknown_gaps()
     candidates, table = _canonical_and_ranker(f, parameters)
-    # 30 + 40 observed compact rows. Envelope is rows10..99 (9s); clip is12s.
-    expected = 70 / FPS
-    assert _evidence(candidates, "huddle", IDS) == pytest.approx(expected)
-    assert _evidence(table.candidates, "huddle", IDS) == pytest.approx(expected)
-    _assert_evidence_and_fractions(f, candidates, table)
+    # These are missing rows, not an observed dissolution. V34 keeps the
+    # bounded complete process, while only its seven compact seconds supply
+    # evidence. No fabricated observations or fixed five-second crop.
+    for values in (candidates, table.candidates):
+        selected = [c for c in values if c.behavior == "huddle" and c.target_ids == IDS]
+        assert len(selected) == 1
+        assert selected[0].frame_intervals == ((10, 100),)
+        assert selected[0].support_frame_intervals == ((10, 40), (60, 100))
+        assert selected[0].evidence == pytest.approx(7.)
 
 
 @pytest.mark.parametrize("frames", [60, 140])
@@ -193,7 +205,7 @@ def test_isolation_evidence_is_coobserved_seconds_and_fraction_one(parameters):
 
 
 @pytest.mark.parametrize("fixture", [
-    _huddle_with_unknown_gaps, lambda: _clustering(60), lambda: _clustering(140),
+    _huddle_with_independently_qualified_bout, lambda: _clustering(60), lambda: _clustering(140),
     lambda: _dispersal(90), _locomotion, _isolation,
 ], ids=["huddle-unknown", "clustering-short", "clustering-long", "dispersal", "locomotion", "isolation"])
 def test_all_emitted_group_seconds_and_actual_ranker_fractions_are_bounded(parameters, fixture):
