@@ -16,8 +16,11 @@ def boxes_for(f):
     return np.concatenate((body.min(axis=2), body.max(axis=2)), axis=2)
 
 
-def mask(f):
-    return _open_approach_mask(f, 0, config_seed_parameters({}))
+V32 = replace(DEFAULT, approach_require_no_body_contact=True, approach_min_duration_s=1.0, approach_min_actor_path_cm=10.0)
+
+
+def mask(f, config=V32):
+    return _open_approach_mask(f, 0, config_seed_parameters({}), config)
 
 
 def test_first_contact_keeps_only_independently_qualified_prefix():
@@ -48,7 +51,7 @@ def test_unknown_geometry_cannot_be_painted_or_bridge_approach():
     f = closing_pair()
     f.collective_keypoints_cm[15:17] = np.nan
     assert not mask(f).any()
-    permissive = replace(DEFAULT, approach_min_duration_s=.1, approach_min_actor_path_cm=0.,
+    permissive = replace(V32, approach_min_duration_s=.1, approach_min_actor_path_cm=0.,
                          dist_approach_start_min_cm=12.)
     result = _open_approach_mask(f, 0, config_seed_parameters({}), permissive)
     assert not result[15:17].any()
@@ -76,10 +79,10 @@ def test_attack_footprint_guard_cannot_change_approach():
     f = closing_pair()
     baseline = mask(f)
     assert baseline.any()
-    attack_changed = replace(DEFAULT, attack_contact_max_footprint_body_lengths=.01)
+    attack_changed = replace(V32, attack_contact_max_footprint_body_lengths=.01)
     assert np.array_equal(baseline, _open_approach_mask(
         f, 0, config_seed_parameters({}), attack_changed))
-    own_changed = replace(DEFAULT, approach_max_footprint_body_lengths=.01)
+    own_changed = replace(V32, approach_max_footprint_body_lengths=.01)
     assert not _open_approach_mask(f, 0, config_seed_parameters({}), own_changed).any()
 
 

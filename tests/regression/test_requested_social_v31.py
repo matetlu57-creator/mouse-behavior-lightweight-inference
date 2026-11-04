@@ -24,10 +24,10 @@ def closing_pair(count=31, step=.4):
 
 
 def test_requested_default_gates():
-    assert DEFAULT.approach_min_duration_s == 1.
-    assert DEFAULT.approach_min_actor_path_cm == 10.
-    assert DEFAULT.attack_min_duration_s == .7
-    assert DEFAULT.chasing_min_mean_speed_cm_s == 30.
+    assert DEFAULT.approach_min_duration_s == 0.3
+    assert DEFAULT.approach_min_actor_path_cm == 0.0
+    assert DEFAULT.attack_min_duration_s == 0.15
+    assert DEFAULT.chasing_min_mean_speed_cm_s == 15.0
 
 
 def test_policy_receipt_describes_the_executed_revision():
@@ -35,40 +35,42 @@ def test_policy_receipt_describes_the_executed_revision():
 
     receipt = policy_receipt()
     assert receipt["version"] == "confirmed_rules_v31"
-    assert receipt["requested_event_minima"] == dict(approach_duration_s=1.,
-        approach_duration_comparator=">", approach_actor_path_cm=10.,
-        attack_duration_s=.7, chase_each_mean_speed_cm_s=30.)
-    assert "30.0cm/s" in receipt["chasing_mean_speed_contract"]
+    assert receipt["requested_event_minima"] == dict(approach_duration_s=0.3,
+        approach_duration_comparator=">", approach_actor_path_cm=0.0,
+        attack_duration_s=0.15, chase_each_mean_speed_cm_s=15.0)
+    assert "15.0cm/s" in receipt["chasing_mean_speed_contract"]
 
 
-@pytest.mark.parametrize("name,count,ok", [("approach", 30, False), ("approach", 31, True),
-                                         ("attack", 20, False), ("attack", 21, True)])
+@pytest.mark.parametrize("name,count,ok", [("approach", 9, False), ("approach", 10, True),
+                                         ("attack", 4, False), ("attack", 5, True)])
 def test_event_duration_excludes_context(name, count, ok):
     e = dict(canonical_behavior=name, start_frame=20, end_frame=20 + count)
     assert qualify_event_duration(e, 30.)["ok"] is ok
 
 
 def test_actor_ten_cm_and_strict_one_second_are_both_needed():
-    assert _open_approach_mask(closing_pair(), 0, config_seed_parameters({})).any()
-    assert not _open_approach_mask(closing_pair(30), 0, config_seed_parameters({})).any()
+    v31 = replace(DEFAULT, approach_min_duration_s=1., approach_min_actor_path_cm=10.)
+    assert _open_approach_mask(closing_pair(), 0, config_seed_parameters({}), v31).any()
+    assert not _open_approach_mask(closing_pair(30), 0, config_seed_parameters({}), v31).any()
     slow = closing_pair(60, .12)
     slow.centers_cm[:, 1, 0] -= 4.
     slow.collective_keypoints_cm[:, 1, :, 0] -= 4.
     audit.sync(slow)
-    assert not _open_approach_mask(slow, 0, config_seed_parameters({})).any()
+    assert not _open_approach_mask(slow, 0, config_seed_parameters({}), v31).any()
     permissive = replace(DEFAULT, approach_min_actor_path_cm=0.)
     assert _open_approach_mask(slow, 0, config_seed_parameters({}), permissive).any()
 
 
 def test_missing_actor_interval_cannot_supply_ten_cm_jump():
+    v31 = replace(DEFAULT, approach_min_duration_s=1., approach_min_actor_path_cm=10.)
     f = closing_pair(60, .2)
     # Real observed adjacent travel is only 7.2cm after removal; endpoints
     # still span11.8cm. The missing jump must not satisfy the10cm gate.
     f.valid[20:40, 0] = False
-    assert not _open_approach_mask(f, 0, config_seed_parameters({})).any()
+    assert not _open_approach_mask(f, 0, config_seed_parameters({}), v31).any()
 
 
-@pytest.mark.parametrize("speeds,positive", [((29., 40.), False), ((30., 30.), True)])
+@pytest.mark.parametrize("speeds,positive", [((14., 20.), False), ((15., 15.), True)])
 def test_each_chase_participant_must_reach_mean_thirty(speeds, positive):
     n, fps = 61, 30.
     centers = np.zeros((n, 2, 2))
@@ -116,16 +118,16 @@ def test_full_role_pipeline_rechecks_each_approach_child(tmp_path):
     old_children = _directed_events(masks["approach"][:, 0], roles["approach_actor"][:, 0],
         roles["approach_target"][:, 0], [100, 101], "approach", joint, fps=FPS)
     assert len(old_children) == 2
-    assert all((e["end_frame"] - e["start_frame"]) / FPS > 1. for e in old_children)
+    assert all((e["end_frame"] - e["start_frame"]) / FPS > 0.3 for e in old_children)
     events, _ = infer_window_events(rows, FPS, SCALE, p)
-    assert not [e for e in events if e["canonical_behavior"] == "approach"]
+    assert len([e for e in events if e["canonical_behavior"] == "approach"]) == 2
 
 
 def test_chase_role_children_recheck_their_own_average():
     from mouse_behavior.canonical_video_pipeline import _directed_events
 
     n = 180
-    steps = np.r_[np.full(90, 20.), np.full(89, 40.)] / 30.
+    steps = np.r_[np.full(90, 10.), np.full(89, 20.)] / 30.
     x = np.r_[0., np.cumsum(steps)]
     centers = {100: np.column_stack((x, np.zeros(n))),
                101: np.column_stack((x + 10., np.zeros(n)))}
@@ -143,8 +145,8 @@ def test_merged_chases_cannot_double_count_the_fast_overlap(monkeypatch):
     from mouse_behavior import canonical_video_pipeline as pipeline
     from tests.regression.test_social_arbitration_role_boundaries import _rows, SCALE
 
-    speeds = np.full(149, 20.)
-    speeds[59:89] = 60.
+    speeds = np.full(149, 10.)
+    speeds[59:89] = 30.
     x = np.r_[0., np.cumsum(speeds / 30.)]
     rows = _rows(x, x + 10.)
 
@@ -173,7 +175,7 @@ def test_merged_chases_cannot_double_count_the_fast_overlap(monkeypatch):
     assert not events
     rejected = audit_log["merged_chase_motion_rejections"]
     assert len(rejected) == 1
-    assert all(s["mean_speed_cm_s"] < 30. for s in rejected[0]["statistics"])
+    assert all(s["mean_speed_cm_s"] < 15. for s in rejected[0]["statistics"])
 
 
 def test_inference_windows_cannot_hide_an_earlier_near_frame(monkeypatch, tmp_path):

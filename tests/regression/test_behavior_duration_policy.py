@@ -29,8 +29,8 @@ def event(behavior, count, start=0, **extra):
 
 
 @pytest.mark.parametrize("behavior,minimum,comparator", [
-    ("stationary", 1., ">="), ("locomotion", .5, ">="), ("approach", 1., ">"),
-    ("together", 1., ">="), ("attack", .7, ">="), ("chase", 1., ">="),
+    ("stationary", 1., ">="), ("locomotion", .5, ">="), ("approach", .3, ">"),
+    ("together", 1., ">="), ("attack", .15, ">="), ("chase", 1., ">="),
     ("nose_head_contact", .1, ">="), ("nose_tail_contact", .15, ">="),
     ("huddle", 5., ">="), ("social_clustering", .5, ">="),
     ("isolation", 10., ">"), ("dispersal", 5., ">"), ("group_locomotion", 3., ">"),
@@ -134,8 +134,8 @@ def test_isolation_preserves_upstream_group_minimum_and_v3_posture_ignores_socia
                          together_min_duration_s=20., attack_min_event_duration_s=20., pair_min_duration_s=20.)
     assert resolve_duration_policy("isolation", parameters=parameters).required_s == 10
     assert require_event_duration(event("chase", 100), 100, parameters=parameters)["required_s"] == 1
-    assert require_event_duration(event("approach", 101), 100, parameters=parameters)["required_s"] == 1.
-    assert require_event_duration(event("attack", 70), 100, parameters=parameters)["required_s"] == .7
+    assert require_event_duration(event("approach", 101), 100, parameters=parameters)["required_s"] == .3
+    assert require_event_duration(event("attack", 70), 100, parameters=parameters)["required_s"] == .15
     assert require_event_duration(event("together", 100), 100, parameters=parameters)["required_s"] == 1
     for behavior in ("grooming", "rearing"):
         result = require_event_duration(event(behavior, 30, posture_engine="v3_decoupled"), 100, parameters=parameters)

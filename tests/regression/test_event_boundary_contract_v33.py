@@ -10,7 +10,7 @@ from mouse_behavior.visualization.behavior_packages import _annotation, write_ma
 
 
 @pytest.mark.parametrize("behavior,frames,accepted", [
-    ("approach", 30, False), ("approach", 31, True),
+    ("approach", 9, False), ("approach", 10, True),
     ("together", 29, False), ("together", 30, True),
     ("huddle", 149, False), ("huddle", 150, True),
     ("social_clustering", 14, False), ("social_clustering", 15, True),

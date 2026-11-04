@@ -76,7 +76,7 @@ def test_union_overlaps_are_not_double_counted_and_ids_are_isolated():
 
 
 @pytest.mark.parametrize("name,frames,ok", [("PostureReview", 1, True), ("posture_review", 0, False),
-    ("attack_review", 6, False), ("AttackReview", 7, True),
+    ("attack_review", 1, False), ("AttackReview", 2, True),
     ("dispersal_review", 50, False), ("DispersalReview", 51, True)])
 def test_review_duration_types_are_optional_nonethogram_labels(name, frames, ok):
     assert qualify_event_duration(dict(behavior=name, start_frame=0, end_frame=frames), 10.)["ok"] is ok

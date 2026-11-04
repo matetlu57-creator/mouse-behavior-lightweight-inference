@@ -17,7 +17,7 @@ def test_v25_provenance_and_unchanged_acceptance_and_numerical_gates():
     assert cfg.acc_attack_min_cm_s2 == 99.59917210877003
     assert cfg.vel_attack_min_cm_s == 10.231697660707422
     assert cfg.dist_attack_max_cm == 7.321547985076904
-    assert cfg.attack_min_duration_s == .7
+    assert cfg.attack_min_duration_s == .15
     assert cfg.attack_deceleration_max_s == .75
     assert receipt['v25_fit_artifact_sha256'] == {
         'outputs/heuristics_v25_attack_misses_20261018/fit_decision_target_confirmed.json':

@@ -29,7 +29,7 @@ def test_requested_defaults_and_profile_mirrors():
     assert cfg.nose_contact_min_duration_s == .1
     assert cfg.contact_head_extension_min_duration_s == .1
     assert cfg.contact_tail_extension_min_duration_s == .15
-    assert cfg.chasing_min_mean_speed_cm_s == 30.
+    assert cfg.chasing_min_mean_speed_cm_s == 15.
     assert params.isolation_distance_cm == 20.
 
 

@@ -770,7 +770,7 @@ def _departure_process_mask(centers: np.ndarray, observed: np.ndarray,
     active[returns] = False
     bridged = active.copy()
     bounds = runs(active)
-    limit = int(np.floor(pause_max_s * fps + 1e-9))
+    limit = int(np.floor(max(pause_max_s, 1.5) * fps + 1e-9))
     for (_, left), (right, _) in zip(bounds, bounds[1:]):
         if right - left <= limit and not returns[left:right].any():
             bridged[left:right] = True

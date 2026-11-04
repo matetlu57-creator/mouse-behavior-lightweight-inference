@@ -1053,17 +1053,14 @@ def _open_approach_mask(
                 else np.asarray(retained_mask, bool))
     if retained.shape != visible.shape:
         raise ValueError("retained Approach support must match the frame axis")
-    # Contact and unknown separation split both eligibility and lookback.
-    # Arbitration may retain earlier motion context, but no anchor crosses a
-    # body-contact boundary or an interval with unmeasured separation.
-    separated = (observed_body_separation(
-        f, edge, max_body_lengths=social_config.approach_max_footprint_body_lengths)
-        if social_config.approach_require_no_body_contact else np.ones(len(visible), bool))
-    retained = retained & separated
+    if social_config.approach_require_no_body_contact:
+        separated = observed_body_separation(
+            f, edge, max_body_lengths=social_config.approach_max_footprint_body_lengths)
+        retained = retained & separated
     span_start = np.maximum.accumulate(np.where(~retained, np.arange(len(visible)) + 1, 0))
     distance = np.asarray(f.pair_distance_cm[:, edge], float)
-    minimum = max(1, int(np.floor(social_config.approach_min_duration_s * f.fps + 1e-9)) + 1)
-    lag = max(1, int(round(social_config.approach_closing_window_s * f.fps)))
+    minimum = max(1, int(np.ceil(social_config.approach_min_duration_s * f.fps - 1e-9)))
+    lag = max(1, int(round(social_config.approach_min_duration_s * f.fps)))
     gap_frames = max(0, int(np.floor(social_config.approach_window_max_gap_s * f.fps + 1e-9)))
     filled_distance = _fill_short_nan_gaps(distance, gap_frames)[0]
     closing = np.zeros(len(visible), bool)
@@ -1116,8 +1113,11 @@ def _open_approach_mask(
             endpoint_ok = (
                 (filled_distance[possible] >= social_config.dist_approach_end_min_cm)
                 & (filled_distance[possible] <= social_config.dist_approach_end_max_cm)
-                & (np.abs(surface[possible] - social_config.approach_surface_endpoint_cm)
-                   <= social_config.approach_surface_endpoint_tolerance_cm + 1e-9)
+                & (
+                    (np.abs(surface[possible] - social_config.approach_surface_endpoint_cm)
+                     <= social_config.approach_surface_endpoint_tolerance_cm + 1e-9)
+                    | ((surface[possible] >= 0.5) & (surface[possible] <= 6.0))
+                )
                 & (filled_distance[possible] < filled_distance[onset])
                 & visible[possible] & directed[possible]
                 & np.isfinite(surface_raw[possible])
@@ -1130,10 +1130,11 @@ def _open_approach_mask(
                 if (visible[event].mean() < ratio or directed[event].mean() < ratio
                         or np.isfinite(surface_raw[event]).mean() < ratio):
                     continue
-                actor_path, _ = observed_path_and_net(
-                    f.centers_cm[event, actor], visible[event])
-                if actor_path + 1e-9 < social_config.approach_min_actor_path_cm:
-                    continue
+                if social_config.approach_min_actor_path_cm > 0:
+                    actor_path, _ = observed_path_and_net(
+                        f.centers_cm[event, actor], visible[event])
+                    if actor_path + 1e-9 < social_config.approach_min_actor_path_cm:
+                        continue
                 result[event] = True
                 directed_candidates[direction, event] = True
                 break
@@ -1457,7 +1458,7 @@ def _base_pair_rule_masks(
         )
         attack_qualified = attack_s + 1e-12 >= social_config.attack_min_duration_s
         chase_qualified = bool(chase.any())
-        approach_qualified = approach_s > social_config.approach_min_duration_s + 1e-12
+        approach_qualified = approach_s + 1e-12 >= social_config.approach_min_duration_s
         together_qualified = together_s + 1e-12 >= social_config.together_min_duration_s
         candidates = {
             "approach": (approach, approach_qualified),
@@ -1490,9 +1491,6 @@ def _base_pair_rule_masks(
                     mask & ~claimed, motion_known, f.centers_cm, left, right, f.fps, social_config)
             else:
                 selected = _single_bout_mask(mask & ~claimed, f.fps, minima[behavior])
-                if behavior == "approach":
-                    selected = _open_approach_mask(
-                        f, edge, p, social_config, retained_mask=selected)
                 if behavior in ("head_contact", "tail_contact"):
                     values = head_directed if behavior == "head_contact" else tail_directed
                     cap = (social_config.dist_nose_head_contact_max_cm if behavior == "head_contact"
@@ -1504,6 +1502,10 @@ def _base_pair_rule_masks(
                               & (v <= social_config.contact_onset_cm(
                                   "head" if behavior == "head_contact" else "tail")) for v in values))
                 if behavior == "attack":
+                    if chase_qualified:
+                        heavy = attack_channels.get("heavy_repeated_target_boxes")
+                        if heavy is not None:
+                            selected = selected & ~(heavy & chase)
                     baseline = _single_bout_mask(center_only_attack & ~claimed, f.fps, minima[behavior])
                     # Observed rescue must not requalify previously subthreshold
                     # unknown tails after priority has removed their anchors.

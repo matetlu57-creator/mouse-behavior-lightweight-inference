@@ -743,7 +743,7 @@ def refine_behavior_segments(
     parameters: HeuristicParameters | None = None,
     *,
     enable_huddle_sliding: bool = True,
-    enable_approach_requalification: bool = True,
+    enable_approach_requalification: bool = False,
     enable_fine_cropping: bool = False,
     scene_guard: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:

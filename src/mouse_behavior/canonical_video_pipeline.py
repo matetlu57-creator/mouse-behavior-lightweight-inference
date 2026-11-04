@@ -37,7 +37,6 @@ from mouse_behavior.evaluation.group_heuristic_config import DEFAULT_GROUP_HEURI
 from mouse_behavior.evaluation.segment_export import _sha256, _write_json
 from mouse_behavior.evaluation.social_event_geometry import observed_path_and_net, observed_motion_statistics
 from mouse_behavior.evaluation.social_heuristic_config import DEFAULT_SOCIAL_HEURISTIC_CONFIG
-from mouse_behavior.evaluation.approach_events import requalify_approach_event, requalify_source_approach_event
 from mouse_behavior.preprocessing.scale_resolution import robust_reference_body_px
 from mouse_behavior.tracking.cache import _iter_cache_records
 
@@ -502,13 +501,8 @@ def infer_window_events(rows: list[dict], fps: float, scale: dict, params, *,
             if name in {"approach", "chasing"}:
                 actor = np.asarray(roles[name + "_actor"][:, edge], dtype=int)
                 target = np.asarray(roles[name + "_target"][:, edge], dtype=int)
-                directed = _directed_events(mask, actor, target, ids, canonical, observed, fps=fps,
-                    actor_centers={int(features.track_ids[slot]): features.centers_cm[:, slot]
-                                   for slot in (left, right)},
-                    min_actor_path_cm=DEFAULT_SOCIAL_HEURISTIC_CONFIG.approach_min_actor_path_cm)
-                result.extend(child for event in directed
-                    for child in (requalify_approach_event(features, edge, event, params)
-                                  if name == "approach" else [event]))
+                directed = _directed_events(mask, actor, target, ids, canonical, observed, fps=fps)
+                result.extend(directed)
             else:
                 interaction = together_contact_evidence(features, edge) if name == "together" else None
                 for start, end in _runs(mask):
@@ -727,12 +721,6 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
     approach_rejections = []
     retained = []
     for event in merged:
-        if event["canonical_behavior"] == "approach":
-            children = requalify_source_approach_event(store, event, binding["source_video"], scale, params)
-            if not children:
-                approach_rejections.append(dict(event_id=event["event_id"], reason="merged_approach_lost_own_semantics"))
-            retained.extend(merge_events([child])[0] for child in children)
-            continue
         if (event["canonical_behavior"] == "isolation"
                 and not all(isolation_audit["tracks"].get(str(track), {}).get("qualified", False)
                             for track in event["mouse_ids"])):
