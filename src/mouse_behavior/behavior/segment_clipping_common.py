@@ -99,19 +99,39 @@ def _resolve_scale_cm_per_px(
     binding_or_info: Mapping[str, Any] | None = None,
     default_body_length_cm: float = 7.918,
     default_cm_per_px: float = 0.10,
+    scale: Mapping[str, Any] | None = None,
 ) -> float:
-    """Resolve centimetres-per-pixel ratio from binding or keypoint body length sampling."""
-    info = _resolve_video_info(binding_or_info)
-    if isinstance(info, Mapping):
-        if "cm_per_pixel" in info:
-            val = float(info["cm_per_pixel"])
+    """Resolve centimetres-per-pixel ratio from explicit scale, binding, or keypoint sampling."""
+    if isinstance(scale, Mapping):
+        if "cm_per_pixel" in scale:
+            val = float(scale["cm_per_pixel"])
             if math.isfinite(val) and val > 0:
                 return val
-        if "px_per_cm" in info:
-            val = float(info["px_per_cm"])
+        if "px_per_cm" in scale:
+            val = float(scale["px_per_cm"])
             if math.isfinite(val) and val > 0:
                 return 1.0 / val
-        scale_blk = info.get("scale")
+        if "scale_px_per_cm" in scale:
+            val = float(scale["scale_px_per_cm"])
+            if math.isfinite(val) and val > 0:
+                return 1.0 / val
+
+    for container in (binding_or_info, _resolve_video_info(binding_or_info)):
+        if not isinstance(container, Mapping):
+            continue
+        if "cm_per_pixel" in container:
+            val = float(container["cm_per_pixel"])
+            if math.isfinite(val) and val > 0:
+                return val
+        if "px_per_cm" in container:
+            val = float(container["px_per_cm"])
+            if math.isfinite(val) and val > 0:
+                return 1.0 / val
+        if "scale_px_per_cm" in container:
+            val = float(container["scale_px_per_cm"])
+            if math.isfinite(val) and val > 0:
+                return 1.0 / val
+        scale_blk = container.get("scale")
         if isinstance(scale_blk, Mapping):
             if "cm_per_pixel" in scale_blk:
                 val = float(scale_blk["cm_per_pixel"])

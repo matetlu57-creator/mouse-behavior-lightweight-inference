@@ -768,6 +768,7 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
             refine_behavior_segments,
             select_behavior_segments,
         )
+        from mouse_behavior.behavior.segment_clipping_common import _observed_support_intervals
         if enable_fine_cropping:
             merged, refinement_audit = refine_behavior_segments(
                 merged,
@@ -779,6 +780,21 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
                 enable_approach_requalification=False,
                 enable_fine_cropping=True,
             )
+            for event in merged:
+                if "parent_candidate_event_id" in event:
+                    s_ev, e_ev = int(event["start_frame"]), int(event["end_frame"])
+                    mids_ev = {int(m) for m in event.get("mouse_ids", ())}
+                    obs_mask = np.zeros(max(0, e_ev - s_ev), dtype=bool)
+                    for row in store.rows(s_ev, e_ev):
+                        fn = int(row.get("source_frame", row.get("frame", -1)))
+                        if s_ev <= fn < e_ev:
+                            present = {int(d["track_id"]) for d in row.get("detections", ()) if "track_id" in d}
+                            obs_mask[fn - s_ev] = mids_ev.issubset(present)
+                    obs_intervals = _observed_support_intervals(obs_mask, s_ev)
+                    obs_count = int(obs_mask.sum())
+                    event["observed_all_participants_frame_intervals"] = obs_intervals
+                    event["observed_all_participants_frame_count"] = obs_count
+                    event["inferred_or_partially_unobserved_frame_count"] = max(0, (e_ev - s_ev) - obs_count)
         merged, selection_audit = select_behavior_segments(
             merged,
             store=store,
@@ -793,9 +809,15 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
         contexts = event.get("inference_parent_contexts", [])
         if contexts:
             start, end = event["start_frame"], event["end_frame"]
+            if "parent_candidate_event_id" in event:
+                start_closed = any(c["context_start"] < start < c["context_end"] for c in contexts)
+                end_closed = any(c["context_start"] < end < c["context_end"] for c in contexts)
+            else:
+                start_closed = any(c["process_start"] == start and start > c["context_start"] for c in contexts)
+                end_closed = any(c["process_end"] == end and end < c["context_end"] for c in contexts)
             event["process_boundary_status"] = dict(
-                start_closed_in_context=any(c["process_start"] == start and start > c["context_start"] for c in contexts),
-                end_closed_in_context=any(c["process_end"] == end and end < c["context_end"] for c in contexts),
+                start_closed_in_context=start_closed,
+                end_closed_in_context=end_closed,
                 starts_at_source_boundary=start == 0, ends_at_source_boundary=end == total,
                 minimum_duration_used_as_crop_length=False,
                 meaning="Rule-defined endpoints; context/source truncation is not a witnessed biological end")

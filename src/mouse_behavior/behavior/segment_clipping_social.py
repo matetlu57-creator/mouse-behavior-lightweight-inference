@@ -77,6 +77,8 @@ def refine_attack_segments(
     store: Any,
     binding: Mapping[str, Any] | None = None,
     *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
     min_duration_s: float | None = None,
     max_dropout_fraction: float = 0.10,
     min_path_px: float = 60.0,
@@ -92,14 +94,14 @@ def refine_attack_segments(
     `surge_dist_cm` (18.0 cm) and speed >= `surge_speed_cm_s` (4.0 cm/s) or close
     grapple contact (<= 12.0 cm).
     Grapple continuation extends tumble offset while mice remain in interaction
-    envelope (distance <= `grapple_dist_cm`, 16.0 cm).
+    envelope (distance <= `grapple_dist_cm`, 16.0 cm), bounded by `lookforward`.
     `max_gap_frames` tolerances momentary detection dropouts or tumble occlusions
     (default: ~0.35 s).
     Never discards valid attack events if motion/duration checks fail on boundary clips;
     instead falls back to candidate bounds so classification accuracy is preserved.
     """
     fps = _resolve_fps(binding)
-    params = _resolve_parameters(binding)
+    params = _resolve_parameters(binding, parameters)
     req_s = min_duration_s if min_duration_s is not None else float(params.attack_min_event_duration_s)
     info = _resolve_video_info(binding)
     frame_count = info.get("frame_count")
@@ -119,9 +121,9 @@ def refine_attack_segments(
 
         mid_a, mid_b = mids[0], mids[1]
         lookback = int(round(4.0 * fps))
-        lookforward = int(round(4.0 * fps))
+        lookforward = int(round(6.0 * fps))
         scan_s = max(0, start - lookback)
-        scan_e = int(frame_count) if frame_count is not None else end + lookforward
+        scan_e = min(int(frame_count), end + lookforward) if frame_count is not None else end + lookforward
 
         rows = list(store.rows(scan_s, scan_e))
         if not rows:
@@ -129,7 +131,7 @@ def refine_attack_segments(
             refined.append(fallback)
             continue
 
-        cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding)
+        cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding, scale=scale)
         frame_map = {int(r.get("frame", r.get("source_frame", 0))): r for r in rows}
 
         pos_a: dict[int, np.ndarray | None] = {}
@@ -226,6 +228,8 @@ def refine_chasing_segments(
     store: Any,
     binding: Mapping[str, Any] | None = None,
     *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
     min_duration_s: float | None = None,
     max_separation_cm: float = 32.0,
     min_follower_speed_cm_s: float = 3.5,
@@ -235,14 +239,15 @@ def refine_chasing_segments(
 
     Onset backtracking scans backward from start frame while follower pursuit speed
     and close separation (<= `max_separation_cm`, 32.0 cm) are maintained.
-    Forward continuation extends while pursuit continues within `max_separation_cm`.
+    Forward continuation extends while pursuit continues within `max_separation_cm`,
+    bounded by `lookforward`.
     `max_gap_frames` tolerances momentary tracking noise or corner turns (default: ~0.35 s).
     Disengagement trimming identifies when distance opens up and pursuit stops.
     If the refined segment fails duration qualification, falls back to the candidate
     bounds so classification accuracy is never degraded.
     """
     fps = _resolve_fps(binding)
-    params = _resolve_parameters(binding)
+    params = _resolve_parameters(binding, parameters)
     req_s = min_duration_s if min_duration_s is not None else float(params.chase_min_duration_s)
     info = _resolve_video_info(binding)
     frame_count = info.get("frame_count")
@@ -265,7 +270,7 @@ def refine_chasing_segments(
         lookback = int(round(5.0 * fps))
         lookforward = int(round(5.0 * fps))
         scan_s = max(0, start - lookback)
-        scan_e = int(frame_count) if frame_count is not None else end + lookforward
+        scan_e = min(int(frame_count), end + lookforward) if frame_count is not None else end + lookforward
 
         rows = list(store.rows(scan_s, scan_e))
         if not rows:
@@ -273,7 +278,7 @@ def refine_chasing_segments(
             refined.append(fallback)
             continue
 
-        cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding)
+        cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding, scale=scale)
         frame_map = {int(r.get("frame", r.get("source_frame", 0))): r for r in rows}
 
         pos_a: dict[int, np.ndarray | None] = {}

@@ -17,6 +17,7 @@ from mouse_behavior.behavior.segment_clipping_common import (
     _resolve_scale_cm_per_px,
     update_segment_bounds,
 )
+from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
 
 __all__ = [
     "refine_locomotion_segments",
@@ -30,11 +31,13 @@ def refine_rearing_segments(
     store: Any,
     binding: Mapping[str, Any] | None = None,
     *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
     min_duration_s: float = 0.5,
     max_duration_s: float | None = None,
     max_mounted_fraction: float = 0.20,
     max_box_aspect_ratio: float = 1.65,
-    max_ear_neck_px: float = 20.0,
+    max_ear_neck_px: float | None = None,
 ) -> list[dict[str, Any]]:
     """Fine-crop and validate standalone upright rearing segments.
 
@@ -42,8 +45,14 @@ def refine_rearing_segments(
     detected mouse) and curled dorsal grooming (`cos_angle > 0.15`), and trims
     unobserved endpoint frames. `max_duration_s` defaults to `None` so long
     rearing bouts are never arbitrarily discarded unless a caller specifies a cap.
+    When `scale` is provided, pixel posture gates rescale with body-length pixels.
     """
     fps = _resolve_fps(binding)
+    params = _resolve_parameters(binding, parameters)
+    has_explicit_scale = (
+        isinstance(scale, Mapping)
+        and ("cm_per_pixel" in scale or "px_per_cm" in scale or "scale_px_per_cm" in scale)
+    )
     refined: list[dict[str, Any]] = []
     for event in events:
         if event.get("canonical_behavior") != "rearing":
@@ -58,6 +67,12 @@ def refine_rearing_segments(
         rows = list(store.rows(start, end))
         if not rows:
             continue
+
+        cm_per_px = _resolve_scale_cm_per_px(rows, [mid], binding, scale=scale)
+        ref_body_px = 7.918 / max(cm_per_px, 1e-6)
+        scale_factor = max(1.0, ref_body_px / 79.18) if has_explicit_scale else 1.0
+        eff_max_ear_neck_px = float(max_ear_neck_px) if max_ear_neck_px is not None else 20.0 * scale_factor
+        eff_max_nose_tail_px = 72.0 * scale_factor
 
         valid_posture = np.zeros(len(rows), dtype=bool)
         present_mask = np.zeros(len(rows), dtype=bool)
@@ -112,8 +127,8 @@ def refine_rearing_segments(
                 cos_vals.append(cos_ang)
                 if (
                     not other_overlap
-                    and ear_neck <= max_ear_neck_px
-                    and nose_tail < 72.0
+                    and ear_neck <= eff_max_ear_neck_px
+                    and nose_tail < eff_max_nose_tail_px
                     and aspect <= max_box_aspect_ratio
                     and cos_ang <= 0.15
                 ):
@@ -150,7 +165,7 @@ def refine_rearing_segments(
             mounted_ratio = mounted_frames / max(1, int(present_mask.sum()))
             if (
                 mounted_ratio <= max_mounted_fraction
-                and med_ear <= max_ear_neck_px
+                and med_ear <= eff_max_ear_neck_px
                 and med_asp <= max_box_aspect_ratio
                 and med_cos <= 0.10
             ):
@@ -171,7 +186,7 @@ def refine_rearing_segments(
             if max_duration_s is not None and dur_s - 1e-9 > max_duration_s:
                 continue
             cropped = update_segment_bounds(event, true_s, true_e, fps, suffix="rearing_crop")
-            if qualify_event_duration(cropped, fps, parameters=_resolve_parameters(binding))["ok"]:
+            if qualify_event_duration(cropped, fps, parameters=params)["ok"]:
                 refined.append(cropped)
     return refined
 
@@ -181,8 +196,10 @@ def refine_static_segments(
     store: Any,
     binding: Mapping[str, Any] | None = None,
     *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
     min_duration_s: float = 1.0,
-    max_radius_cm: float = 4.0,
+    max_radius_cm: float | None = None,
     max_mean_speed_cm_s: float = 6.0,
     snap_head_tail_s: float = 2.0,
 ) -> list[dict[str, Any]]:
@@ -200,7 +217,7 @@ def refine_static_segments(
     )
 
     fps = _resolve_fps(binding)
-    params = _resolve_parameters(binding)
+    params = _resolve_parameters(binding, parameters)
     refined: list[dict[str, Any]] = []
 
     req_dur = (
@@ -208,8 +225,14 @@ def refine_static_segments(
         if min_duration_s != 1.0
         else float(getattr(params, "stationary_min_duration_s", min_duration_s))
     )
+    eff_max_radius_cm = (
+        float(max_radius_cm)
+        if max_radius_cm is not None
+        else float(getattr(params, "stationary_max_center_radius_cm", 4.0))
+    )
     snap_frames = max(0, int(round(snap_head_tail_s * fps)))
-    speed_gate = min(4.0, float(max_mean_speed_cm_s)) if max_mean_speed_cm_s < 4.0 else 4.0
+    default_motion_thresh = float(getattr(params, "individual_motion_speed_threshold_cm_s", 4.0))
+    speed_gate = min(default_motion_thresh, float(max_mean_speed_cm_s)) if max_mean_speed_cm_s < default_motion_thresh else default_motion_thresh
 
     for event in events:
         c_beh = str(event.get("canonical_behavior") or event.get("behavior") or "").lower()
@@ -229,7 +252,7 @@ def refine_static_segments(
         if not rows:
             continue
 
-        scale_cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding)
+        scale_cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding, scale=scale)
         centers_cm, observed = _clip_dense_track_series(rows, start, end, target_id, scale_cm_per_px)
         if int(observed.sum()) < 2:
             continue
@@ -237,8 +260,8 @@ def refine_static_segments(
         cfg = IndividualHeuristicConfig(
             motion_speed_threshold_cm_s=speed_gate,
             static_min_duration_s=req_dur,
-            static_max_radius_cm=float(max_radius_cm),
-            static_transient_max_displacement_cm=float(max_radius_cm),
+            static_max_radius_cm=eff_max_radius_cm,
+            static_transient_max_displacement_cm=eff_max_radius_cm,
             static_transient_max_s=1.0,
             static_detection_gap_max_s=1.0,
         )
@@ -269,7 +292,7 @@ def refine_static_segments(
                     rel_s > 0
                     and observed[rel_s - 1, 0]
                     and not np.isfinite(spd_diag[rel_s - 1])
-                    and float(np.linalg.norm(centers_cm[rel_s - 1, 0] - med_center)) <= max_radius_cm
+                    and float(np.linalg.norm(centers_cm[rel_s - 1, 0] - med_center)) <= eff_max_radius_cm
                 ):
                     rel_s -= 1
             if run_idx == len(bout_runs) - 1:
@@ -277,7 +300,7 @@ def refine_static_segments(
                     rel_e < span
                     and observed[rel_e, 0]
                     and not np.isfinite(spd_diag[rel_e])
-                    and float(np.linalg.norm(centers_cm[rel_e, 0] - med_center)) <= max_radius_cm
+                    and float(np.linalg.norm(centers_cm[rel_e, 0] - med_center)) <= eff_max_radius_cm
                 ):
                     rel_e += 1
 
@@ -287,7 +310,7 @@ def refine_static_segments(
             pts_raw = centers_cm[rel_s:rel_e, 0][sub_obs]
             med_center = np.median(pts_raw, axis=0)
             max_rad_cm = float(np.linalg.norm(pts_raw - med_center, axis=1).max())
-            if max_rad_cm > max_radius_cm:
+            if max_rad_cm > eff_max_radius_cm:
                 continue
 
             sm_pts = smoothed[rel_s:rel_e, 0]
@@ -334,6 +357,8 @@ def refine_locomotion_segments(
     store: Any,
     binding: Mapping[str, Any] | None = None,
     *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
     min_duration_s: float = 0.5,
     min_displacement_cm: float = 3.0,
     min_speed_cm_s: float = 3.0,
@@ -353,7 +378,7 @@ def refine_locomotion_segments(
     )
 
     fps = _resolve_fps(binding)
-    params = _resolve_parameters(binding)
+    params = _resolve_parameters(binding, parameters)
     refined: list[dict[str, Any]] = []
 
     req_dur = (
@@ -382,7 +407,7 @@ def refine_locomotion_segments(
         if not rows:
             continue
 
-        scale_cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding)
+        scale_cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding, scale=scale)
         centers_cm, observed = _clip_dense_track_series(rows, start, end, target_id, scale_cm_per_px)
         if int(observed.sum()) < 2:
             continue

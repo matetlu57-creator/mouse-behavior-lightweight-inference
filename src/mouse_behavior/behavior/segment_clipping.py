@@ -107,14 +107,14 @@ def refine_behavior_segments(
         audit["approach_audit"] = approach_audit
 
     if enable_fine_cropping:
-        current = refine_rearing_segments(current, store, binding)
-        current = refine_attack_segments(current, store, binding)
-        current = refine_chasing_segments(current, store, binding)
-        current = refine_dispersal_segments(current, store, binding)
-        current = refine_group_locomotion_segments(current, store, binding)
-        current = refine_isolation_segments(current, store, binding)
-        current = refine_static_segments(current, store, binding)
-        current = refine_locomotion_segments(current, store, binding)
+        current = refine_rearing_segments(current, store, binding, scale=scale, parameters=parameters)
+        current = refine_attack_segments(current, store, binding, scale=scale, parameters=parameters)
+        current = refine_chasing_segments(current, store, binding, scale=scale, parameters=parameters)
+        current = refine_dispersal_segments(current, store, binding, scale=scale, parameters=parameters)
+        current = refine_group_locomotion_segments(current, store, binding, scale=scale, parameters=parameters)
+        current = refine_isolation_segments(current, store, binding, scale=scale, parameters=parameters)
+        current = refine_static_segments(current, store, binding, scale=scale, parameters=parameters)
+        current = refine_locomotion_segments(current, store, binding, scale=scale, parameters=parameters)
 
     audit["output_count"] = len(current)
     return current, audit

@@ -289,6 +289,16 @@ def _select_demo_fallback(evaluation_file: Path) -> dict[str, Any]:
     return DEMO_FALLBACK_DATA
 
 
+def _safe_script_json(payload: Mapping[str, Any]) -> str:
+    """Serialize JSON for inline <script> blocks while preventing </script> breakout."""
+    return (
+        json.dumps(payload, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 def render_comparison_page(
     initial_data: Mapping[str, Any] | None = None,
     fallback_data: Mapping[str, Any] | None = None,
@@ -301,8 +311,8 @@ def render_comparison_page(
     )
     raw_fallback["is_fallback_demo"] = True
     resolved_initial = dict(initial_data) if initial_data is not None else raw_fallback
-    embedded_data_json = json.dumps(resolved_initial, ensure_ascii=False)
-    fallback_data_json = json.dumps(raw_fallback, ensure_ascii=False)
+    embedded_data_json = _safe_script_json(resolved_initial)
+    fallback_data_json = _safe_script_json(raw_fallback)
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -2068,13 +2078,16 @@ class ComparisonServerHandler(BaseHTTPRequestHandler):
         match_orig = re.fullmatch(r"api/video/original/([^/]+)/([A-Za-z0-9_\-]+)", path)
         if match_orig:
             behavior, clip_id = match_orig.groups()
+            beh_clean = behavior.strip()
+            if not beh_clean or beh_clean in {".", ".."} or "\\" in beh_clean or "/" in beh_clean or ".." in beh_clean:
+                self._send_json(400, {"error": "Invalid behavior segment", "behavior": behavior})
+                return
             query = parsed.query or ""
             is_raw = "annotated=0" in query or "raw=1" in query
 
             annotated_file = self.orig_annotated_dir / clip_id / "clip_annotated.mp4"
 
             source_file: Path | None = None
-            beh_clean = behavior.strip()
             beh_lower = beh_clean.lower()
             if beh_lower in ("isolation",) and (self.isolation_dir / clip_id / "clip.mp4").is_file():
                 source_file = self.isolation_dir / clip_id / "clip.mp4"
@@ -2089,7 +2102,9 @@ class ComparisonServerHandler(BaseHTTPRequestHandler):
             elif beh_lower in ("locomotion",) and (self.locomotion_dir / clip_id / "clip.mp4").is_file():
                 source_file = self.locomotion_dir / clip_id / "clip.mp4"
             elif (self.dataset_dir / beh_clean / clip_id / "clip.mp4").is_file():
-                source_file = self.dataset_dir / beh_clean / clip_id / "clip.mp4"
+                candidate = (self.dataset_dir / beh_clean / clip_id / "clip.mp4").resolve()
+                if candidate.is_relative_to(self.dataset_dir.resolve()):
+                    source_file = candidate
             elif self.dataset_dir.is_dir():
                 for sub in self.dataset_dir.iterdir():
                     if sub.is_dir() and sub.name.lower() == beh_lower:

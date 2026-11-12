@@ -17,6 +17,7 @@ from mouse_behavior.behavior.segment_clipping_common import (
     _resolve_scale_cm_per_px,
     update_segment_bounds,
 )
+from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
 
 __all__ = [
     "refine_dispersal_segments",
@@ -43,14 +44,20 @@ def refine_dispersal_segments(
     store: Any,
     binding: Mapping[str, Any] | None = None,
     *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
     min_duration_s: float = 5.0,
-    cluster_radius_px: float = 120.0,
-    min_radius_gain_px: float = 35.0,
-    min_net_gain_px: float = 25.0,
+    cluster_radius_px: float | None = None,
+    min_radius_gain_px: float | None = None,
+    min_net_gain_px: float | None = None,
 ) -> list[dict[str, Any]]:
     """Fine-crop dispersal segments to start at a compact cluster and end after outward expansion."""
     fps = _resolve_fps(binding)
-    params = _resolve_parameters(binding)
+    params = _resolve_parameters(binding, parameters)
+    has_explicit_scale = (
+        isinstance(scale, Mapping)
+        and ("cm_per_pixel" in scale or "px_per_cm" in scale or "scale_px_per_cm" in scale)
+    )
     refined: list[dict[str, Any]] = []
     for event in events:
         if event.get("canonical_behavior") != "dispersal":
@@ -64,6 +71,12 @@ def refine_dispersal_segments(
         rows = list(store.rows(start, end))
         if not rows:
             continue
+
+        cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding, scale=scale)
+        scale_factor = (0.10 / max(cm_per_px, 1e-6)) if has_explicit_scale else 1.0
+        eff_cluster_radius_px = float(cluster_radius_px) if cluster_radius_px is not None else 120.0 * max(1.0, scale_factor)
+        eff_min_radius_gain_px = float(min_radius_gain_px) if min_radius_gain_px is not None else 35.0 * scale_factor
+        eff_min_net_gain_px = float(min_net_gain_px) if min_net_gain_px is not None else 25.0 * scale_factor
 
         rads: list[tuple[int, float]] = []
         all_obs_frames: set[int] = set()
@@ -90,7 +103,7 @@ def refine_dispersal_segments(
 
         compact_idx = [
             i for i, r in enumerate(vals_arr)
-            if r <= cluster_radius_px and int(frames_arr[i]) in all_obs_frames
+            if r <= eff_cluster_radius_px and int(frames_arr[i]) in all_obs_frames
         ]
         if not compact_idx:
             continue
@@ -102,7 +115,7 @@ def refine_dispersal_segments(
         peak_offset = int(np.argmax(after_vals))
         peak_i = best_i + peak_offset
         peak_rad = float(vals_arr[peak_i])
-        if peak_rad - start_rad < min_radius_gain_px:
+        if peak_rad - start_rad < eff_min_radius_gain_px:
             continue
 
         min_end_frame = new_s + int(math.floor(min_duration_s * fps)) + 1
@@ -114,14 +127,14 @@ def refine_dispersal_segments(
             if int(frames_arr[i]) + 1 >= min_end_frame
             and int(frames_arr[i]) <= max(target_end, min_end_frame + int(round(2.0 * fps)))
             and int(frames_arr[i]) in all_obs_frames
-            and (vals_arr[i] - start_rad) >= min_net_gain_px
+            and (vals_arr[i] - start_rad) >= eff_min_net_gain_px
         ]
         if not valid_end_indices:
             valid_end_indices = [
                 i for i in range(best_i + 1, len(frames_arr))
                 if int(frames_arr[i]) + 1 >= min_end_frame
                 and int(frames_arr[i]) in all_obs_frames
-                and (vals_arr[i] - start_rad) >= min_net_gain_px
+                and (vals_arr[i] - start_rad) >= eff_min_net_gain_px
             ]
         if not valid_end_indices:
             continue
@@ -142,15 +155,22 @@ def refine_group_locomotion_segments(
     store: Any,
     binding: Mapping[str, Any] | None = None,
     *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
     min_duration_s: float = 3.0,
-    min_support_frames: int = 28,
+    min_support_frames: int | None = None,
     min_participation_ratio: float = 0.40,
     max_end_radius_px: float = 145.0,
     min_speed_px_s: float = 12.0,
 ) -> list[dict[str, Any]]:
     """Fine-crop and validate group locomotion segments for coordinated multi-animal movement."""
     fps = _resolve_fps(binding)
-    params = _resolve_parameters(binding)
+    params = _resolve_parameters(binding, parameters)
+    eff_min_support_frames = (
+        int(min_support_frames)
+        if min_support_frames is not None
+        else max(1, int(math.ceil(0.93295 * fps - 1e-9)))
+    )
     refined: list[dict[str, Any]] = []
     for event in events:
         if event.get("canonical_behavior") != "group_locomotion":
@@ -191,7 +211,7 @@ def refine_group_locomotion_segments(
         if not all_obs_indices or len(centroids) < 5:
             continue
 
-        scale_cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding)
+        scale_cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding, scale=scale)
         eff_max_end_radius_px = (
             max_end_radius_px
             if max_end_radius_px != 145.0
@@ -235,7 +255,7 @@ def refine_group_locomotion_segments(
             cropped["canonical_support_frame_count"] = sum(e - s for s, e in supp_intervals)
 
         supp_frames = int(cropped.get("canonical_support_frame_count", true_e - true_s))
-        if supp_frames < min_support_frames:
+        if supp_frames < eff_min_support_frames:
             continue
 
         end_rad = float(np.mean(rads[-min(15, len(rads)) :]))
@@ -269,13 +289,15 @@ def refine_isolation_segments(
     store: Any,
     binding: Mapping[str, Any] | None = None,
     *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
     min_duration_s: float = 10.0,
     isolation_distance_cm: float = 20.0,
     min_isolated_fraction: float = 0.85,
 ) -> list[dict[str, Any]]:
     """Fine-crop and validate isolation segments for single mice separated from conspecifics."""
     fps = _resolve_fps(binding)
-    params = _resolve_parameters(binding)
+    params = _resolve_parameters(binding, parameters)
     refined: list[dict[str, Any]] = []
 
     req_dur = getattr(params, "isolation_min_duration_s", min_duration_s)
@@ -298,7 +320,7 @@ def refine_isolation_segments(
         if not rows:
             continue
 
-        scale_cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding)
+        scale_cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding, scale=scale)
         iso_dist_px = req_dist_cm / scale_cm_per_px
 
         obs_isolated_indices = []

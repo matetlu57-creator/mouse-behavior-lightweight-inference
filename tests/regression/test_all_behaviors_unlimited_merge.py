@@ -127,6 +127,30 @@ def test_run_all_behaviors_pipeline_enables_all_behaviors_and_fine_cropping(tmp_
     assert audit["segment_selection_audit"]["max_per_behavior"] is None
 
 
+def test_run_all_behaviors_pipeline_mode_all_exports_packages(tmp_path: Path) -> None:
+    video, cache, source_receipt = _create_tracked_source(tmp_path)
+    config = Path(__file__).resolve().parents[2] / "configs/default.yaml"
+    out = tmp_path / "all_behaviors_full_export"
+
+    receipt = run_all_behaviors_pipeline(
+        video,
+        cache,
+        out,
+        config,
+        mode="all",
+        source_receipt=source_receipt,
+    )
+    assert receipt["status"] == "complete"
+    assert receipt["event_count"] >= 2
+    assert receipt["clip_count"] == receipt["event_count"]
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["clip_count"] == receipt["clip_count"]
+    for clip in manifest["clips"]:
+        assert (Path(clip["path"]) / "clip.mp4").is_file()
+        assert (Path(clip["path"]) / "annotation.json").is_file()
+
+
+
 def test_infer_all_behavior_events_callable_directly(tmp_path: Path) -> None:
     from mouse_behavior.canonical_video_pipeline import TrackStore, bind_cache
     from mouse_behavior.evaluation.exported_dataset_config import config_seed_parameters

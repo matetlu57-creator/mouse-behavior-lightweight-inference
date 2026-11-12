@@ -1050,3 +1050,132 @@ def test_refine_locomotion_segments_trims_static_prefix():
     assert res[0]["start_frame"] >= 40
     assert res[0]["end_frame"] == 90
 
+
+def test_refine_attack_lookforward_is_bounded_on_long_videos():
+    """Attack forward extension must stop at end + lookforward, not scan to frame_count."""
+    fps = 30.0
+    rows = []
+    for f in range(1000):
+        dx = (f % 2) * 15.0 if 100 <= f < 130 else 0.0
+        rows.append({
+            "frame": f,
+            "source_frame": f,
+            "time": f / fps,
+            "detections": [
+                _make_detection(1, (110.0, 100.0), (40.0, 20.0)),
+                _make_detection(2, (150.0 + dx, 100.0), (40.0, 20.0)),
+            ],
+        })
+    ev = {
+        "event_id": "att_bounded",
+        "canonical_behavior": "attack",
+        "behavior": "Attack",
+        "mouse_ids": [1, 2],
+        "start_frame": 100,
+        "end_frame": 130,
+    }
+    res = refine_attack_segments([ev], _DummyStore(rows), {"source_video": {"fps": fps, "frame_count": 1000}})
+    assert len(res) == 1
+    assert res[0]["end_frame"] <= 130 + int(round(6.0 * fps))
+
+
+def test_refine_behavior_segments_forwards_scale_and_1080p_rearing():
+    """refine_behavior_segments must forward `scale` to submodules and support 1080p rearing."""
+    fps = 30.0
+    # 1. Isolation with explicit scale={"cm_per_pixel": 0.05}: 220px = 11cm (< 15cm), must reject
+    rows_iso = [
+        {
+            "frame": f,
+            "source_frame": f,
+            "time": f / fps,
+            "detections": [
+                {"track_id": 1, "box": [100, 100, 120, 120], "keypoints": []},
+                {"track_id": 2, "box": [320, 100, 340, 120], "keypoints": []},
+            ],
+        }
+        for f in range(360)
+    ]
+    ev_iso = {
+        "event_id": "iso_scale_fwd",
+        "canonical_behavior": "isolation",
+        "behavior": "Isolation",
+        "mouse_ids": [1],
+        "target_mouse_id": 1,
+        "start_frame": 0,
+        "end_frame": 360,
+    }
+    res_iso, _ = refine_behavior_segments(
+        [ev_iso],
+        _DummyStore(rows_iso),
+        {"source_video": {"fps": fps}},
+        scale={"cm_per_pixel": 0.05},
+        enable_huddle_sliding=False,
+        enable_fine_cropping=True,
+    )
+    assert len(res_iso) == 0
+
+    # 2. 1080p-scale rearing (ear_neck=22px, nose_tail=90px) retained when scale=0.06 cm/px
+    rear_kps = np.array([
+        [500.0, 410.0, 0.9],
+        [515.0, 430.0, 0.9],
+        [485.0, 430.0, 0.9],
+        [500.0, 452.0, 0.9],
+        [482.0, 480.0, 0.9],
+        [518.0, 480.0, 0.9],
+        [500.0, 500.0, 0.9],
+    ])
+    rows_rear = [
+        {
+            "frame": f,
+            "source_frame": f,
+            "time": f / fps,
+            "detections": [_make_detection(1, (500.0, 455.0), (70.0, 100.0), rear_kps)],
+        }
+        for f in range(45)
+    ]
+    ev_rear = {
+        "event_id": "rear_1080p",
+        "canonical_behavior": "rearing",
+        "behavior": "Rearing",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 45,
+    }
+    res_rear = refine_rearing_segments(
+        [ev_rear],
+        _DummyStore(rows_rear),
+        {"source_video": {"fps": fps}},
+        scale={"cm_per_pixel": 0.06},
+    )
+    assert len(res_rear) == 1
+
+
+def test_refine_group_locomotion_respects_15fps_support_frames():
+    """At 15 fps, ~3.5s (52 frames) with 24 support frames (> 0.933s * 15 = 14) must pass."""
+    fps = 15.0
+    rows = [
+        {
+            "frame": f,
+            "source_frame": f,
+            "time": f / fps,
+            "detections": [
+                _make_detection(1, (50.0 + f * 3.0, 100.0)),
+                _make_detection(2, (60.0 + f * 3.0, 105.0)),
+                _make_detection(3, (55.0 + f * 3.0, 110.0)),
+            ],
+        }
+        for f in range(52)
+    ]
+    ev = {
+        "event_id": "gloco_15fps",
+        "canonical_behavior": "group_locomotion",
+        "behavior": "Group locomotion",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": 52,
+        "canonical_support_frame_intervals": [[0, 24]],
+        "canonical_support_frame_count": 24,
+    }
+    res = refine_group_locomotion_segments([ev], _DummyStore(rows), {"source_video": {"fps": fps}})
+    assert len(res) == 1
+

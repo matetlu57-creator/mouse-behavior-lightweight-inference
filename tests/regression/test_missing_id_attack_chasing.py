@@ -35,13 +35,19 @@ from evaluate_missing_id_attack_chasing import (  # noqa: E402
 from mouse_behavior.evaluation.exported_dataset_features import load_exported_features  # noqa: E402
 
 
+def _require_missing_id_dataset() -> None:
+    if not DEFAULT_ATTACK_DIR.is_dir() or not DEFAULT_CHASING_DIR.is_dir():
+        pytest.skip(
+            f"Missing-ID dataset not available locally ({DEFAULT_ATTACK_DIR}, {DEFAULT_CHASING_DIR})"
+        )
+
+
 class TestDatasetIntegrity:
     """Validate completeness and schema adherence of the 107 missing-ID clips."""
 
     def test_dataset_directories_and_clip_counts(self):
         """Verify directories exist and contain expected 85 Attack and 22 Chasing clips."""
-        assert DEFAULT_ATTACK_DIR.is_dir(), f"Attack dir missing: {DEFAULT_ATTACK_DIR}"
-        assert DEFAULT_CHASING_DIR.is_dir(), f"Chasing dir missing: {DEFAULT_CHASING_DIR}"
+        _require_missing_id_dataset()
 
         attack_clips = [d for d in DEFAULT_ATTACK_DIR.iterdir() if d.is_dir()]
         chasing_clips = [d for d in DEFAULT_CHASING_DIR.iterdir() if d.is_dir()]
@@ -52,6 +58,7 @@ class TestDatasetIntegrity:
 
     def test_required_four_files_in_all_clips(self):
         """Verify every clip contains clip.mp4, annotation.json, metadata.json, and tracks.json."""
+        _require_missing_id_dataset()
         required_files = ["clip.mp4", "annotation.json", "metadata.json", "tracks.json"]
         all_dirs = list(DEFAULT_ATTACK_DIR.iterdir()) + list(DEFAULT_CHASING_DIR.iterdir())
 
@@ -64,6 +71,7 @@ class TestDatasetIntegrity:
 
     def test_annotation_schema_contract(self):
         """Verify annotation.json schema fields across Attack and Chasing samples."""
+        _require_missing_id_dataset()
         for cat, folder in [("Attack", DEFAULT_ATTACK_DIR), ("Chasing", DEFAULT_CHASING_DIR)]:
             samples = [d for d in folder.iterdir() if d.is_dir()][:3]
             for s in samples:
@@ -91,6 +99,7 @@ class TestFeatureExtractionAndBinding:
 
     def test_load_exported_features_shapes(self):
         """Verify load_exported_features produces valid numpy arrays."""
+        _require_missing_id_dataset()
         sample_clip = next(d for d in DEFAULT_ATTACK_DIR.iterdir() if d.is_dir())
         meta = json.loads((sample_clip / "metadata.json").read_text(encoding="utf-8"))
         fps = float(meta["clip"]["fps"])
@@ -104,6 +113,7 @@ class TestFeatureExtractionAndBinding:
 
     def test_target_mouse_ids_present_in_tracks(self):
         """Verify target mouse_ids from annotation.json exist in tracks.json."""
+        _require_missing_id_dataset()
         sample_clip = next(d for d in DEFAULT_CHASING_DIR.iterdir() if d.is_dir())
         anno = json.loads((sample_clip / "annotation.json").read_text(encoding="utf-8"))
         target_ids = sorted(anno["mouse_ids"])
@@ -154,6 +164,7 @@ class TestEvaluationPipeline:
 
     def test_evaluate_single_attack_clip(self):
         """Verify evaluate_clip output schema on an Attack sample."""
+        _require_missing_id_dataset()
         clip_dir = DEFAULT_ATTACK_DIR / "02c9f31a225e8c87678601f3"
         res = evaluate_clip(clip_dir)
 
@@ -171,6 +182,7 @@ class TestEvaluationPipeline:
 
     def test_evaluate_single_chasing_clip(self):
         """Verify evaluate_clip output schema on a Chasing sample."""
+        _require_missing_id_dataset()
         clip_dir = DEFAULT_CHASING_DIR / "1750d23511065ca44967b61d"
         res = evaluate_clip(clip_dir)
 
@@ -185,6 +197,7 @@ class TestEvaluationPipeline:
 
     def test_dataset_summary_contract(self):
         """Verify evaluate_dataset returns exact JSON schema keys required by PROJECT.md."""
+        _require_missing_id_dataset()
         summary = evaluate_dataset(limit=2)
 
         required_keys = [
@@ -227,8 +240,10 @@ class TestEvaluationPipeline:
         if report_path.is_file():
             summary = json.loads(report_path.read_text(encoding="utf-8"))
             if summary.get("total_clips") != 107:
+                _require_missing_id_dataset()
                 summary = evaluate_dataset()
         else:
+            _require_missing_id_dataset()
             summary = evaluate_dataset()
 
         assert summary["attack_accuracy"] >= 0.70, (
@@ -250,8 +265,10 @@ class TestEvaluationPipeline:
         if report_path.is_file():
             summary = json.loads(report_path.read_text(encoding="utf-8"))
             if summary.get("chasing_clips") != 22:
+                _require_missing_id_dataset()
                 summary = evaluate_dataset()
         else:
+            _require_missing_id_dataset()
             summary = evaluate_dataset()
 
         assert summary["chasing_clips"] == 22
@@ -381,6 +398,7 @@ class TestCliRunner:
 
     def test_cli_execution_with_json_out(self, tmp_path):
         """Run script via CLI subprocess with --limit 1 and verify report file."""
+        _require_missing_id_dataset()
         report_file = tmp_path / "summary_test.json"
         cmd = [
             sys.executable,
@@ -398,6 +416,52 @@ class TestCliRunner:
         assert "overall_accuracy" in data
         assert "overall_mean_iou" in data
         assert data["total_clips"] == 2
+
+    def test_cli_execution_with_synthetic_dirs(self, tmp_path):
+        """Verify CLI execution works portably on synthetic Attack/Chasing clip dirs."""
+        attack_clip = tmp_path / "Attack" / "syn_att"
+        chasing_clip = tmp_path / "Chasing" / "syn_ch"
+        for clip_dir, beh in ((attack_clip, "Attack"), (chasing_clip, "Chasing")):
+            clip_dir.mkdir(parents=True)
+            tracks = [
+                {
+                    "frame": f,
+                    "detections": [
+                        {"track_id": 1, "box": [100 + f * 5, 100, 140 + f * 5, 120]},
+                        {"track_id": 2, "box": [145 + f * 5, 100, 185 + f * 5, 120]},
+                    ],
+                }
+                for f in range(35)
+            ]
+            (clip_dir / "tracks.json").write_text(json.dumps(tracks), encoding="utf-8")
+            (clip_dir / "metadata.json").write_text(
+                json.dumps({"clip": {"fps": 30.0, "frame_count": 35}}),
+                encoding="utf-8",
+            )
+            (clip_dir / "annotation.json").write_text(
+                json.dumps({
+                    "behavior": beh,
+                    "mouse_ids": [1, 2],
+                    "frame_range": {"start": 0, "end": 34},
+                    "participants": [],
+                }),
+                encoding="utf-8",
+            )
+
+        report_file = tmp_path / "synthetic_summary.json"
+        cmd = [
+            sys.executable,
+            str(ROOT / "scripts/evaluate_missing_id_attack_chasing.py"),
+            "--attack-dir", str(tmp_path / "Attack"),
+            "--chasing-dir", str(tmp_path / "Chasing"),
+            "--json-out", str(report_file),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        assert result.returncode == 0, f"Synthetic CLI runner failed: {result.stderr}"
+        data = json.loads(report_file.read_text(encoding="utf-8"))
+        assert data["total_clips"] == 2
+        assert data["attack_clips"] == 1
+        assert data["chasing_clips"] == 1
 
 
 class TestAdversarialAndResilience:

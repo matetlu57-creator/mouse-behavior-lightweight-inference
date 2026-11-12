@@ -405,3 +405,31 @@ def test_render_annotated_original_videos_helpers(tmp_path: Path) -> None:
     assert resolved == clip_dir
 
 
+def test_render_comparison_page_escapes_script_tags_and_rejects_traversal(test_server_env: dict) -> None:
+    """Embedded JSON must escape </script> sequences and video route must reject '..' traversal."""
+    xss_initial = {
+        "is_fallback_demo": False,
+        "total_clips": 1,
+        "per_clip_results": [
+            {
+                "clip_id": "</script><script>alert(1)</script>",
+                "ground_truth_behavior": "Static",
+                "predicted_behavior": "Static",
+                "is_correct": True,
+                "temporal_iou": 1.0,
+                "total_frames": 30,
+                "fps": 30.0,
+                "target_mouse_ids": [1],
+            }
+        ],
+    }
+    html = render_comparison_page(initial_data=xss_initial)
+    assert "</script><script>alert(1)</script>" not in html
+    assert "\\u003c/script\\u003e" in html
+
+    port = test_server_env["port"]
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/video/original/../test_attack_001")
+    assert exc_info.value.code == 400
+
+
