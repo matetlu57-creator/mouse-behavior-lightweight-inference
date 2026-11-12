@@ -12,7 +12,10 @@ from mouse_behavior.behavior import (
     refine_behavior_segments,
     refine_dispersal_segments,
     refine_group_locomotion_segments,
+    refine_isolation_segments,
+    refine_locomotion_segments,
     refine_rearing_segments,
+    refine_static_segments,
     select_behavior_segments,
     update_segment_bounds,
 )
@@ -517,4 +520,533 @@ def test_update_segment_bounds_does_not_synthesize_canonical_support():
     updated = update_segment_bounds(event_without_support, 10, 140, fps)
     assert "canonical_support_frame_intervals" not in updated
     assert "canonical_support_frame_count" not in updated
+
+
+def test_refine_isolation_segments_clean():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # 360 frames = 12.0s (> 10.0s isolation duration policy gate)
+    for f in range(360):
+        dets = [
+            _make_detection(1, (500.0, 500.0)),
+            _make_detection(2, (100.0, 100.0)),
+            _make_detection(3, (120.0, 100.0)),
+        ]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "iso_test_1",
+        "canonical_behavior": "isolation",
+        "behavior": "Isolation",
+        "mouse_ids": [1],
+        "target_mouse_id": 1,
+        "start_frame": 0,
+        "end_frame": 360,
+    }
+    binding = {
+        "source_video": {"fps": fps, "scale_px_per_cm": px_per_cm},
+    }
+
+    res = refine_isolation_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["target_mouse_id"] == 1
+    assert res[0]["start_frame"] == 0
+    assert res[0]["end_frame"] == 360
+    assert res[0]["canonical_support_frame_count"] == 360
+    assert res[0]["canonical_support_frame_intervals"] == [[0, 360]]
+
+
+def test_refine_isolation_segments_rejects_non_isolated():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    for f in range(360):
+        # Mouse 1 is at (105, 100), Mouse 2 is at (100, 100) (0.5 cm away -> not isolated)
+        dets = [
+            _make_detection(1, (105.0, 100.0)),
+            _make_detection(2, (100.0, 100.0)),
+        ]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "iso_test_fail",
+        "canonical_behavior": "isolation",
+        "behavior": "Isolation",
+        "mouse_ids": [1],
+        "target_mouse_id": 1,
+        "start_frame": 0,
+        "end_frame": 360,
+    }
+    binding = {
+        "source_video": {"fps": fps, "scale_px_per_cm": px_per_cm},
+    }
+
+    res = refine_isolation_segments([ev], store, binding)
+    assert len(res) == 0
+
+
+def test_refine_isolation_segments_tolerates_brief_glitch():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    for f in range(360):
+        # 350 frames isolated, 10 frames glitch
+        pos1 = (105.0, 100.0) if 100 <= f < 110 else (500.0, 500.0)
+        dets = [
+            _make_detection(1, pos1),
+            _make_detection(2, (100.0, 100.0)),
+        ]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "iso_glitch_test",
+        "canonical_behavior": "isolation",
+        "behavior": "Isolation",
+        "mouse_ids": [1],
+        "target_mouse_id": 1,
+        "start_frame": 0,
+        "end_frame": 360,
+    }
+    binding = {
+        "source_video": {"fps": fps, "scale_px_per_cm": px_per_cm},
+    }
+
+    res = refine_isolation_segments([ev], store, binding, min_isolated_fraction=0.85)
+    assert len(res) == 1
+    assert res[0]["canonical_support_frame_count"] >= 350
+
+
+def test_refine_behavior_segments_isolation_dispatch():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    for f in range(360):
+        dets = [
+            _make_detection(1, (400.0, 400.0)),
+            _make_detection(2, (100.0, 100.0)),
+        ]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "iso_dispatch",
+        "canonical_behavior": "isolation",
+        "behavior": "Isolation",
+        "mouse_ids": [1],
+        "target_mouse_id": 1,
+        "start_frame": 0,
+        "end_frame": 360,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    refined, audit = refine_behavior_segments([ev], store, binding, enable_fine_cropping=True)
+    assert len(refined) == 1
+    assert refined[0]["event_id"] == "iso_dispatch"
+    assert audit["output_count"] == 1
+
+
+def test_refine_isolation_segments_rejects_multi_mouse_without_target_id():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    for f in range(360):
+        dets = [
+            _make_detection(1, (500.0, 500.0)),
+            _make_detection(2, (100.0, 100.0)),
+            _make_detection(3, (120.0, 100.0)),
+        ]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "iso_multi_fail",
+        "canonical_behavior": "isolation",
+        "behavior": "Isolation",
+        "mouse_ids": [1, 2, 3],  # Multi-mouse without explicit target_mouse_id
+        "start_frame": 0,
+        "end_frame": 360,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_isolation_segments([ev], store, binding)
+    assert len(res) == 0
+
+
+def test_refine_isolation_segments_snaps_small_head_dropout():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Drop frames 0..4 (5 frames = 0.16s <= 2.0s)
+    for f in range(360):
+        dets = []
+        if f >= 5:
+            dets.append(_make_detection(1, (500.0, 500.0)))
+        dets.append(_make_detection(2, (100.0, 100.0)))
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "iso_snap_head",
+        "canonical_behavior": "isolation",
+        "behavior": "Isolation",
+        "mouse_ids": [1],
+        "target_mouse_id": 1,
+        "start_frame": 0,
+        "end_frame": 360,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_isolation_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["start_frame"] == 0  # Snapped back to candidate start
+    assert res[0]["end_frame"] == 360
+
+
+def test_refine_group_locomotion_segments_snaps_small_head_dropout():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # 3 mice moving together along x axis at 20 px/frame (> 12 px/s)
+    # One mouse has a 3-frame dropout at the start (frames 0..2)
+    for f in range(120):
+        x = 100.0 + f * 2.0
+        dets = []
+        if f >= 3:
+            dets.append(_make_detection(1, (x, 100.0)))
+        dets.append(_make_detection(2, (x + 20.0, 100.0)))
+        dets.append(_make_detection(3, (x + 40.0, 100.0)))
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "gloco_snap_test",
+        "canonical_behavior": "group_locomotion",
+        "behavior": "Group locomotion",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": 120,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_group_locomotion_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["start_frame"] == 0  # Symmetrically snapped to start
+    assert res[0]["end_frame"] == 120
+
+
+def test_refine_static_segments_clean():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # 60 frames (2.0s >= 1.0s) of mouse staying virtually still at (100, 100)
+    for f in range(60):
+        # subtle sub-pixel jitter
+        dx = 0.2 * np.sin(f)
+        dy = 0.2 * np.cos(f)
+        dets = [_make_detection(1, (100.0 + dx, 100.0 + dy))]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "static_clean",
+        "canonical_behavior": "static",
+        "behavior": "Static",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 60,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_static_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["start_frame"] == 0
+    assert res[0]["end_frame"] == 60
+    assert res[0]["canonical_support_frame_count"] == 60
+
+
+def test_refine_static_segments_rejects_large_movement():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Mouse moves 10 cm away (> max_radius_cm = 4.0 cm)
+    for f in range(60):
+        dets = [_make_detection(1, (100.0 + f * 1.5, 100.0))]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "static_large_movement",
+        "canonical_behavior": "static",
+        "behavior": "Static",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 60,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_static_segments([ev], store, binding)
+    assert len(res) == 0
+
+
+def test_refine_static_segments_rejects_excessive_speed():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Rapid back and forth oscillation within 3.5cm radius, but speed is high (> 6.0 cm/s)
+    # 30 px = 3 cm oscillation at 30 fps
+    for f in range(60):
+        x = 100.0 + 30.0 if (f % 2 == 0) else 100.0 - 30.0
+        dets = [_make_detection(1, (x, 100.0))]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "static_high_speed",
+        "canonical_behavior": "static",
+        "behavior": "Static",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 60,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_static_segments([ev], store, binding)
+    assert len(res) == 0
+
+
+def test_refine_static_segments_snaps_dropout():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Missing first 4 frames (0.13s <= 2.0s)
+    for f in range(60):
+        dets = []
+        if f >= 4:
+            dets.append(_make_detection(1, (100.0, 100.0)))
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "static_snap",
+        "canonical_behavior": "static",
+        "behavior": "Static",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 60,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_static_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["start_frame"] == 0  # Snapped back to 0
+    assert res[0]["end_frame"] == 60
+
+
+def test_refine_locomotion_segments_clean():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Mouse moves 10 cm in 30 frames (1.0s, speed = 10 cm/s >= 3.0 cm/s, displacement = 10 cm >= 3.0 cm)
+    for f in range(30):
+        dets = [_make_detection(1, (100.0 + f * 3.33, 100.0))]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "loco_clean",
+        "canonical_behavior": "locomotion",
+        "behavior": "Locomotion",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 30,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_locomotion_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["start_frame"] == 0
+    assert res[0]["end_frame"] == 30
+    assert res[0]["canonical_support_frame_count"] == 30
+
+
+def test_refine_locomotion_segments_rejects_static():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Mouse is static (displacement = 0.5 cm < 3.0 cm, speed < 3.0 cm/s)
+    for f in range(30):
+        dets = [_make_detection(1, (100.0 + 0.1 * f, 100.0))]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "loco_reject_static",
+        "canonical_behavior": "locomotion",
+        "behavior": "Locomotion",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 30,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_locomotion_segments([ev], store, binding)
+    assert len(res) == 0
+
+
+def test_refine_locomotion_segments_snaps_dropout():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Missing first 3 frames (0.1s <= 2.0s)
+    for f in range(30):
+        dets = []
+        if f >= 3:
+            dets.append(_make_detection(1, (100.0 + f * 3.33, 100.0)))
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "loco_snap",
+        "canonical_behavior": "locomotion",
+        "behavior": "Locomotion",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 30,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_locomotion_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["start_frame"] == 0  # Snapped back to 0
+    assert res[0]["end_frame"] == 30
+
+
+def test_refine_behavior_segments_static_and_locomotion_dispatch():
+    fps = 30.0
+    px_per_cm = 10.0
+    # Two mice: mouse 1 stationary at (100, 100), mouse 2 moving from 200 to 300
+    rows = []
+    for f in range(40):
+        dets = [
+            _make_detection(1, (100.0, 100.0)),
+            _make_detection(2, (200.0 + f * 2.5, 200.0)),
+        ]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev_static = {
+        "event_id": "dispatch_static",
+        "canonical_behavior": "static",
+        "behavior": "Static",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 40,
+    }
+    ev_loco = {
+        "event_id": "dispatch_loco",
+        "canonical_behavior": "locomotion",
+        "behavior": "Locomotion",
+        "mouse_ids": [2],
+        "start_frame": 0,
+        "end_frame": 40,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    refined, audit = refine_behavior_segments(
+        [ev_static, ev_loco],
+        store,
+        binding,
+        enable_fine_cropping=True,
+    )
+    assert len(refined) == 2
+    assert audit["output_count"] == 2
+    ids = {r["event_id"] for r in refined}
+    assert ids == {"dispatch_static", "dispatch_loco"}
+
+
+def test_refine_static_segments_snaps_trailing_dropout():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Missing last 4 frames (0.13s <= 2.0s)
+    for f in range(60):
+        dets = []
+        if f < 56:
+            dets.append(_make_detection(1, (100.0, 100.0)))
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "static_snap_tail",
+        "canonical_behavior": "static",
+        "behavior": "Static",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 60,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_static_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["start_frame"] == 0
+    assert res[0]["end_frame"] == 60
+
+
+def test_refine_locomotion_segments_slow_walking_not_swallowed():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Continuous slow walking at ~5.5 cm/s for 60 frames (total ~11 cm, 1s radius ~2.75 cm)
+    for f in range(60):
+        dets = [_make_detection(1, (100.0 + f * (5.5 * 10.0 / fps), 100.0))]
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "loco_slow_walk",
+        "canonical_behavior": "locomotion",
+        "behavior": "Locomotion",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 60,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_locomotion_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["start_frame"] == 0
+    assert res[0]["end_frame"] == 60
+
+
+def test_refine_locomotion_segments_trims_static_prefix():
+    fps = 30.0
+    px_per_cm = 10.0
+    rows = []
+    # Frames 0..44 stationary (1.5s), frames 45..89 active locomotion
+    for f in range(90):
+        if f < 45:
+            pos = (100.0, 100.0)
+        else:
+            pos = (100.0 + (f - 44) * 5.0, 100.0)
+        rows.append({"frame": f, "source_frame": f, "time": f / fps, "detections": [_make_detection(1, pos)]})
+
+    store = _DummyStore(rows)
+    ev = {
+        "event_id": "loco_trim_prefix",
+        "canonical_behavior": "locomotion",
+        "behavior": "Locomotion",
+        "mouse_ids": [1],
+        "start_frame": 0,
+        "end_frame": 90,
+    }
+    binding = {"source_video": {"fps": fps, "scale_px_per_cm": px_per_cm}}
+
+    res = refine_locomotion_segments([ev], store, binding)
+    assert len(res) == 1
+    assert res[0]["start_frame"] >= 40
+    assert res[0]["end_frame"] == 90
 

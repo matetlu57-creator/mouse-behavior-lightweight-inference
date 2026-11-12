@@ -549,7 +549,7 @@ lightweight_behavior_inference:
   clip_level: strong
   clip_seconds: 5.0
   clip_min_start_interval_seconds: 5.0
-  max_clips_per_class: 200
+  max_clips_per_class: null
   render_video: false
   render_output: 轻量行为推理_渲染.mp4
   max_frames: null

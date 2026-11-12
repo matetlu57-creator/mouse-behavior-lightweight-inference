@@ -103,11 +103,19 @@ start_frame,end_frame,visual_track_id,animal_id,identity_confidence
 python scripts/review_posture_sample.py --sample <样本目录> --track-id <视觉ID> --output <全新输出目录>
 ```
 
-已有绑定来源的 pose cache 可通过完整视频管线运行：
+已有绑定来源的 pose cache 可通过完整视频管线运行（默认启用 13 类；加上 `--all-behaviors` 可同时启用标定版全部 15 类保留行为、模块化精修裁剪并无上限输出全部行为片段）：
 
 ```powershell
-python scripts/run_canonical_behavior_video.py --video <源视频> --pose-cache <缓存目录> --source-receipt <来源绑定JSON> --posture-mode v3_review --output <全新输出目录>
+python scripts/run_canonical_behavior_video.py --video <源视频> --pose-cache <缓存目录> --source-receipt <来源绑定JSON> --all-behaviors --output <全新输出目录>
 ```
+
+启动行为识别与精准边界裁剪对比验证站点（离线无 API 时自动回退到内置带标签演示数据，不会阻塞页面渲染）：
+
+```powershell
+python scripts/serve_comparison_site.py --port 8769
+```
+
+启动后默认访问地址为 `http://127.0.0.1:8769/`。
 
 每个分类包包含 `clip.mp4`、`annotation.json`、`metadata.json`、`tracks.json`。参与鼠以绿色粗框和原始视觉 ID 标注；缺失目标不伪造位置。独立事件在角色拆分、分段边界和编码前后按实际有效配置检查时长，保留严格 `>` 与 `>=` 的区别。
 

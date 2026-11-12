@@ -66,6 +66,11 @@ def rule_execution_binding(parameters, posture_mode: str = "disabled") -> dict:
     sources.update((__name__, "mouse_behavior.behavior.duration_policy",
                     "mouse_behavior.behavior.event_boundaries",
                     "mouse_behavior.behavior.reviewed_comparisons",
+                    "mouse_behavior.behavior.segment_clipping",
+                    "mouse_behavior.behavior.segment_clipping_common",
+                    "mouse_behavior.behavior.segment_clipping_group",
+                    "mouse_behavior.behavior.segment_clipping_individual",
+                    "mouse_behavior.behavior.segment_clipping_social",
                     "mouse_behavior.evaluation.approach_events",
                     "mouse_behavior.visualization.behavior_packages", "mouse_behavior.evaluation.segment_export",
                     "mouse_behavior.tracking.cache"))
@@ -670,12 +675,16 @@ def _infer_core_task(spec: tuple) -> tuple[list[dict], dict]:
 
 def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
                        core_seconds: float = 20, context_seconds: float = 10,
-                       workers: int = 1, posture_mode: str = "disabled") -> tuple[list[dict], dict]:
+                       workers: int = 1, posture_mode: str = "disabled",
+                       enable_fine_cropping: bool = False,
+                       max_events_per_behavior: int | None = None) -> tuple[list[dict], dict]:
     fps, total = binding["source_video"]["fps"], binding["source_video"]["frame_count"]
     if not math.isfinite(core_seconds) or core_seconds <= 0 or not math.isfinite(context_seconds) or context_seconds < 10:
         raise ValueError("core seconds must be positive and context must be at least 10 seconds")
     if type(workers) is not int or workers < 1:
         raise ValueError("workers must be a positive integer")
+    if max_events_per_behavior is not None and (type(max_events_per_behavior) is not int or max_events_per_behavior < 1):
+        raise ValueError("max_events_per_behavior must be None or a positive integer")
     core, context = max(1, round(core_seconds * fps)), math.ceil(context_seconds * fps)
     specs = []
     comparison_review = bound_comparison_review(binding)
@@ -752,6 +761,32 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
         formal, review, posture_conflicts = defer_static_posture_conflicts(merged, fps, parameters=params)
         merged = sorted(formal + review, key=lambda event: (
             event["start_frame"], event["end_frame"], event["event_id"]))
+    refinement_audit: dict[str, Any] = {}
+    selection_audit: dict[str, Any] = {}
+    if enable_fine_cropping or max_events_per_behavior is not None:
+        from mouse_behavior.behavior.segment_clipping import (
+            refine_behavior_segments,
+            select_behavior_segments,
+        )
+        if enable_fine_cropping:
+            merged, refinement_audit = refine_behavior_segments(
+                merged,
+                store,
+                binding,
+                scale=scale,
+                parameters=params,
+                enable_huddle_sliding=False,
+                enable_approach_requalification=False,
+                enable_fine_cropping=True,
+            )
+        merged, selection_audit = select_behavior_segments(
+            merged,
+            store=store,
+            binding=binding,
+            max_per_behavior=max_events_per_behavior,
+            require_closed_boundaries=False,
+            require_endpoint_visibility=False,
+        )
     for event in merged:
         if not qualify_event_duration(event, fps, parameters=params)["ok"]:
             raise ValueError("merged event lost standalone duration qualification")
@@ -770,8 +805,39 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
                                      whole_range_isolation_audit=isolation_audit,
                                      global_posture_resolution=posture_resolution,
                                      static_posture_conflicts=posture_conflicts,
+                                     segment_refinement_audit=refinement_audit,
+                                     segment_selection_audit=selection_audit,
+                                     enable_fine_cropping=enable_fine_cropping,
+                                     max_events_per_behavior=max_events_per_behavior,
                                      workers=workers, track_truncation=False, boundary_approximation=True,
                                      boundary_note="Bounded context can change events requiring history beyond the context. Every qualified parent overlapping a core retains its complete inferred bounds; only identical behavior/IDs/roles can merge overlapping contexts. Minimum duration is a gate, never a requested crop length. No observations are fabricated; measured support remains separate.")
+
+
+def infer_all_behavior_events(
+    store: TrackStore,
+    binding: dict,
+    scale: dict,
+    params,
+    *,
+    core_seconds: float = 20,
+    context_seconds: float = 10,
+    workers: int = 1,
+    enable_fine_cropping: bool = True,
+    max_events_per_behavior: int | None = None,
+) -> tuple[list[dict], dict]:
+    """Infer all 15 retained heuristic behaviors with modular fine-cropping and no segment count cap."""
+    return infer_video_events(
+        store,
+        binding,
+        scale,
+        params,
+        core_seconds=core_seconds,
+        context_seconds=context_seconds,
+        workers=workers,
+        posture_mode="calibrated",
+        enable_fine_cropping=enable_fine_cropping,
+        max_events_per_behavior=max_events_per_behavior,
+    )
 
 
 def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
@@ -781,7 +847,8 @@ def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
                  clip_workers: int = 1, clip_preset: str = "veryfast", posture_mode: str = "disabled",
                  clip_context_seconds: float = 0., original_video: bool = False, clip_codec: str = "libx264",
                  comparison_reviews: Path | None = None, comparison_sample_id: str | None = None,
-                 comparison_tracks: Path | None = None, target_overlay: bool = False) -> dict:
+                 comparison_tracks: Path | None = None, target_overlay: bool = False,
+                 enable_fine_cropping: bool = False, max_events_per_behavior: int | None = None) -> dict:
     """Create a new independently inspectable run; never overwrite a prior run."""
     from mouse_behavior.visualization.behavior_packages import export_packages, render_full_package, reuse_full_package, write_manifests
     if output.exists() or output.is_symlink():
@@ -813,7 +880,10 @@ def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
     receipt: dict[str, Any] = dict(status="running", mode=mode, requires_review=True,
                                   route="canonical confirmed_rules + individual_rules + group_event_rules",
                                   enabled_behaviors=enabled_list, disabled_behaviors=disabled_list)
-    receipt.update(posture_mode=posture_mode, posture_review_behaviors=["grooming", "rearing"] if posture_mode in {"v3_review", "calibrated"} else [])
+    receipt.update(posture_mode=posture_mode,
+                   posture_review_behaviors=["grooming", "rearing"] if posture_mode in {"v3_review", "calibrated"} else [],
+                   enable_fine_cropping=enable_fine_cropping,
+                   max_events_per_behavior=max_events_per_behavior)
     _write_json(output / "run_receipt.json", receipt)
     try:
         prior = None
@@ -850,7 +920,9 @@ def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
             params = config_seed_parameters(load_config(config))
             binding.update(rule_execution_binding(params, posture_mode))
             events, audit = infer_video_events(store, binding, scale, params, core_seconds=core_seconds,
-                                               context_seconds=context_seconds, workers=workers, posture_mode=posture_mode)
+                                               context_seconds=context_seconds, workers=workers, posture_mode=posture_mode,
+                                               enable_fine_cropping=enable_fine_cropping,
+                                               max_events_per_behavior=max_events_per_behavior)
             receipt.update(inference_audit=audit, seeded_parameters=asdict(params), policy=policy_receipt(),
                            config_path=str(config.resolve()), config_sha256=_sha256(config))
         _write_json(output / "input_binding.json", binding)
@@ -900,3 +972,54 @@ def run_pipeline(video: Path, cache: Path | None, output: Path, config: Path, *,
         receipt.update(status="failed", error=f"{type(error).__name__}: {error}")
         _write_json(output / "run_receipt.json", receipt)
         raise
+
+
+def run_all_behaviors_pipeline(
+    video: Path,
+    cache: Path | None,
+    output: Path,
+    config: Path,
+    *,
+    mode: str = "all",
+    source_receipt: Path | None = None,
+    expected_source_sha256: str | None = None,
+    events_from: Path | None = None,
+    core_seconds: float = 20,
+    context_seconds: float = 10,
+    workers: int = 1,
+    clip_workers: int = 1,
+    clip_preset: str = "veryfast",
+    clip_context_seconds: float = 0.,
+    original_video: bool = False,
+    clip_codec: str = "libx264",
+    comparison_reviews: Path | None = None,
+    comparison_sample_id: str | None = None,
+    comparison_tracks: Path | None = None,
+    target_overlay: bool = False,
+) -> dict:
+    """Run the unified pipeline recognizing all 15 retained behaviors and exporting all segments."""
+    return run_pipeline(
+        video,
+        cache,
+        output,
+        config,
+        mode=mode,
+        source_receipt=source_receipt,
+        expected_source_sha256=expected_source_sha256,
+        events_from=events_from,
+        core_seconds=core_seconds,
+        context_seconds=context_seconds,
+        workers=workers,
+        clip_workers=clip_workers,
+        clip_preset=clip_preset,
+        posture_mode="calibrated",
+        clip_context_seconds=clip_context_seconds,
+        original_video=original_video,
+        clip_codec=clip_codec,
+        comparison_reviews=comparison_reviews,
+        comparison_sample_id=comparison_sample_id,
+        comparison_tracks=comparison_tracks,
+        target_overlay=target_overlay,
+        enable_fine_cropping=True,
+        max_events_per_behavior=None,
+    )

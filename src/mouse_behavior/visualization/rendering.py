@@ -455,12 +455,12 @@ def _clip_intervals_from_state(
     fps: float,
     clip_seconds: float,
     min_start_interval_seconds: float,
-    max_clips: int,
+    max_clips: int | None,
 ) -> list[tuple[int, int]]:
     total_frames = int(len(state))
     clip_frames = max(int(round(float(clip_seconds) * fps)), 1)
     min_interval = max(int(round(float(min_start_interval_seconds) * fps)), 1)
-    if total_frames < clip_frames or max_clips <= 0:
+    if total_frames < clip_frames or (max_clips is not None and max_clips <= 0):
         return []
 
     intervals: list[tuple[int, int]] = []
@@ -472,7 +472,7 @@ def _clip_intervals_from_state(
             end = start + clip_frames - 1
             if bool(np.all(state[start : end + 1] == 0)):
                 intervals.append((int(start), int(end)))
-                if len(intervals) >= max_clips:
+                if max_clips is not None and len(intervals) >= max_clips:
                     break
         return intervals
 
@@ -483,7 +483,7 @@ def _clip_intervals_from_state(
         if intervals and start - intervals[-1][0] < min_interval:
             continue
         intervals.append((int(start), int(end)))
-        if len(intervals) >= max_clips:
+        if max_clips is not None and len(intervals) >= max_clips:
             break
     return intervals
 
@@ -551,7 +551,7 @@ def extract_four_class_clips(
     expected_level: str = "strong",
     clip_seconds: float = 5.0,
     min_start_interval_seconds: float = 5.0,
-    max_clips_per_class: int = 200,
+    max_clips_per_class: int | None = None,
 ) -> Path:
     """Extract fixed-window showcases into the four mutually exclusive classes.
 
@@ -666,7 +666,9 @@ def extract_four_class_clips(
         "source_frames": total_frames,
         "clip_seconds": float(clip_seconds),
         "min_start_interval_seconds": float(min_start_interval_seconds),
-        "max_clips_per_class": int(max_clips_per_class),
+        "max_clips_per_class": (
+            int(max_clips_per_class) if max_clips_per_class is not None else None
+        ),
         "insufficient_source_policy": "skip_incomplete_fixed_window",
         "used_event_rows": int(used_event_rows),
         "state_frame_counts": {
@@ -701,7 +703,7 @@ def extract_behavior_clips(
     event_level: str = "all",
     clip_seconds: float = 5.0,
     min_start_interval_seconds: float = 5.0,
-    max_clips_per_behavior: int = 200,
+    max_clips_per_behavior: int | None = None,
 ) -> Path:
     """Extract fixed-window raw showcases separately for each behavior label.
 
@@ -809,7 +811,9 @@ def extract_behavior_clips(
             event_rows_by_behavior[behavior],
             key=lambda row: (int(row["peak_frame"]), int(row["start_frame"])),
         ):
-            if total_frames < clip_frames or max_clips_per_behavior <= 0:
+            if total_frames < clip_frames or (
+                max_clips_per_behavior is not None and max_clips_per_behavior <= 0
+            ):
                 break
             center = int(event["peak_frame"])
             start = max(0, min(center - clip_frames // 2, total_frames - clip_frames))
@@ -817,7 +821,7 @@ def extract_behavior_clips(
             if selected and start - selected[-1][0] < min_interval:
                 continue
             selected.append((int(start), int(end)))
-            if len(selected) >= max_clips_per_behavior:
+            if max_clips_per_behavior is not None and len(selected) >= max_clips_per_behavior:
                 break
         clip_counts[behavior] = len(selected)
         for clip_index, (start, end) in enumerate(selected, start=1):
@@ -860,7 +864,9 @@ def extract_behavior_clips(
         "clip_seconds": float(clip_seconds),
         "clip_frames": clip_frames,
         "min_start_interval_seconds": float(min_start_interval_seconds),
-        "max_clips_per_behavior": int(max_clips_per_behavior),
+        "max_clips_per_behavior": (
+            int(max_clips_per_behavior) if max_clips_per_behavior is not None else None
+        ),
         "source_event_rows": source_event_rows,
         "source_event_level_counts": {
             behavior: dict(level_counts[behavior]) for behavior in selected_behaviors

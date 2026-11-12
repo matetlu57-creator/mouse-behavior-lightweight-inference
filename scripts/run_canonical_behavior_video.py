@@ -29,6 +29,12 @@ def main() -> int:
     parser.add_argument("--context-seconds", type=float, default=10)
     parser.add_argument("--posture-mode", choices=("disabled", "v3_review", "calibrated"), default="disabled",
                         help="Posture mode: disabled, v3_review (V3.1 review candidates), or calibrated (all 4 individual rules)")
+    parser.add_argument("--all-behaviors", action="store_true",
+                        help="Enable all 15 retained heuristic behaviors (posture-mode=calibrated), modular fine-cropping, and unlimited segment export")
+    parser.add_argument("--enable-fine-cropping", action="store_true",
+                        help="Apply modular segment_clipping fine-cropping across inferred behavior segments")
+    parser.add_argument("--max-events-per-behavior", type=int, default=None,
+                        help="Optional per-behavior segment cap (default: None / unlimited)")
     parser.add_argument("--workers", type=int, default=1, help="Independent context/core processes; default serial")
     parser.add_argument("--clip-workers", type=int, default=1, help="Independent event exports; each FFmpeg uses one thread, default serial")
     parser.add_argument("--clip-preset", choices=("veryfast", "ultrafast"), default="veryfast",
@@ -44,15 +50,19 @@ def main() -> int:
     mode = args.mode
     if args.render_full or args.export_clips:
         mode = "all" if args.export_clips else "full"
+    posture_mode = "calibrated" if args.all_behaviors else args.posture_mode
+    enable_fine_cropping = bool(args.all_behaviors or args.enable_fine_cropping)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     receipt = run_pipeline(args.video, args.pose_cache, args.output, args.config, mode=mode,
                            source_receipt=args.source_receipt, expected_source_sha256=args.source_sha256,
                            events_from=args.events_from, core_seconds=args.core_seconds,
                            context_seconds=args.context_seconds, workers=args.workers, clip_workers=args.clip_workers,
-                           clip_preset=args.clip_preset, posture_mode=args.posture_mode,
+                           clip_preset=args.clip_preset, posture_mode=posture_mode,
                            clip_context_seconds=args.clip_context_seconds, original_video=args.original_video, clip_codec=args.clip_codec,
                            comparison_reviews=args.comparison_reviews, comparison_sample_id=args.comparison_sample_id,
-                           comparison_tracks=args.comparison_tracks, target_overlay=args.target_overlay)
+                           comparison_tracks=args.comparison_tracks, target_overlay=args.target_overlay,
+                           enable_fine_cropping=enable_fine_cropping,
+                           max_events_per_behavior=args.max_events_per_behavior)
     logging.info("Complete: %s | events=%d clips=%d", args.output.resolve(), receipt["event_count"], receipt["clip_count"])
     return 0
 

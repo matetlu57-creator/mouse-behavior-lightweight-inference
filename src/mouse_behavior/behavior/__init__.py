@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+    "InMemoryTrackStore",
     "ParallelBehaviorFSM",
     "apply_standard_behavior_engine",
     "endpoint_observations",
@@ -19,25 +20,34 @@ __all__ = [
     "refine_approach_segments",
     "refine_attack_segments",
     "refine_behavior_segments",
+    "refine_chasing_segments",
     "refine_dispersal_segments",
     "refine_group_locomotion_segments",
     "refine_huddle_segments",
+    "refine_isolation_segments",
+    "refine_locomotion_segments",
     "refine_rearing_segments",
+    "refine_static_segments",
     "select_behavior_segments",
     "update_segment_bounds",
 ]
 
 _SEGMENT_CLIPPING_EXPORTS = {
+    "InMemoryTrackStore",
     "endpoint_observations",
     "endpoints_fully_observed",
     "is_process_boundary_closed",
     "refine_approach_segments",
     "refine_attack_segments",
     "refine_behavior_segments",
+    "refine_chasing_segments",
     "refine_dispersal_segments",
     "refine_group_locomotion_segments",
     "refine_huddle_segments",
+    "refine_isolation_segments",
+    "refine_locomotion_segments",
     "refine_rearing_segments",
+    "refine_static_segments",
     "select_behavior_segments",
     "update_segment_bounds",
 }

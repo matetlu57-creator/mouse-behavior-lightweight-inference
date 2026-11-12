@@ -81,29 +81,14 @@ def load_exported_features(
             slot = track_index.get(track_id)
             if slot is None:
                 continue
-            points = np.asarray(detection.get("keypoints", []), dtype=float)
-            if points.shape != (7, 3):
-                continue
-            # Export order is nose, right ear, left ear, neck, hips, tail;
-            # internal behavior geometry uses left ear then right ear.
-            points = points[[0, 2, 1, 3, 4, 5, 6]]
-            points_xy = points[:, :2].copy()
-            point_valid = (
-                np.isfinite(points_xy).all(axis=1)
-                & np.isfinite(points[:, 2])
-                & (points[:, 2] >= 0.25)
-            )
-            points_xy[~point_valid] = np.nan
-            keypoints[frame_index, slot] = points_xy
-            valid[frame_index, slot] = bool(point_valid.any())
-            keypoint_coverage[frame_index, slot] = float(np.mean(point_valid))
             box = np.asarray(detection.get("box", []), dtype=float)
-            if (
+            has_valid_box = bool(
                 box.shape == (4,)
                 and np.isfinite(box).all()
                 and box[2] > box[0]
                 and box[3] > box[1]
-            ):
+            )
+            if has_valid_box:
                 boxes[frame_index, slot] = box
             confidence = detection.get("detection_confidence")
             if confidence is not None:
@@ -113,6 +98,24 @@ def load_exported_features(
                     confidence_value = float("nan")
                 if np.isfinite(confidence_value):
                     detection_confidence[frame_index, slot] = confidence_value
+
+            points = np.asarray(detection.get("keypoints", []), dtype=float)
+            if points.shape == (7, 3):
+                # Export order is nose, right ear, left ear, neck, hips, tail;
+                # internal behavior geometry uses left ear then right ear.
+                points = points[[0, 2, 1, 3, 4, 5, 6]]
+                points_xy = points[:, :2].copy()
+                point_valid = (
+                    np.isfinite(points_xy).all(axis=1)
+                    & np.isfinite(points[:, 2])
+                    & (points[:, 2] >= 0.25)
+                )
+                points_xy[~point_valid] = np.nan
+                keypoints[frame_index, slot] = points_xy
+                valid[frame_index, slot] = bool(point_valid.any())
+                keypoint_coverage[frame_index, slot] = float(np.mean(point_valid))
+            elif has_valid_box:
+                valid[frame_index, slot] = True
 
         nose = keypoints[:, :, 0]
     tail = keypoints[:, :, 6]
@@ -129,10 +132,19 @@ def load_exported_features(
         np.ma.masked_where(np.broadcast_to(~any_good[..., None], keypoints.shape), keypoints),
         axis=2,
     ).filled(np.nan)
+    box_centers_px = np.full_like(fallback_centers_px, np.nan)
+    box_good = np.isfinite(boxes).all(axis=2)
+    box_centers_px[box_good, 0] = (boxes[box_good, 0] + boxes[box_good, 2]) / 2.0
+    box_centers_px[box_good, 1] = (boxes[box_good, 1] + boxes[box_good, 3]) / 2.0
+
     centers_px = np.where(
         np.isfinite(body_centers_px).all(axis=2, keepdims=True),
         body_centers_px,
-        fallback_centers_px,
+        np.where(
+            np.isfinite(fallback_centers_px).all(axis=2, keepdims=True),
+            fallback_centers_px,
+            box_centers_px,
+        ),
     )
     valid &= np.isfinite(centers_px).all(axis=2)
     centers_px[~valid] = np.nan
@@ -167,7 +179,12 @@ def load_exported_features(
     )
     centers_cm = centers_px * cm_per_pixel
     collective_centers_px, collective_valid = robust_body_centers(keypoints)
-    collective_valid &= valid & np.isfinite(collective_centers_px).all(axis=2)
+    collective_centers_px = np.where(
+        np.isfinite(collective_centers_px).all(axis=2, keepdims=True),
+        collective_centers_px,
+        box_centers_px,
+    )
+    collective_valid = valid & np.isfinite(collective_centers_px).all(axis=2)
     collective_centers_cm = collective_centers_px * cm_per_pixel
     collective_centers_cm[~collective_valid] = np.nan
     collective_velocity = np.zeros((frame_count, tracks, 2), dtype=np.float32)

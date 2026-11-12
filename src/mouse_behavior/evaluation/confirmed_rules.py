@@ -861,6 +861,50 @@ def _attack_action_mask(
             continuation_proximity=(near & visible) | contact)
             if allow_observed_attack_extension else np.zeros_like(coherent_baseline))
         coherent = coherent_baseline | coherent_extension
+
+        # Tail-follow pursuit check to suppress chasing false positives in strike channel
+        suppress_mask = np.zeros(len(f.valid), bool)
+        if f.heading_unit is not None:
+            tail = endpoint_distances(f, edge, "tail")
+            aligned_cosine = float(np.cos(np.deg2rad(social_config.attack_tail_follow_max_heading_angle_deg)))
+            for direction, (actor, target) in enumerate(((left, right), (right, left))):
+                directed_tail = tail[direction]
+                target_speed = np.asarray(f.speed_cm_s[:, target], dtype=float)
+                both_known = (np.isfinite(f.heading_unit[:, actor]).all(axis=1)
+                              & np.isfinite(f.heading_unit[:, target]).all(axis=1))
+                same_dir = both_known & (_toward_cosine(f.heading_unit[:, actor], f.heading_unit[:, target]) >= aligned_cosine)
+                follow = (visible & np.isfinite(directed_tail)
+                          & (directed_tail <= social_config.dist_nose_tail_contact_max_cm)
+                          & np.isfinite(target_speed) & (target_speed > 10.0) & same_dir)
+                suppress_mask |= _single_bout_mask(follow, f.fps, social_config.attack_tail_follow_min_duration_s)
+
+        # High-speed strike channel: visible & distance <= 7.5 cm & max_speed >= 36.0 cm/s
+        sp_i = f.speed_cm_s[:, left]
+        sp_j = f.speed_cm_s[:, right]
+        max_sp = np.maximum(np.where(np.isnan(sp_i), 0.0, sp_i), np.where(np.isnan(sp_j), 0.0, sp_j))
+        strike = visible & np.isfinite(distance) & (distance <= 7.5) & (max_sp >= 36.0) & (~suppress_mask)
+        if strike.any():
+            continuation = max(1, int(np.floor(social_config.attack_deceleration_max_s * f.fps + 1e-9)))
+            for start, end in runs(strike):
+                low, high = start, end
+                while (low > 0 and start - low < continuation
+                       and visible[low - 1] and distance[low - 1] <= 6.5
+                       and not suppress_mask[low - 1]):
+                    low -= 1
+                while (high < len(visible) and high - end < continuation
+                       and visible[high] and distance[high] <= 6.5
+                       and not suppress_mask[high]):
+                    high += 1
+                strike[low:high] = True
+            strike = _bridge_internal_gaps(strike, visible & (distance <= 7.5), f.fps, maximum_gap_s=0.35)
+
+        full_attack = baseline | measured_candidate | coherent | strike
+
+        # Micro-gap bridging: bridge internal gaps <= 0.35s where mutual contact/proximity (<= 8.5 cm) is maintained
+        if any((e - s) / f.fps >= social_config.attack_min_duration_s for s, e in runs(full_attack)):
+            contact_prox = visible & np.isfinite(distance) & (distance <= 8.5)
+            full_attack = _bridge_internal_gaps(full_attack, contact_prox, f.fps, maximum_gap_s=0.35)
+
         if channels is not None:
             channels.update(
                 center_only_raw=baseline,
@@ -871,8 +915,11 @@ def _attack_action_mask(
                 coherent_v25_observed_extension=coherent_extension & ~coherent_baseline,
                 heavy_repeated_target_boxes=(baseline_channels['heavy_repeated_target_boxes']
                     | measured_candidate),
+                fast_strike=strike,
+                strike=strike,
+                full_attack=full_attack,
             )
-        return baseline | measured_candidate | coherent
+        return full_attack
     if proximity_mask is not None:
         near = np.asarray(proximity_mask, bool)
         if near.shape != visible.shape or (near & ~visible).any():
@@ -1266,24 +1313,48 @@ def _chase_mask(
     orientation = observed_orientations(f)
     for direction, (actor, target) in enumerate(((left, right), (right, left))):
         direction_cosine = _pursuit_direction_cosine(f, actor, target, social_config)
-        motion_support = (motion_known
-                    & (speed[:, actor] >= social_config.vel_chasing_min_cm_s)
-                    & (speed[:, target] >= social_config.vel_chasing_target_min_cm_s)
-                    & (direction_cosine >= direction_cosine_min))
+        base_motion_support = (
+            motion_known
+            & (speed[:, actor] >= social_config.vel_chasing_min_cm_s)
+            & (speed[:, target] >= social_config.vel_chasing_target_min_cm_s)
+            & (direction_cosine >= direction_cosine_min)
+        )
+        high_speed = (
+            motion_known
+            & (speed[:, actor] >= social_config.vel_chasing_min_cm_s)
+            & (speed[:, target] >= social_config.vel_chasing_target_min_cm_s)
+        )
+        bridged_motion_support = _bridge_internal_gaps(
+            base_motion_support, high_speed, f.fps, maximum_gap_s=0.15, unknown=high_speed,
+        )
         # Only genuine observed path-following permits a pose reference along
         # the follower's path at a leader turn. Parallel side-by-side motion
         # does not satisfy the existing directed pursuit geometry.
         direct = _toward_cosine(velocity[:, target], f.centers_cm[:, target] - f.centers_cm[:, actor])
-        turn_path = motion_support & (direct < np.cos(np.deg2rad(social_config.angle_chasing_behind_max_deg)))
-        pose_known, facing = pose_direction_support(
+        turn_thresh = np.cos(np.deg2rad(social_config.angle_chasing_behind_max_deg))
+
+        base_turn_path = base_motion_support & (direct < turn_thresh)
+        base_pose_known, base_facing = pose_direction_support(
             f, actor, target, social_config, "chasing", orientation=orientation,
-            turn_path=turn_path)
-        facing_evidence[direction] = facing
-        eligible = bridge_pose_turns(
-            motion_support & (~pose_known | facing), motion_support, f.fps,
+            turn_path=base_turn_path)
+        base_eligible = bridge_pose_turns(
+            base_motion_support & (~base_pose_known | base_facing), base_motion_support, f.fps,
             social_config.chasing_role_turn_grace_s)
-        directed_candidates[direction] = _qualify_observed_chase(
-            eligible, motion_known, f.centers_cm, left, right, f.fps, social_config)
+        base_qual = _qualify_observed_chase(
+            base_eligible, motion_known, f.centers_cm, left, right, f.fps, social_config)
+
+        bridged_turn_path = bridged_motion_support & (direct < turn_thresh)
+        bridged_pose_known, bridged_facing = pose_direction_support(
+            f, actor, target, social_config, "chasing", orientation=orientation,
+            turn_path=bridged_turn_path)
+        bridged_eligible = bridge_pose_turns(
+            bridged_motion_support & (~bridged_pose_known | bridged_facing),
+            bridged_motion_support, f.fps, social_config.chasing_role_turn_grace_s)
+        bridged_qual = _qualify_observed_chase(
+            bridged_eligible, motion_known, f.centers_cm, left, right, f.fps, social_config)
+
+        facing_evidence[direction] = base_facing | bridged_facing
+        directed_candidates[direction] = base_qual | bridged_qual
         result |= directed_candidates[direction]
     return result
 
@@ -1506,6 +1577,9 @@ def _base_pair_rule_masks(
                         heavy = attack_channels.get("heavy_repeated_target_boxes")
                         if heavy is not None:
                             selected = selected & ~(heavy & chase)
+                        strike_ch = attack_channels.get("strike")
+                        if strike_ch is not None:
+                            selected = selected & ~(strike_ch & chase)
                     baseline = _single_bout_mask(center_only_attack & ~claimed, f.fps, minima[behavior])
                     # Observed rescue must not requalify previously subthreshold
                     # unknown tails after priority has removed their anchors.

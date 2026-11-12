@@ -42,7 +42,9 @@ Event tables add label fields next to numeric actor/target/contact/member slots.
 - `tracking/cache.py`: validation and trajectory-array normalization; no tracker implementation.
 - `identity/mtrack.py`: normalized mTrack/RFID CSV adapter.
 - `identity/labels.py`: label annotation for behavior records.
-- `behavior/` and `preprocessing/`: behavior features, FSMs, and event extraction.
+- `behavior/` and `preprocessing/`: behavior features, FSMs, event extraction, and modular segment clipping (`segment_clipping.py` facade over `segment_clipping_common.py`, `segment_clipping_individual.py`, `segment_clipping_social.py`, and `segment_clipping_group.py` with unlimited segment selection by default).
+- `evaluation/clip_benchmark.py`: unified evaluation and report merging for the six calibrated behaviors (`Static`, `Locomotion`, `Isolation`, `Group locomotion`, `Chasing`, `Attack`).
+- `visualization/`: rendering (`rendering.py`, `clip_overlay_renderer.py`), annotation-package export (`behavior_packages.py`), and local comparison server (`comparison_site.py`, served at `http://127.0.0.1:8769/` via `python scripts/serve_comparison_site.py --port 8769`).
 - `evaluation/exported_dataset.py` is the stable compatibility façade for exported
   dataset analysis. Its implementation is separated into `exported_dataset_models.py`,
   `exported_dataset_records.py`, `exported_dataset_features.py`,
@@ -63,7 +65,7 @@ Event tables add label fields next to numeric actor/target/contact/member slots.
   split. No extra test set or training-accuracy gate is required. Training-internal
   recording holdouts select regularization; validation labels only score locked predictions.
 - [`behavior-definitions.md`](behavior-definitions.md): operational definitions, duration gates, roles, and output semantics for the extended ethogram.
-- `visualization/`: rendering and annotation-package export.
+- `visualization/`: rendering and annotation-package export (`behavior_packages.py`).
 
 ## Independent posture review and standalone video packages
 

@@ -791,8 +791,8 @@ def main() -> int:
     parser.add_argument(
         "--max-clips-per-behavior",
         type=int,
-        default=200,
-        help="每种行为最多输出的片段数，默认 200。",
+        default=None,
+        help="每种行为最多输出的片段数；默认不限制（输出全部行为片段）。",
     )
     parser.add_argument(
         "--clip-level",
@@ -815,8 +815,8 @@ def main() -> int:
     parser.add_argument(
         "--max-clips-per-class",
         type=int,
-        default=200,
-        help="每类最多输出的片段数，默认 200。",
+        default=None,
+        help="每类最多输出的片段数；默认不限制（输出全部行为片段）。",
     )
     parser.add_argument(
         "--log-level",
@@ -855,7 +855,11 @@ def main() -> int:
             behavior_names=args.behaviors,
             event_level=args.behavior_level,
             clip_seconds=max(float(args.behavior_clip_seconds), 0.1),
-            max_clips_per_behavior=max(int(args.max_clips_per_behavior), 1),
+            max_clips_per_behavior=(
+                max(int(args.max_clips_per_behavior), 1)
+                if args.max_clips_per_behavior is not None
+                else None
+            ),
         )
         LOGGER.info("behavior_clips_output=%s", clips_output)
         return 0
@@ -869,7 +873,11 @@ def main() -> int:
             clips_output,
             expected_level=args.clip_level,
             clip_seconds=max(float(args.clip_seconds), 0.1),
-            max_clips_per_class=max(int(args.max_clips_per_class), 1),
+            max_clips_per_class=(
+                max(int(args.max_clips_per_class), 1)
+                if args.max_clips_per_class is not None
+                else None
+            ),
         )
         LOGGER.info("clips_output=%s", clips_output)
         return 0
