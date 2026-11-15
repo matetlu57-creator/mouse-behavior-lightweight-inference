@@ -4,7 +4,7 @@ Unifies and modularizes:
 - Shared trajectory/scale/boundary utilities (`segment_clipping_common`)
 - Individual-layer fine-cropping (`segment_clipping_individual`: Rearing, Static, Locomotion)
 - Social/pair-layer fine-cropping (`segment_clipping_social`: Approach, Attack, Chasing)
-- Group/collective-layer fine-cropping (`segment_clipping_group`: Huddling, Dispersal, Group locomotion, Isolation)
+- Group/collective-layer fine-cropping (`segment_clipping_group`: Huddling, Social clustering, Dispersal, Group locomotion, Isolation)
 - Non-overlapping behavior segment selection (`select_behavior_segments`) with
   NO default output count cap (`max_per_behavior=None` by default).
 
@@ -34,6 +34,7 @@ from mouse_behavior.behavior.segment_clipping_group import (
     refine_group_locomotion_segments,
     refine_huddle_segments,
     refine_isolation_segments,
+    refine_social_clustering_segments,
 )
 from mouse_behavior.behavior.segment_clipping_individual import (
     refine_locomotion_segments,
@@ -62,6 +63,7 @@ __all__ = [
     "refine_isolation_segments",
     "refine_locomotion_segments",
     "refine_rearing_segments",
+    "refine_social_clustering_segments",
     "refine_static_segments",
     "select_behavior_segments",
     "update_segment_bounds",
@@ -110,6 +112,7 @@ def refine_behavior_segments(
         current = refine_rearing_segments(current, store, binding, scale=scale, parameters=parameters)
         current = refine_attack_segments(current, store, binding, scale=scale, parameters=parameters)
         current = refine_chasing_segments(current, store, binding, scale=scale, parameters=parameters)
+        current = refine_social_clustering_segments(current, store, binding, scale=scale, parameters=parameters)
         current = refine_dispersal_segments(current, store, binding, scale=scale, parameters=parameters)
         current = refine_group_locomotion_segments(current, store, binding, scale=scale, parameters=parameters)
         current = refine_isolation_segments(current, store, binding, scale=scale, parameters=parameters)

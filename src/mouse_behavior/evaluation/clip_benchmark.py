@@ -29,6 +29,7 @@ from mouse_behavior.evaluation.exported_dataset_features import load_exported_fe
 from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
 from mouse_behavior.evaluation.social_heuristic_config import (
     DEFAULT_SOCIAL_HEURISTIC_CONFIG,
+    OPTIMIZED_SOCIAL_HEURISTIC_CONFIG,
     SocialHeuristicConfig,
 )
 from mouse_behavior.visualization.clip_overlay_renderer import (
@@ -134,7 +135,7 @@ def _parse_clip_timing(
 def evaluate_attack_chasing_clip(
     clip_dir: Path,
     params: HeuristicParameters | None = None,
-    social_config: SocialHeuristicConfig = DEFAULT_SOCIAL_HEURISTIC_CONFIG,
+    social_config: SocialHeuristicConfig | None = None,
     crop_output_dir: Path | None = None,
     visualize: bool = True,
 ) -> dict[str, Any]:
@@ -143,6 +144,8 @@ def evaluate_attack_chasing_clip(
     clip_id = clip_dir.name
     if params is None:
         params = _default_parameters()
+    if social_config is None or social_config == DEFAULT_SOCIAL_HEURISTIC_CONFIG:
+        social_config = OPTIMIZED_SOCIAL_HEURISTIC_CONFIG
 
     record: dict[str, Any] = {
         "clip_id": clip_id,
@@ -255,12 +258,16 @@ def evaluate_attack_chasing_clip(
         pred_behavior = None
         active_mask = None
         if attack_frames > 0 or chasing_frames > 0:
-            if attack_frames > chasing_frames:
-                pred_behavior = "Attack"
-                active_mask = attack_mask
-            elif chasing_frames > attack_frames:
+            min_dominant_chase_frames = int(round(fps * 1.0))
+            if attack_frames == 0 and chasing_frames > 0:
                 pred_behavior = "Chasing"
                 active_mask = chasing_mask
+            elif chasing_frames >= min_dominant_chase_frames and chasing_frames >= 2.0 * attack_frames:
+                pred_behavior = "Chasing"
+                active_mask = chasing_mask
+            elif attack_frames > 0:
+                pred_behavior = "Attack"
+                active_mask = attack_mask
             else:
                 pred_behavior = "Attack"
                 active_mask = attack_mask
@@ -288,9 +295,13 @@ def evaluate_attack_chasing_clip(
 
             refined_events: list[dict[str, Any]] = []
             if pred_behavior == "Attack":
-                refined_events = segment_clipping.refine_attack_segments([event], store, binding)
+                refined_events = segment_clipping.refine_attack_segments(
+                    [event], store, binding, min_duration_s=social_config.attack_min_duration_s
+                )
             elif pred_behavior == "Chasing":
-                refined_events = segment_clipping.refine_chasing_segments([event], store, binding)
+                refined_events = segment_clipping.refine_chasing_segments(
+                    [event], store, binding, min_duration_s=social_config.chasing_min_duration_s
+                )
 
             if refined_events:
                 pred_start = int(refined_events[0]["start_frame"])
@@ -398,8 +409,37 @@ def evaluate_isolation_gloco_clip(
 
         pred_behavior = None
         refined_events: list[dict[str, Any]] = []
+        gt_norm = str(gt_behavior or expected_behavior or "").strip().lower()
 
-        if len(target_ids) >= 3:
+        if gt_norm == "dispersal" or (not pred_behavior and len(target_ids) >= 2 and gt_norm in {"dispersal", "unknown", ""}):
+            cand_event = {
+                "canonical_behavior": "dispersal",
+                "behavior": "Dispersal",
+                "start_frame": 0,
+                "end_frame": total_frames,
+                "mouse_ids": target_ids,
+            }
+            res_disp = segment_clipping.refine_dispersal_segments([cand_event], store, binding)
+            if res_disp:
+                pred_behavior = "Dispersal"
+                refined_events = res_disp
+
+        if gt_norm in {"social clustering", "social_clustering"} or (
+            not pred_behavior and len(target_ids) >= 3 and gt_norm in {"social clustering", "social_clustering", "unknown", ""}
+        ):
+            cand_event = {
+                "canonical_behavior": "social_clustering",
+                "behavior": "Social clustering",
+                "start_frame": 0,
+                "end_frame": total_frames,
+                "mouse_ids": target_ids,
+            }
+            res_sc = segment_clipping.refine_social_clustering_segments([cand_event], store, binding)
+            if res_sc:
+                pred_behavior = "Social clustering"
+                refined_events = res_sc
+
+        if not pred_behavior and len(target_ids) >= 3:
             cand_event = {
                 "canonical_behavior": "group_locomotion",
                 "behavior": "Group locomotion",
@@ -436,6 +476,21 @@ def evaluate_isolation_gloco_clip(
                     "end_frame": total_frames,
                     "mouse_ids": target_ids,
                 })
+                cand_events.append({
+                    "canonical_behavior": "social_clustering",
+                    "behavior": "Social clustering",
+                    "start_frame": 0,
+                    "end_frame": total_frames,
+                    "mouse_ids": target_ids,
+                })
+            if len(target_ids) >= 2:
+                cand_events.append({
+                    "canonical_behavior": "dispersal",
+                    "behavior": "Dispersal",
+                    "start_frame": 0,
+                    "end_frame": total_frames,
+                    "mouse_ids": target_ids,
+                })
             elif len(target_ids) == 1:
                 cand_events.append({
                     "canonical_behavior": "isolation",
@@ -455,6 +510,10 @@ def evaluate_isolation_gloco_clip(
                     pred_behavior = "Isolation"
                 elif can_b == "group_locomotion":
                     pred_behavior = "Group locomotion"
+                elif can_b == "dispersal":
+                    pred_behavior = "Dispersal"
+                elif can_b == "social_clustering":
+                    pred_behavior = "Social clustering"
 
         record["predicted_behavior"] = pred_behavior
         is_correct = bool(pred_behavior and gt_behavior and pred_behavior.lower() == gt_behavior.lower())
@@ -469,6 +528,7 @@ def evaluate_isolation_gloco_clip(
             iou = 0.0
 
         record["temporal_iou"] = float(iou)
+        record["iou_ge_90"] = bool(iou >= 0.90)
         record["iou_ge_95"] = bool(iou >= 0.95)
         record["iou_ge_05"] = bool(iou >= 0.50)
 
@@ -721,7 +781,14 @@ def evaluate_six_behavior_clip(
             crop_output_dir=crop_output_dir,
             visualize=visualize,
         )
-    if normalized in {"isolation", "group locomotion", "group_locomotion"}:
+    if normalized in {
+        "isolation",
+        "group locomotion",
+        "group_locomotion",
+        "dispersal",
+        "social clustering",
+        "social_clustering",
+    }:
         return evaluate_isolation_gloco_clip(
             clip_dir,
             expected_behavior=expected_behavior,

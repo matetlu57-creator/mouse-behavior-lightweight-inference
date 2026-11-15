@@ -393,3 +393,8 @@ class SocialHeuristicConfig:
 
 
 DEFAULT_SOCIAL_HEURISTIC_CONFIG = SocialHeuristicConfig()
+OPTIMIZED_SOCIAL_HEURISTIC_CONFIG = SocialHeuristicConfig(
+    attack_min_duration_s=0.10,
+    chasing_min_duration_s=0.50,
+)
+

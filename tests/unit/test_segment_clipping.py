@@ -15,6 +15,7 @@ from mouse_behavior.behavior import (
     refine_isolation_segments,
     refine_locomotion_segments,
     refine_rearing_segments,
+    refine_social_clustering_segments,
     refine_static_segments,
     select_behavior_segments,
     update_segment_bounds,
@@ -1178,4 +1179,569 @@ def test_refine_group_locomotion_respects_15fps_support_frames():
     }
     res = refine_group_locomotion_segments([ev], _DummyStore(rows), {"source_video": {"fps": fps}})
     assert len(res) == 1
+
+
+def test_refine_social_clustering_retains_convergence_and_dense_cluster_and_dispatches():
+    fps = 30.0
+    n = 90
+    scale = {"cm_per_pixel": 0.1}
+    rows = []
+    for f in range(n):
+        t = min(1.0, f / 35.0)
+        x3 = 600.0 + (320.0 - 600.0) * t
+        y3 = 300.0 + (320.0 - 300.0) * t
+        rows.append(
+            {
+                "frame": f,
+                "source_frame": f,
+                "time": f / fps,
+                "detections": [
+                    _make_detection(1, (300.0, 300.0)),
+                    _make_detection(2, (330.0, 300.0)),
+                    _make_detection(3, (x3, y3)),
+                ],
+            }
+        )
+    ev = {
+        "event_id": "sc_v33",
+        "canonical_behavior": "social_clustering",
+        "behavior": "Social clustering",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": n,
+    }
+    store = _DummyStore(rows)
+    binding = {"source_video": {"fps": fps, "frame_count": n}}
+
+    res_direct = refine_social_clustering_segments([ev], store, binding, scale=scale)
+    assert len(res_direct) == 1
+    assert res_direct[0]["start_frame"] == 0
+    assert res_direct[0]["end_frame"] == 90
+
+    res_pipeline, _ = refine_behavior_segments(
+        [ev],
+        store,
+        binding,
+        scale=scale,
+        enable_huddle_sliding=False,
+        enable_approach_requalification=False,
+        enable_fine_cropping=True,
+    )
+    assert len(res_pipeline) == 1
+    assert res_pipeline[0]["start_frame"] == 0
+    assert res_pipeline[0]["end_frame"] == 90
+
+
+def test_refine_social_clustering_coalesces_short_dropout_without_fabricating_frames():
+    fps = 30.0
+    scale = {"cm_per_pixel": 0.1}
+
+    # Short occlusion gap (20 frames = 0.67s <= 2.0s): coalesce while keeping exact support
+    rows_gap = []
+    for f in range(90):
+        dets = [
+            _make_detection(1, (300.0, 300.0)),
+            _make_detection(2, (330.0, 300.0)),
+        ]
+        if f < 40:
+            t = min(1.0, f / 29.0)
+            dets.append(_make_detection(3, (600.0 - 280.0 * t, 300.0 + 20.0 * t)))
+        elif f >= 60:
+            dets.append(_make_detection(3, (320.0, 320.0)))
+        rows_gap.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    frag_a = {
+        "event_id": "sc_frag_a",
+        "canonical_behavior": "social_clustering",
+        "behavior": "Social clustering",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": 40,
+        "canonical_support_frame_intervals": [[0, 40]],
+    }
+    frag_b = {
+        "event_id": "sc_frag_b",
+        "canonical_behavior": "social_clustering",
+        "behavior": "Social clustering",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 60,
+        "end_frame": 90,
+        "canonical_support_frame_intervals": [[60, 90]],
+    }
+    res_coalesced = refine_social_clustering_segments(
+        [frag_b, frag_a],
+        _DummyStore(rows_gap),
+        {"source_video": {"fps": fps, "frame_count": 90}},
+        scale=scale,
+    )
+    assert len(res_coalesced) == 1
+    assert res_coalesced[0]["start_frame"] == 0
+    assert res_coalesced[0]["end_frame"] == 90
+    assert res_coalesced[0]["canonical_support_frame_intervals"] == [[0, 40], [60, 90]]
+
+    # Confirmed all-observed dispersal in the gap must prevent coalescing + reject zero-motion teleport
+    rows_disp = []
+    for f in range(110):
+        dets = [
+            _make_detection(1, (300.0, 300.0)),
+            _make_detection(2, (330.0, 300.0)),
+        ]
+        if f < 25:
+            t = f / 24.0
+            dets.append(_make_detection(3, (550.0 - 230.0 * t, 300.0 + 20.0 * t)))
+        elif f < 45:
+            dets.append(_make_detection(3, (320.0, 320.0)))
+        elif f < 60:
+            # All 3 mice observed dispersed > 1.25 * 10 cm
+            dets.append(_make_detection(3, (600.0, 300.0)))
+        elif f >= 65:
+            # Frames 60..64 drop out, then mouse 3 reappears dense with zero adjacent convergence
+            dets.append(_make_detection(3, (320.0, 320.0)))
+        rows_disp.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+
+    res_split = refine_social_clustering_segments(
+        [
+            {
+                "event_id": "sc_1",
+                "canonical_behavior": "social_clustering",
+                "behavior": "Social clustering",
+                "mouse_ids": [1, 2, 3],
+                "start_frame": 0,
+                "end_frame": 45,
+            },
+            {
+                "event_id": "sc_2",
+                "canonical_behavior": "social_clustering",
+                "behavior": "Social clustering",
+                "mouse_ids": [1, 2, 3],
+                "start_frame": 65,
+                "end_frame": 110,
+            },
+        ],
+        _DummyStore(rows_disp),
+        {"source_video": {"fps": fps, "frame_count": 110}},
+        scale=scale,
+    )
+    assert len(res_split) == 1
+    assert res_split[0]["start_frame"] == 0
+    assert res_split[0]["end_frame"] <= 50
+
+
+def test_refine_social_clustering_trims_tail_redispersal_and_rejects_invalid():
+    fps = 30.0
+    scale = {"cm_per_pixel": 0.1}
+    binding_120 = {"source_video": {"fps": fps, "frame_count": 120}}
+
+    # 1. Sustained tail re-dispersal is trimmed cleanly after dense hold
+    rows_redisp = []
+    for f in range(120):
+        if f < 30:
+            t = f / 29.0
+            x3, y3 = 600.0 - 280.0 * t, 300.0 + 20.0 * t
+        elif f < 75:
+            x3, y3 = 320.0, 320.0
+        else:
+            x3, y3 = 600.0, 300.0
+        rows_redisp.append(
+            {
+                "frame": f,
+                "source_frame": f,
+                "time": f / fps,
+                "detections": [
+                    _make_detection(1, (300.0, 300.0)),
+                    _make_detection(2, (330.0, 300.0)),
+                    _make_detection(3, (x3, y3)),
+                ],
+            }
+        )
+    res_redisp = refine_social_clustering_segments(
+        [
+            {
+                "event_id": "sc_redisp",
+                "canonical_behavior": "social_clustering",
+                "behavior": "Social clustering",
+                "mouse_ids": [1, 2, 3],
+                "start_frame": 0,
+                "end_frame": 120,
+            }
+        ],
+        _DummyStore(rows_redisp),
+        binding_120,
+        scale=scale,
+    )
+    assert len(res_redisp) == 1
+    assert 70 <= res_redisp[0]["end_frame"] <= 80
+
+    # 2. Brief <0.5s pass-through rejected (rad <= 10 cm for 12 frames = 0.40s < 0.50s)
+    rows_brief = []
+    for f in range(60):
+        if f < 10:
+            x3 = 750.0 - 45.0 * f
+        elif f < 16:
+            x3 = 320.0
+        elif f < 26:
+            x3 = 345.0 + 45.0 * (f - 16)
+        else:
+            x3 = 750.0
+        rows_brief.append(
+            {
+                "frame": f,
+                "source_frame": f,
+                "time": f / fps,
+                "detections": [
+                    _make_detection(1, (300.0, 300.0)),
+                    _make_detection(2, (330.0, 300.0)),
+                    _make_detection(3, (x3, 300.0)),
+                ],
+            }
+        )
+    assert (
+        refine_social_clustering_segments(
+            [
+                {
+                    "event_id": "sc_brief",
+                    "canonical_behavior": "social_clustering",
+                    "behavior": "Social clustering",
+                    "mouse_ids": [1, 2, 3],
+                    "start_frame": 0,
+                    "end_frame": 60,
+                }
+            ],
+            _DummyStore(rows_brief),
+            {"source_video": {"fps": fps, "frame_count": 60}},
+            scale=scale,
+        )
+        == []
+    )
+
+    # 3. Already-dense static cluster and missing ghost ID rejected
+    rows_dense = [
+        {
+            "frame": f,
+            "source_frame": f,
+            "time": f / fps,
+            "detections": [
+                _make_detection(1, (300.0, 300.0)),
+                _make_detection(2, (320.0, 300.0)),
+                _make_detection(3, (310.0, 315.0)),
+            ],
+        }
+        for f in range(90)
+    ]
+    assert (
+        refine_social_clustering_segments(
+            [
+                {
+                    "event_id": "sc_static",
+                    "canonical_behavior": "social_clustering",
+                    "behavior": "Social clustering",
+                    "mouse_ids": [1, 2, 3],
+                    "start_frame": 0,
+                    "end_frame": 90,
+                }
+            ],
+            _DummyStore(rows_dense),
+            {"source_video": {"fps": fps, "frame_count": 90}},
+            scale=scale,
+        )
+        == []
+    )
+    assert (
+        refine_social_clustering_segments(
+            [
+                {
+                    "event_id": "sc_ghost",
+                    "canonical_behavior": "social_clustering",
+                    "behavior": "Social clustering",
+                    "mouse_ids": [1, 2, 99],
+                    "start_frame": 0,
+                    "end_frame": 120,
+                }
+            ],
+            _DummyStore(rows_redisp),
+            binding_120,
+            scale=scale,
+        )
+        == []
+    )
+
+    # 3b. Already-dense huddle whose pre-dense occlusion never exceeded env_cm is rejected
+    rows_inner_huddle = []
+    for f in range(90):
+        dets = [
+            _make_detection(1, (300.0, 300.0)),
+            _make_detection(2, (330.0, 300.0)),
+        ]
+        if 15 <= f < 30:
+            x3 = 385.0 - 60.0 * ((f - 15) / 14.0)
+            dets.append(_make_detection(3, (x3, 300.0)))
+        elif f >= 30:
+            x3 = 325.0 + 40.0 * ((f % 6) / 5.0) if f < 60 else 320.0
+            dets.append(_make_detection(3, (x3, 305.0)))
+        rows_inner_huddle.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
+    assert (
+        refine_social_clustering_segments(
+            [
+                {
+                    "event_id": "sc_inner_huddle",
+                    "canonical_behavior": "social_clustering",
+                    "behavior": "Social clustering",
+                    "mouse_ids": [1, 2, 3],
+                    "start_frame": 0,
+                    "end_frame": 90,
+                }
+            ],
+            _DummyStore(rows_inner_huddle),
+            {"source_video": {"fps": fps, "frame_count": 90}},
+            scale=scale,
+        )
+        == []
+    )
+
+    # 4. Synchronous parallel group locomotion (>3.0s) masquerading as formation rejected
+    rows_gloco = []
+    for f in range(120):
+        t = f / 119.0
+        dx = 250.0 * t
+        s = min(1.0, f / 30.0)
+        rows_gloco.append(
+            {
+                "frame": f,
+                "source_frame": f,
+                "time": f / fps,
+                "detections": [
+                    _make_detection(1, (100.0 + dx, 80.0 + 20.0 * s)),
+                    _make_detection(2, (100.0 + dx, 280.0 - 60.0 * s)),
+                    _make_detection(3, (220.0 + dx, 180.0 - 20.0 * s)),
+                ],
+            }
+        )
+    assert (
+        refine_social_clustering_segments(
+            [
+                {
+                    "event_id": "sc_gloco",
+                    "canonical_behavior": "social_clustering",
+                    "behavior": "Social clustering",
+                    "mouse_ids": [1, 2, 3],
+                    "start_frame": 0,
+                    "end_frame": 120,
+                }
+            ],
+            _DummyStore(rows_gloco),
+            binding_120,
+            scale=scale,
+        )
+        == []
+    )
+
+
+def test_refine_dispersal_preserves_post_peak_expansion_and_prestart_compact_lookback():
+    fps = 30.0
+    n = 270
+    scale = {"cm_per_pixel": 0.1}
+    binding = {"source_video": {"fps": fps, "frame_count": n}}
+
+    rows_sustained = []
+    for f in range(n):
+        if f < 30:
+            p1, p2, p3 = (300.0, 300.0), (320.0, 300.0), (310.0, 315.0)
+        elif f < 120:
+            t = (f - 29) / 90.0
+            p1 = (300.0 - 150.0 * t, 300.0 - 150.0 * t)
+            p2 = (320.0 + 180.0 * t, 300.0 - 150.0 * t)
+            p3 = (310.0, 315.0 + 185.0 * t)
+        else:
+            p1, p2, p3 = (180.0, 180.0), (460.0, 180.0), (310.0, 440.0)
+        rows_sustained.append(
+            {
+                "frame": f,
+                "source_frame": f,
+                "time": f / fps,
+                "detections": [
+                    _make_detection(1, p1),
+                    _make_detection(2, p2),
+                    _make_detection(3, p3),
+                ],
+            }
+        )
+
+    store_sus = _DummyStore(rows_sustained)
+    res_full = refine_dispersal_segments(
+        [
+            {
+                "event_id": "disp_full",
+                "canonical_behavior": "dispersal",
+                "behavior": "Dispersal",
+                "mouse_ids": [1, 2, 3],
+                "start_frame": 0,
+                "end_frame": n,
+            }
+        ],
+        store_sus,
+        binding,
+        scale=scale,
+    )
+    assert len(res_full) == 1
+    assert res_full[0]["start_frame"] == 0
+    assert res_full[0]["end_frame"] == n
+
+    # Pre-start compact lookback: event starts after radial expansion exceeded cluster_radius_px
+    res_lookback = refine_dispersal_segments(
+        [
+            {
+                "event_id": "disp_trimmed_start",
+                "canonical_behavior": "dispersal",
+                "behavior": "Dispersal",
+                "mouse_ids": [1, 2, 3],
+                "start_frame": 90,
+                "end_frame": n,
+            }
+        ],
+        store_sus,
+        binding,
+        scale=scale,
+    )
+    assert len(res_lookback) == 1
+    assert res_lookback[0]["start_frame"] == 90
+    assert res_lookback[0]["end_frame"] == n
+
+    # Parameters duration forwarding & missing-ID rejection
+    assert (
+        refine_dispersal_segments(
+            [
+                {
+                    "event_id": "disp_short_param",
+                    "canonical_behavior": "dispersal",
+                    "behavior": "Dispersal",
+                    "mouse_ids": [1, 2, 3],
+                    "start_frame": 0,
+                    "end_frame": n,
+                }
+            ],
+            store_sus,
+            binding,
+            scale=scale,
+            parameters=HeuristicParameters(dispersal_min_duration_s=10.0),
+        )
+        == []
+    )
+    assert (
+        refine_dispersal_segments(
+            [
+                {
+                    "event_id": "disp_ghost",
+                    "canonical_behavior": "dispersal",
+                    "behavior": "Dispersal",
+                    "mouse_ids": [1, 2, 99],
+                    "start_frame": 0,
+                    "end_frame": n,
+                }
+            ],
+            store_sus,
+            binding,
+            scale=scale,
+        )
+        == []
+    )
+
+    # Sustained tail reconvergence trimmed cleanly before reconvergence onset (>5.0s retained)
+    rows_reconv = []
+    for f in range(n):
+        if f < 165:
+            rows_reconv.append(rows_sustained[f])
+        else:
+            rows_reconv.append(
+                {
+                    "frame": f,
+                    "source_frame": f,
+                    "time": f / fps,
+                    "detections": [
+                        _make_detection(1, (300.0, 300.0)),
+                        _make_detection(2, (320.0, 300.0)),
+                        _make_detection(3, (310.0, 315.0)),
+                    ],
+                }
+            )
+    res_reconv = refine_dispersal_segments(
+        [
+            {
+                "event_id": "disp_reconv",
+                "canonical_behavior": "dispersal",
+                "behavior": "Dispersal",
+                "mouse_ids": [1, 2, 3],
+                "start_frame": 0,
+                "end_frame": n,
+            }
+        ],
+        _DummyStore(rows_reconv),
+        binding,
+        scale=scale,
+    )
+    assert len(res_reconv) == 1
+    assert 160 <= res_reconv[0]["end_frame"] <= 170
+
+
+def test_refine_group_locomotion_respects_strict_duration_and_parameters():
+    fps = 30.0
+    n = 105
+    scale = {"cm_per_pixel": 0.1}
+    rows = []
+    for f in range(n):
+        shift = 4.0 * f
+        rows.append(
+            {
+                "frame": f,
+                "source_frame": f,
+                "time": f / fps,
+                "detections": [
+                    _make_detection(1, (100.0 + shift, 100.0 + shift * 0.5)),
+                    _make_detection(2, (125.0 + shift, 100.0 + shift * 0.5)),
+                    _make_detection(3, (112.0 + shift, 125.0 + shift * 0.5)),
+                ],
+            }
+        )
+    store = _DummyStore(rows)
+    binding = {"source_video": {"fps": fps, "frame_count": n}}
+    ev_exact_3s = {
+        "event_id": "gl_exact_3s",
+        "canonical_behavior": "group_locomotion",
+        "behavior": "Group locomotion",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": 90,
+    }
+    ev_over_3s = {
+        "event_id": "gl_over_3s",
+        "canonical_behavior": "group_locomotion",
+        "behavior": "Group locomotion",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": n,
+    }
+
+    assert refine_group_locomotion_segments([ev_exact_3s], store, binding, scale=scale) == []
+    assert (
+        len(
+            refine_group_locomotion_segments(
+                [ev_exact_3s],
+                store,
+                binding,
+                scale=scale,
+                parameters=HeuristicParameters(group_locomotion_min_duration_s=2.5),
+            )
+        )
+        == 1
+    )
+    assert len(refine_group_locomotion_segments([ev_over_3s], store, binding, scale=scale)) == 1
+    assert (
+        refine_group_locomotion_segments(
+            [ev_over_3s],
+            store,
+            binding,
+            scale=scale,
+            parameters=HeuristicParameters(group_locomotion_min_duration_s=4.0),
+        )
+        == []
+    )
 

@@ -22,7 +22,10 @@ from mouse_behavior.evaluation.clip_benchmark import (
     evaluate_attack_chasing_clip as evaluate_clip,
 )
 from mouse_behavior.evaluation.exported_dataset_config import config_seed_parameters
-from mouse_behavior.evaluation.social_heuristic_config import DEFAULT_SOCIAL_HEURISTIC_CONFIG
+from mouse_behavior.evaluation.social_heuristic_config import (
+    OPTIMIZED_SOCIAL_HEURISTIC_CONFIG,
+    SocialHeuristicConfig,
+)
 from mouse_behavior.visualization.clip_overlay_renderer import (
     render_cropped_comparison_video as crop_video,  # noqa: F401
 )
@@ -40,6 +43,7 @@ def evaluate_dataset(
     verbose: bool = False,
     crop_output_dir: Path | None = None,
     visualize: bool = True,
+    social_config: SocialHeuristicConfig | None = None,
 ) -> dict[str, Any]:
     """Evaluate missing-ID Attack and Chasing clips and produce aggregate metrics."""
     attack_dir = Path(attack_dir)
@@ -47,7 +51,7 @@ def evaluate_dataset(
 
     cfg_file = config_path if config_path is not None else ROOT / "configs/default.yaml"
     params = config_seed_parameters(load_config(cfg_file))
-    social_cfg = DEFAULT_SOCIAL_HEURISTIC_CONFIG
+    social_cfg = social_config if social_config is not None else OPTIMIZED_SOCIAL_HEURISTIC_CONFIG
 
     attack_clips = sorted([d for d in attack_dir.iterdir() if d.is_dir()]) if attack_dir.exists() else []
     chasing_clips = sorted([d for d in chasing_dir.iterdir() if d.is_dir()]) if chasing_dir.exists() else []
