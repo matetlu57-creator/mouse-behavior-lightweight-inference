@@ -42,9 +42,10 @@ Event tables add label fields next to numeric actor/target/contact/member slots.
 - `tracking/cache.py`: validation and trajectory-array normalization; no tracker implementation.
 - `identity/mtrack.py`: normalized mTrack/RFID CSV adapter.
 - `identity/labels.py`: label annotation for behavior records.
-- `behavior/` and `preprocessing/`: behavior features, FSMs, event extraction, and modular segment clipping (`segment_clipping.py` facade over `segment_clipping_common.py`, `segment_clipping_individual.py`, `segment_clipping_social.py`, and `segment_clipping_group.py` with unlimited segment selection by default).
+- `heuristics/`: unified lazy public facade ([`mouse_behavior.heuristics`](../src/mouse_behavior/heuristics/__init__.py)) exposing all 15-behavior heuristic configs, recognition functions, and segment clipping APIs without import side effects.
+- `behavior/` and `preprocessing/`: behavior features, FSMs, event extraction, and modular segment clipping (`segment_clipping.py` facade over `segment_clipping_common.py`, `segment_clipping_individual.py`, `segment_clipping_social.py`, and `segment_clipping_group.py` -> `segment_clipping_group_dispersal.py`, `segment_clipping_group_clustering.py`, `segment_clipping_group_motion.py`, with unlimited segment selection by default). See [the heuristic and segment-clipping architecture](heuristic-and-clipping-architecture.md).
 - `evaluation/clip_benchmark.py`: unified evaluation and report merging for the six calibrated behaviors (`Static`, `Locomotion`, `Isolation`, `Group locomotion`, `Chasing`, `Attack`).
-- `visualization/`: rendering (`rendering.py`, `clip_overlay_renderer.py`), annotation-package export (`behavior_packages.py`), and local comparison server (`comparison_site.py`, served at `http://127.0.0.1:8769/` via `python scripts/serve_comparison_site.py --port 8769`).
+- `visualization/`: rendering (`rendering.py`, `clip_overlay_renderer.py`), annotation-package export (`behavior_packages.py`), local comparison server (`comparison_site.py`, served at `http://127.0.0.1:8769/` via `python scripts/serve_comparison_site.py --port 8769`), and gateway-independent Persistent Local Site Hub (`site_hub.py`, managed via `scripts/manage_site_hub.py` at `http://127.0.0.1:8788/`, see [persistent-site-hub.md](persistent-site-hub.md)).
 - `evaluation/exported_dataset.py` is the stable compatibility façade for exported
   dataset analysis. Its implementation is separated into `exported_dataset_models.py`,
   `exported_dataset_records.py`, `exported_dataset_features.py`,
@@ -52,7 +53,9 @@ Event tables add label fields next to numeric actor/target/contact/member slots.
   `exported_dataset_prediction.py`, `exported_dataset_metrics.py`, and
   `exported_dataset_config.py`; provenance hashes cover the façade and its static
   local dependency closure, including current pair roles, group formation,
-  individual rules and scale resolution. A regression checks coverage whenever
+  individual rules, group event rules (`group_event_geometry.py`,
+  `group_event_clustering.py`, `group_event_dispersal.py`, `group_event_rules.py`),
+  and scale resolution. A regression checks coverage whenever
   a new local dependency is introduced.
   Its historical target-ID hit metrics are conditional on annotated IDs, not joint Top-1.
 - `evaluation/blind_top1.py` and `evaluation/train_only_tuning.py`: independent

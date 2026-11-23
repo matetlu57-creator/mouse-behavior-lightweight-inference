@@ -1,20 +1,27 @@
-"""Social/pair-layer behavior segment clipping (Approach, Attack, Chasing)."""
+"""Social/pair-layer behavior segment clipping (Approach, Attack, Chasing, Contact, Together)."""
 from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import cv2
 import numpy as np
 
 from mouse_behavior.behavior.duration_policy import qualify_event_duration
 from mouse_behavior.behavior.segment_clipping_common import (
+    _clip_multi_track_series,
     _detection_map,
+    _extract_box_px,
     _extract_center_px,
+    _extract_keypoints_px,
+    _observed_run_velocity_cm_s,
+    _observed_support_intervals,
     _resolve_fps,
     _resolve_parameters,
     _resolve_scale_cm_per_px,
     _resolve_video_info,
+    normalize_behavior_key,
     update_segment_bounds,
 )
 from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
@@ -23,6 +30,7 @@ __all__ = [
     "refine_approach_segments",
     "refine_attack_segments",
     "refine_chasing_segments",
+    "refine_contact_and_together_segments",
 ]
 
 
@@ -447,5 +455,226 @@ def refine_chasing_segments(
         else:
             fallback = update_segment_bounds(event, start, end, fps, suffix="chasing_fallback")
             refined.append(fallback)
+
+    return refined
+
+
+def _directed_head_distance_cm(
+    actor_kp_cm: np.ndarray,
+    target_kp_cm: np.ndarray,
+) -> float:
+    nose = actor_kp_cm[0]
+    if not np.isfinite(nose).all():
+        return float("nan")
+    head_tri = target_kp_cm[:3]
+    finite = np.isfinite(head_tri).all(axis=1)
+    if not finite.any():
+        return float("nan")
+    if finite.all():
+        hull = cv2.convexHull(head_tri.astype(np.float32))
+        if len(hull) >= 3 and cv2.contourArea(hull) > 1e-9:
+            return float(max(0.0, -cv2.pointPolygonTest(hull, (float(nose[0]), float(nose[1])), True)))
+    dists = np.linalg.norm(head_tri[finite] - nose, axis=1)
+    return float(dists.min())
+
+
+def _box_gap_cm(box_a: np.ndarray, box_b: np.ndarray, cm_per_px: float) -> float:
+    dx = max(0.0, max(float(box_a[0]) - float(box_b[2]), float(box_b[0]) - float(box_a[2])))
+    dy = max(0.0, max(float(box_a[1]) - float(box_b[3]), float(box_b[1]) - float(box_a[3])))
+    return float(np.hypot(dx, dy) * cm_per_px)
+
+
+def refine_contact_and_together_segments(
+    events: Sequence[Mapping[str, Any]],
+    store: Any,
+    binding: Mapping[str, Any] | None = None,
+    *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
+) -> list[dict[str, Any]]:
+    """Fine-crop contact and together segments to stay bounded on real interaction intervals."""
+    from mouse_behavior.evaluation.screening_signals import runs
+    from mouse_behavior.evaluation.social_heuristic_config import DEFAULT_SOCIAL_HEURISTIC_CONFIG
+
+    fps = _resolve_fps(binding)
+    params = _resolve_parameters(binding, parameters)
+    social_cfg = DEFAULT_SOCIAL_HEURISTIC_CONFIG
+    ref_body_cm = 7.918
+    if isinstance(scale, Mapping) and scale.get("reference_body_cm"):
+        ref_body_cm = float(scale["reference_body_cm"])
+
+    refined: list[dict[str, Any]] = []
+    for event in events:
+        beh_key = normalize_behavior_key(str(event.get("canonical_behavior") or event.get("behavior") or ""))
+        if beh_key not in {"head_contact", "tail_contact", "together"}:
+            refined.append(copy.deepcopy(dict(event)))
+            continue
+
+        start = int(event["start_frame"])
+        end = int(event["end_frame"])
+        mids = [int(m) for m in event.get("mouse_ids", ())]
+        if len(set(mids)) < 2 or end <= start:
+            continue
+        mid_a, mid_b = mids[0], mids[1]
+        if mid_a == mid_b:
+            unique = list(dict.fromkeys(mids))
+            if len(unique) < 2:
+                continue
+            mid_a, mid_b = unique[0], unique[1]
+
+        rows = list(store.rows(start, end))
+        if not rows:
+            continue
+        span = end - start
+        cm_per_px = _resolve_scale_cm_per_px(rows, [mid_a, mid_b], binding, scale=scale)
+        centers_cm, observed = _clip_multi_track_series(rows, start, end, [mid_a, mid_b], cm_per_px)
+        pair_obs = observed[:, 0] & observed[:, 1]
+        if int(pair_obs.sum()) < 2:
+            continue
+        pair_dist = np.where(
+            pair_obs,
+            np.linalg.norm(centers_cm[:, 0] - centers_cm[:, 1], axis=1),
+            np.nan,
+        )
+
+        if beh_key == "together":
+            _, _, speed = _observed_run_velocity_cm_s(centers_cm, observed, fps, motion_window_s=0.3)
+            max_dist = float(social_cfg.dist_together_max_cm)
+            max_spd = float(social_cfg.vel_together_max_cm_s)
+            strict = (
+                pair_obs
+                & np.isfinite(pair_dist)
+                & (pair_dist < max_dist)
+                & np.isfinite(speed[:, 0])
+                & (speed[:, 0] < max_spd)
+                & np.isfinite(speed[:, 1])
+                & (speed[:, 1] < max_spd)
+            )
+            unknown = ~(
+                pair_obs
+                & np.isfinite(pair_dist)
+                & np.isfinite(speed[:, 0])
+                & np.isfinite(speed[:, 1])
+            )
+            bridge_frames = max(0, int(round(float(social_cfg.together_bridge_max_gap_s) * fps)))
+            bridged = strict.copy()
+            for gap_lo, gap_hi in runs(~strict):
+                if (
+                    0 < gap_lo
+                    and gap_hi < span
+                    and (gap_hi - gap_lo) <= bridge_frames
+                    and unknown[gap_lo:gap_hi].all()
+                    and np.isfinite(pair_dist[gap_lo - 1])
+                    and np.isfinite(pair_dist[gap_hi])
+                    and pair_dist[gap_lo - 1] < max_dist
+                    and pair_dist[gap_hi] < max_dist
+                ):
+                    bridged[gap_lo:gap_hi] = True
+            suffix = "together_crop"
+        else:
+            kind = "head" if beh_key == "head_contact" else "tail"
+            cap_cm = float(
+                social_cfg.dist_nose_head_contact_max_cm
+                if kind == "head"
+                else social_cfg.dist_nose_tail_contact_max_cm
+            )
+            bridge_s = float(
+                social_cfg.contact_bridge_max_gap_s
+                if kind == "head"
+                else social_cfg.contact_tail_bridge_max_gap_s
+            )
+            bridge_frames = max(0, int(round(bridge_s * fps)))
+            support_rad = float(social_cfg.contact_bridge_support_max_body_lengths) * ref_body_cm
+            ceiling_pad = float(social_cfg.contact_signal_max_body_lengths) * ref_body_cm
+
+            kp_a = np.full((span, 7, 2), np.nan, dtype=float)
+            kp_b = np.full((span, 7, 2), np.nan, dtype=float)
+            box_a = np.full((span, 4), np.nan, dtype=float)
+            box_b = np.full((span, 4), np.nan, dtype=float)
+            has_kp_pair = False
+            for idx, row in enumerate(rows):
+                raw_frame = row.get("frame", row.get("source_frame"))
+                rel = int(raw_frame) - start if raw_frame is not None else idx
+                if not (0 <= rel < span):
+                    continue
+                dmap = _detection_map(row)
+                da = dmap.get(mid_a)
+                db = dmap.get(mid_b)
+                if da is not None:
+                    ka = _extract_keypoints_px(da)
+                    if ka is not None:
+                        kp_a[rel] = ka * cm_per_px
+                    ba = _extract_box_px(da)
+                    if ba is not None:
+                        box_a[rel] = ba
+                if db is not None:
+                    kb = _extract_keypoints_px(db)
+                    if kb is not None:
+                        kp_b[rel] = kb * cm_per_px
+                    bb = _extract_box_px(db)
+                    if bb is not None:
+                        box_b[rel] = bb
+                if da is not None and db is not None and np.isfinite(kp_a[rel]).any() and np.isfinite(kp_b[rel]).any():
+                    has_kp_pair = True
+
+            d_min = np.full(span, np.nan, dtype=float)
+            for rel in np.flatnonzero(pair_obs):
+                if has_kp_pair:
+                    if kind == "head":
+                        dab = _directed_head_distance_cm(kp_a[rel], kp_b[rel])
+                        dba = _directed_head_distance_cm(kp_b[rel], kp_a[rel])
+                    else:
+                        dab = (
+                            float(np.linalg.norm(kp_a[rel, 0] - kp_b[rel, 6]))
+                            if np.isfinite(kp_a[rel, 0]).all() and np.isfinite(kp_b[rel, 6]).all()
+                            else float("nan")
+                        )
+                        dba = (
+                            float(np.linalg.norm(kp_b[rel, 0] - kp_a[rel, 6]))
+                            if np.isfinite(kp_b[rel, 0]).all() and np.isfinite(kp_a[rel, 6]).all()
+                            else float("nan")
+                        )
+                    vals = [v for v in (dab, dba) if np.isfinite(v)]
+                    if vals:
+                        d_min[rel] = min(vals)
+                elif np.isfinite(box_a[rel]).all() and np.isfinite(box_b[rel]).all():
+                    d_min[rel] = _box_gap_cm(box_a[rel], box_b[rel], cm_per_px)
+
+            strict = pair_obs & np.isfinite(d_min) & (d_min <= cap_cm)
+            ceiling = pair_dist + ceiling_pad
+            unknown = (~pair_obs) | (~np.isfinite(d_min)) | (np.isfinite(ceiling) & (d_min > ceiling))
+            bridged = strict.copy()
+            for gap_lo, gap_hi in runs(~strict):
+                if (
+                    0 < gap_lo
+                    and gap_hi < span
+                    and (gap_hi - gap_lo) <= bridge_frames
+                    and unknown[gap_lo:gap_hi].all()
+                    and np.isfinite(pair_dist[gap_lo - 1])
+                    and np.isfinite(pair_dist[gap_hi])
+                    and pair_dist[gap_lo - 1] <= support_rad
+                    and pair_dist[gap_hi] <= support_rad
+                ):
+                    bridged[gap_lo:gap_hi] = True
+            suffix = f"{beh_key}_crop"
+
+        if not bridged.any():
+            continue
+
+        for rel_s, rel_e in runs(bridged):
+            obs_sub = np.flatnonzero(strict[rel_s:rel_e])
+            if len(obs_sub) < 2:
+                continue
+            true_s = start + rel_s + int(obs_sub[0])
+            true_e = start + rel_s + int(obs_sub[-1]) + 1
+            cropped = update_segment_bounds(event, true_s, true_e, fps, suffix=suffix)
+            supp_slice = strict[true_s - start : true_e - start]
+            supp_intervals = _observed_support_intervals(supp_slice, true_s)
+            if not supp_intervals:
+                continue
+            cropped["canonical_support_frame_intervals"] = supp_intervals
+            cropped["canonical_support_frame_count"] = sum(b - a for a, b in supp_intervals)
+            if qualify_event_duration(cropped, fps, parameters=params)["ok"]:
+                refined.append(cropped)
 
     return refined

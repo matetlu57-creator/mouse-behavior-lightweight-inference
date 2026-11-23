@@ -190,6 +190,11 @@ class SocialHeuristicConfig:
     # minimum rejected both halves. Same bounded unknown-frame bridging as the
     # contact rules; kept as its own field so the two can be tuned apart.
     together_bridge_max_gap_s: float = 0.15
+    together_wide_max_distance_cm: float | None = None
+    together_wide_max_speed_cm_s: float | None = None
+    together_wide_min_body_gap_cm: float = 0.0
+    together_wide_min_endpoint_gap_cm: float = 0.0
+    together_wide_max_footprint_body_lengths: float = 2.5
     # Mean = sum of real adjacent eligible step lengths / adjacent step time.
     # Each mouse must pass; missing rows/jumps across gaps add neither operand.
     # Zero is supported only for explicit historical experiment configurations.
@@ -294,6 +299,7 @@ class SocialHeuristicConfig:
             "together_min_duration_s", "together_bridge_max_gap_s",
             "together_contact_veto_min_duration_s",
             "dist_together_max_cm", "vel_together_max_cm_s",
+            "together_wide_max_footprint_body_lengths",
         )
         for name in positive_fields:
             value = float(getattr(self, name))
@@ -302,7 +308,8 @@ class SocialHeuristicConfig:
         for name in ("vel_attack_min_cm_s", "acc_attack_min_cm_s2",
                      "vel_chasing_min_cm_s", "vel_chasing_target_min_cm_s",
                      "dist_approach_end_min_cm", "approach_surface_endpoint_tolerance_cm",
-                     "chasing_min_mean_speed_cm_s", "approach_min_actor_path_cm"):
+                     "chasing_min_mean_speed_cm_s", "approach_min_actor_path_cm",
+                     "together_wide_min_body_gap_cm"):
             value = float(getattr(self, name))
             if not isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
@@ -348,6 +355,17 @@ class SocialHeuristicConfig:
             raise ValueError("tail-contact minimum duration cannot exceed its maximum")
         if self.together_bridge_max_gap_s >= self.together_min_duration_s:
             raise ValueError("a together bridge must be shorter than the bout it supports")
+        if self.together_wide_max_distance_cm is not None:
+            wide_dist = float(self.together_wide_max_distance_cm)
+            if not isfinite(wide_dist) or wide_dist < self.dist_together_max_cm:
+                raise ValueError("together_wide_max_distance_cm must be finite and >= dist_together_max_cm")
+        if self.together_wide_max_speed_cm_s is not None:
+            wide_speed = float(self.together_wide_max_speed_cm_s)
+            if not isfinite(wide_speed) or wide_speed <= 0:
+                raise ValueError("together_wide_max_speed_cm_s must be a finite positive number")
+        wide_ep_gap = float(self.together_wide_min_endpoint_gap_cm)
+        if not isfinite(wide_ep_gap) or wide_ep_gap < 0.0:
+            raise ValueError("together_wide_min_endpoint_gap_cm must be a non-negative finite number")
         if self.together_contact_veto_min_duration_s > self.nose_contact_min_duration_s:
             raise ValueError(
                 "the together contact veto cannot be longer than a qualifying contact bout"
@@ -394,7 +412,22 @@ class SocialHeuristicConfig:
 
 DEFAULT_SOCIAL_HEURISTIC_CONFIG = SocialHeuristicConfig()
 OPTIMIZED_SOCIAL_HEURISTIC_CONFIG = SocialHeuristicConfig(
+    approach_priority=4,
+    together_priority=1,
+    attack_priority=2,
+    chasing_priority=3,
+    nose_contact_priority=5,
+    nose_tail_priority=6,
+    approach_min_duration_s=0.12,
+    dist_approach_end_max_cm=22.5,
     attack_min_duration_s=0.10,
     chasing_min_duration_s=0.50,
+    dist_together_max_cm=5.40,
+    vel_together_max_cm_s=3.5,
+    together_bridge_max_gap_s=0.25,
+    together_wide_max_distance_cm=13.0,
+    together_wide_max_speed_cm_s=5.5,
+    together_wide_min_body_gap_cm=1.8,
+    together_wide_min_endpoint_gap_cm=1.2,
 )
 

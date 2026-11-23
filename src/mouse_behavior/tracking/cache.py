@@ -124,13 +124,26 @@ def _payload_detection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+class _CompatUnpickler(pickle.Unpickler):
+    """Allow NumPy 1.x runtimes to read NumPy 2.x (``numpy._core``) cache pickles."""
+
+    def find_class(self, module: str, name: str) -> Any:
+        if module.startswith("numpy._core"):
+            try:
+                return super().find_class(module, name)
+            except ModuleNotFoundError:
+                remapped = "numpy.core" + module[len("numpy._core") :]
+                return super().find_class(remapped, name)
+        return super().find_class(module, name)
+
+
 def _iter_cache_records(cache_dir: Path) -> Iterator[Mapping[str, Any]]:
     parts = sorted(Path(cache_dir).glob("yolo_results.*.*.pkl.gz"))
     if not parts:
         raise FileNotFoundError(f"没有找到 YOLO 轨迹缓存分块: {cache_dir}")
     for part in parts:
         with gzip.open(part, "rb") as handle:
-            records = pickle.load(handle)
+            records = _CompatUnpickler(handle).load()
         if not isinstance(records, list):
             raise TrajectoryCacheError(f"缓存分块格式错误: {part}")
         for record in records:

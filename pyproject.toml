@@ -31,6 +31,19 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"mouse_behavior.visualization" = [
+    "error_review_assets/*.html",
+    "error_review_assets/*.css",
+    "error_review_assets/*.js",
+    "clip_review_assets/*.html",
+    "clip_review_assets/*.css",
+    "clip_review_assets/*.js",
+    "site_hub_assets/*.html",
+    "site_hub_assets/*.css",
+    "site_hub_assets/*.js",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]

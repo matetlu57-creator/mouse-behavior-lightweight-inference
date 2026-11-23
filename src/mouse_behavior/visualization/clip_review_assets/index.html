@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>小鼠行为审核与手动片段采集工作台</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-stage">跳至视频工作区</a>
+
+  <!-- Top Application Header (always renders immediately without API) -->
+  <header class="app-header">
+    <div class="brand-cluster">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 28 28" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="22" height="16" rx="3"></rect>
+          <path d="M9 24h10"></path>
+          <path d="M14 20v4"></path>
+          <circle cx="11" cy="12" r="2.2"></circle>
+          <circle cx="17.5" cy="11" r="1.8"></circle>
+          <path d="M13 12l3 -0.6"></path>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <div class="brand-title-row">
+          <h1>小鼠行为审核与手动片段采集工作台</h1>
+          <span id="readonly-pill" class="meta-pill readonly" title="源目录只读保护">只读源目录</span>
+        </div>
+        <p id="source-path-line" class="brand-subtitle">正在初始化本地工作台 · 源目录等待连接</p>
+      </div>
+    </div>
+
+    <div class="header-metrics" aria-label="全局进度统计">
+      <div class="stat-chip">
+        <span class="stat-label">已审核</span>
+        <strong id="global-reviewed-count" class="mono">0 / 0</strong>
+      </div>
+      <div class="stat-chip">
+        <span class="stat-label">已采集</span>
+        <strong id="global-collected-count" class="mono">0</strong>
+      </div>
+      <div id="pending-sync-chip" class="stat-chip warn" hidden>
+        <span class="stat-label">待同步</span>
+        <strong id="global-pending-sync-count" class="mono">0</strong>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <button id="open-collections-btn" type="button" class="btn btn-secondary">
+        <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <path d="M3 5.5A1.5 1.5 0 0 1 4.5 4h3.4l1.6 1.8h6A1.5 1.5 0 0 1 17 7.3v7.2a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 14.5z"></path>
+        </svg>
+        <span>已采集管理</span>
+        <span id="drawer-count-badge" class="count-pill mono">0</span>
+      </button>
+
+      <button id="open-shortcuts-btn" type="button" class="btn btn-ghost" title="查看快捷键 (?)">
+        <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <rect x="2.5" y="5" width="15" height="10" rx="2"></rect>
+          <path d="M5.5 8.5h1M8.5 8.5h1M11.5 8.5h1M14.5 8.5h0.5M6.5 11.5h7"></path>
+        </svg>
+        <span>快捷键</span>
+      </button>
+
+      <div id="connection-status" class="conn-pill connecting" role="status" aria-live="polite">
+        <span class="conn-dot" aria-hidden="true"></span>
+        <span id="connection-text">连接中…</span>
+      </div>
+      <button id="header-reconnect-btn" type="button" class="btn btn-quiet" title="重新连接后端 API">重连</button>
+    </div>
+  </header>
+
+  <!-- Offline / Demo Fallback Banner (AGENTS.md mandatory clear labeling) -->
+  <div id="offline-banner" class="alert-banner alert-warning" role="alert" hidden>
+    <div class="alert-content">
+      <span class="alert-tag">离线回退</span>
+      <div>
+        <strong>演示回退数据 · 非实时 F:\mouse 评测结果</strong>
+        <p id="offline-reason" class="alert-detail">后端 API 暂不可达，已切换至内置合成演示数据以保持工作台界面与交互可用。审核编辑会自动暂存至本地浏览器并在重连后同步。</p>
+      </div>
+    </div>
+    <div class="alert-actions">
+      <button id="banner-reconnect-btn" type="button" class="btn btn-primary btn-sm">重新连接后端 API</button>
+      <button id="banner-flush-btn" type="button" class="btn btn-secondary btn-sm" hidden>同步待提交审核</button>
+    </div>
+  </div>
+
+  <!-- Corrupt Store Alert Banner (HTTP 409 / 500 without losing local pending edits) -->
+  <div id="corrupt-banner" class="alert-banner alert-danger" role="alert" hidden>
+    <div class="alert-content">
+      <span class="alert-tag">存储异常</span>
+      <div>
+        <strong id="corrupt-title">后端持久化文件异常，已保留原文件未覆盖</strong>
+        <p id="corrupt-detail" class="alert-detail">您的审核更改已安全保存在本地浏览器队列中，不会丢失。修复或备份后端 JSON 文件后可点击重试同步。</p>
+      </div>
+    </div>
+    <div class="alert-actions">
+      <button id="corrupt-retry-btn" type="button" class="btn btn-secondary btn-sm">重试同步</button>
+      <button id="corrupt-dismiss-btn" type="button" class="btn btn-ghost btn-sm">暂且收起</button>
+    </div>
+  </div>
+
+  <!-- Catalog Loading / Recoverable Error Strip -->
+  <div id="catalog-notice" class="status-strip" role="status" aria-live="polite">
+    <span id="catalog-notice-text">正在加载目录与历史审核记录…</span>
+    <button id="catalog-retry-btn" type="button" class="btn btn-quiet btn-xs" hidden>重新加载</button>
+  </div>
+
+  <!-- Main 3-Column Workbench Shell -->
+  <div class="workbench">
+    <!-- LEFT PANEL: Behavior Categories + Search/Filter + Paginated Clip List -->
+    <aside class="panel left-panel" aria-label="行为导航与片段列表">
+      <section class="sidebar-section behavior-section" aria-label="行为分类">
+        <div class="panel-header compact">
+          <h2>行为分类</h2>
+          <span id="behavior-total-badge" class="muted mono">14 类</span>
+        </div>
+        <nav id="behavior-nav" class="behavior-nav" aria-label="按行为筛选">
+          <p class="empty-hint">正在初始化行为导航…</p>
+        </nav>
+      </section>
+
+      <section class="sidebar-section clip-browser-section" aria-label="片段筛选与列表">
+        <div class="filter-bar">
+          <div class="search-field">
+            <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <circle cx="9" cy="9" r="5.5"></circle>
+              <path d="M13.2 13.2 17 17"></path>
+            </svg>
+            <input id="clip-search" type="search" placeholder="搜索 clip_id / 原视频 / track_id" autocomplete="off" aria-label="搜索片段">
+          </div>
+          <div class="filter-row">
+            <select id="status-filter" aria-label="按状态筛选">
+              <option value="all">全部状态</option>
+              <option value="pending">待审核</option>
+              <option value="pass">通过</option>
+              <option value="fail">驳回</option>
+              <option value="needs_recrop">需重裁</option>
+              <option value="collected">已采集</option>
+            </select>
+            <span id="filtered-count" class="result-badge mono">0 条</span>
+          </div>
+        </div>
+
+        <div id="clip-list" class="clip-list" role="listbox" aria-label="片段列表">
+          <p class="empty-hint">等待目录加载…</p>
+        </div>
+
+        <div id="clip-list-empty" class="empty-box" hidden>
+          <p><strong>当前筛选条件下无匹配片段</strong></p>
+          <p class="muted">尝试切换行为、清除搜索词或改为查看全部状态。</p>
+          <button id="reset-filters-btn" type="button" class="btn btn-secondary btn-sm">重置筛选条件</button>
+        </div>
+
+        <div class="pager-bar" aria-label="片段分页导航">
+          <button id="page-prev-btn" type="button" class="btn btn-quiet btn-xs" disabled>上一页</button>
+          <span id="page-info" class="muted mono">第 1 / 1 页</span>
+          <button id="page-next-btn" type="button" class="btn btn-quiet btn-xs" disabled>下一页</button>
+        </div>
+      </section>
+    </aside>
+
+    <!-- CENTER PANEL: Video Stage + Interactive Canvas + Frame-Accurate Dual-Handle Timeline -->
+    <main id="main-stage" class="panel center-panel" aria-label="视频播放与帧级裁剪区">
+      <div class="stage-topbar">
+        <div class="clip-headline">
+          <div class="clip-title-row">
+            <h2 id="active-clip-title">请选择左侧片段开始审核或采集</h2>
+            <span id="active-behavior-tag" class="tag-pill" hidden></span>
+            <span id="active-demo-tag" class="tag-pill demo" hidden>演示样本</span>
+          </div>
+          <p id="active-clip-meta" class="muted mono">等待载入片段详情…</p>
+        </div>
+        <div class="clip-nav-controls">
+          <button id="clip-prev-btn" type="button" class="btn btn-quiet btn-sm" title="上一个片段 (J)" disabled>← 上一条 (J)</button>
+          <span id="clip-position" class="position-readout mono">— / —</span>
+          <button id="clip-next-btn" type="button" class="btn btn-quiet btn-sm" title="下一个片段 (K)" disabled>下一条 (K) →</button>
+        </div>
+      </div>
+
+      <!-- Detail Load Status / Error Banner -->
+      <div id="detail-status" class="inline-notice" role="status" hidden>
+        <span id="detail-status-text"></span>
+        <button id="retry-detail-btn" type="button" class="btn btn-quiet btn-xs" hidden>重试加载</button>
+      </div>
+
+      <!-- Missing Target Explicit Warning + Frame Telemetry Bar -->
+      <div class="telemetry-bar" aria-label="当前帧轨迹观测状态">
+        <div class="telemetry-left">
+          <span id="missing-target-badge" class="missing-badge" role="status" hidden></span>
+          <span id="visible-mice-readout" class="telemetry-text mono">当前帧可见鼠：—</span>
+        </div>
+        <span class="canvas-pick-hint">点击画面小鼠框可切换采集目标 ID</span>
+      </div>
+
+      <!-- Dark Theater Video + Interactive Canvas Stage -->
+      <div id="video-shell" class="video-shell">
+        <div id="video-stage" class="video-stage">
+          <video id="clip-video" playsinline preload="metadata" aria-label="小鼠行为视频"></video>
+          <canvas id="clip-canvas" aria-label="小鼠轨迹与关键点交互画布"></canvas>
+          <div id="canvas-hover-tip" class="canvas-hover-tip" hidden></div>
+          <div id="video-placeholder" class="video-placeholder">
+            <div class="placeholder-inner">
+              <strong id="placeholder-title">视频预览区</strong>
+              <p id="placeholder-sub">从左侧列表选择一个行为片段，视频与轨迹叠加层将在此同步展示。</p>
+            </div>
+          </div>
+          <div id="video-error-overlay" class="video-error-overlay" hidden>
+            <span id="video-error-text">视频流暂不可用，当前仍可使用帧步进查看实测轨迹叠加层。</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Overlay Toggles Bar -->
+      <div class="overlay-toolbar" aria-label="画面叠加层开关">
+        <div class="overlay-toggles">
+          <label class="toggle-chip">
+            <input id="toggle-targets" type="checkbox" checked>
+            <span class="swatch swatch-target"></span>
+            <span>目标鼠高亮框</span>
+          </label>
+          <label class="toggle-chip">
+            <input id="toggle-others" type="checkbox" checked>
+            <span class="swatch swatch-other"></span>
+            <span>其他可见鼠框</span>
+          </label>
+          <label class="toggle-chip">
+            <input id="toggle-skeleton" type="checkbox" checked>
+            <span class="swatch swatch-skeleton"></span>
+            <span>7 关键点骨架</span>
+          </label>
+          <label class="toggle-chip">
+            <input id="toggle-labels" type="checkbox" checked>
+            <span class="swatch swatch-label"></span>
+            <span>编号标签</span>
+          </label>
+        </div>
+        <div class="frame-clock mono" id="frame-clock">帧 0 / 0 · 0.00s / 0.00s</div>
+      </div>
+
+      <!-- Playback Transport & Frame Stepping Controls -->
+      <div class="transport-bar" aria-label="播放与帧级步进控制">
+        <div class="transport-group">
+          <button id="play-pause-btn" type="button" class="btn btn-primary btn-sm" title="播放 / 暂停 (Space)" disabled>
+            <span id="play-pause-label">播放</span>
+          </button>
+          <div class="step-group" role="group" aria-label="帧步进">
+            <button id="step-back-10" type="button" class="btn btn-quiet btn-xs mono" title="后退 10 帧 (Shift+←)" disabled>−10</button>
+            <button id="step-back-1" type="button" class="btn btn-quiet btn-xs mono" title="后退 1 帧 (← / ,)" disabled>−1</button>
+            <button id="step-fwd-1" type="button" class="btn btn-quiet btn-xs mono" title="前进 1 帧 (→ / .)" disabled>+1</button>
+            <button id="step-fwd-10" type="button" class="btn btn-quiet btn-xs mono" title="前进 10 帧 (Shift+→)" disabled>+10</button>
+          </div>
+          <label class="speed-control">
+            <span>倍速</span>
+            <select id="playback-speed" aria-label="播放倍速">
+              <option value="0.25">0.25×</option>
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="transport-group">
+          <button id="set-in-btn" type="button" class="btn btn-quiet btn-xs" title="将当前帧设为裁剪起点 ([)" disabled>设为起点 [</button>
+          <button id="set-out-btn" type="button" class="btn btn-quiet btn-xs" title="将当前帧+1设为裁剪终点 (])" disabled>设为终点 ]</button>
+          <button id="loop-preview-btn" type="button" class="btn btn-quiet btn-xs" aria-pressed="false" title="在裁剪区间内循环播放 (L)" disabled>循环预览 (L)</button>
+          <button id="align-annotation-btn" type="button" class="btn btn-quiet btn-xs" title="重置为原标注区间" disabled>对齐原标注区间</button>
+          <button id="fullscreen-btn" type="button" class="btn btn-quiet btn-xs" title="全屏查看" disabled>全屏</button>
+        </div>
+      </div>
+
+      <!-- Interactive Dual-Handle Crop Timeline + Annotation Band + Target Visibility Strip -->
+      <section class="timeline-card" aria-label="帧级裁剪时间轴">
+        <div class="timeline-legend-row">
+          <div class="legend-items">
+            <span class="legend-tag"><i class="swatch-line ann"></i>原标注区间</span>
+            <span class="legend-tag"><i class="swatch-line crop"></i>当前裁剪区间 [start, end)</span>
+            <span class="legend-tag"><i class="swatch-line vis-ok"></i>目标实测可见</span>
+            <span class="legend-tag"><i class="swatch-line vis-miss"></i>目标帧缺失</span>
+          </div>
+          <div id="range-summary" class="range-summary mono">裁剪区间：[0, 0) · 0 帧 (0.00s)</div>
+        </div>
+
+        <div id="timeline-track-wrap" class="timeline-track-wrap">
+          <!-- Original Annotation Reference Band -->
+          <div class="ann-band-row" aria-label="原始标注区间参考条">
+            <div id="ann-band-fill" class="ann-band-fill" hidden></div>
+            <span id="ann-band-label" class="ann-band-label mono">无原标注区间</span>
+          </div>
+
+          <!-- Interactive Scrubber & Dual-Handle Selector -->
+          <div id="timeline-rail" class="timeline-rail">
+            <div id="crop-fill" class="crop-fill"></div>
+            <div id="playhead-line" class="playhead-line"></div>
+            <button id="handle-start" type="button" class="range-handle start" role="slider" aria-label="裁剪起始帧 (含)" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="拖动或按方向键调整起始帧">
+              <span class="handle-grip"></span>
+              <span id="handle-start-tip" class="handle-tip mono">0</span>
+            </button>
+            <button id="handle-end" type="button" class="range-handle end" role="slider" aria-label="裁剪结束帧 (不含)" aria-valuemin="1" aria-valuemax="1" aria-valuenow="1" title="拖动或按方向键调整结束帧">
+              <span class="handle-grip"></span>
+              <span id="handle-end-tip" class="handle-tip mono">0</span>
+            </button>
+          </div>
+
+          <!-- Target Visibility Track Strip -->
+          <div class="visibility-strip-wrap" aria-label="目标鼠实测可见性轨道">
+            <div id="visibility-labels" class="visibility-labels mono"></div>
+            <div class="visibility-canvas-box">
+              <canvas id="visibility-canvas" height="24"></canvas>
+              <div id="visibility-playhead" class="visibility-playhead"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Compact Collapsible Clip Metadata & Measured Track Coverage -->
+      <details class="clip-details-box" id="clip-meta-details">
+        <summary>片段元信息与实测轨迹覆盖详情（仅展示实测数据，不插值补框）</summary>
+        <div class="clip-details-body">
+          <dl id="meta-kv-grid" class="meta-kv-grid"></dl>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Track ID</th>
+                  <th>身份角色</th>
+                  <th>全段可见帧</th>
+                  <th>区间内可见</th>
+                  <th>首帧—末帧</th>
+                </tr>
+              </thead>
+              <tbody id="track-coverage-tbody">
+                <tr><td colspan="5" class="muted">暂无轨迹数据</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+    </main>
+
+    <!-- RIGHT PANEL: 2-Tab Review & Manual Clip Collection Workbench -->
+    <aside class="panel right-panel" aria-label="审核与手动片段采集面板">
+      <div class="panel-tabs" role="tablist" aria-label="操作面板切换">
+        <button id="tab-btn-review" type="button" class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-panel-review">
+          <span>片段审核</span>
+          <span id="tab-review-dot" class="status-dot pending" aria-hidden="true"></span>
+        </button>
+        <button id="tab-btn-collect" type="button" class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-panel-collect">
+          <span>手动采集片段</span>
+          <span id="tab-clip-collect-count" class="count-pill mono">0</span>
+        </button>
+      </div>
+
+      <!-- TAB 1: Review Panel -->
+      <section id="tab-panel-review" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-review">
+        <div class="form-section">
+          <div class="section-label-row">
+            <h3>审核结论</h3>
+            <span id="review-current-badge" class="status-badge pending">待审核</span>
+          </div>
+          <div class="verdict-grid" role="group" aria-label="审核结论按钮">
+            <button type="button" class="verdict-btn pass" data-verdict="pass">
+              <span class="verdict-title">通过</span>
+              <span class="verdict-sub mono">pass · [1]</span>
+            </button>
+            <button type="button" class="verdict-btn fail" data-verdict="fail">
+              <span class="verdict-title">驳回</span>
+              <span class="verdict-sub mono">fail · [2]</span>
+            </button>
+            <button type="button" class="verdict-btn needs_recrop" data-verdict="needs_recrop">
+              <span class="verdict-title">需重裁</span>
+              <span class="verdict-sub mono">needs_recrop · [3]</span>
+            </button>
+            <button type="button" class="verdict-btn pending" data-verdict="pending">
+              <span class="verdict-title">重置</span>
+              <span class="verdict-sub mono">pending</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-label-row">
+            <h3>快捷原因标签</h3>
+            <span class="muted">可多选</span>
+          </div>
+          <div id="reason-tags-group" class="chip-grid" role="group" aria-label="快捷原因标签">
+            <button type="button" class="tag-chip" data-tag="边界不准">边界不准</button>
+            <button type="button" class="tag-chip" data-tag="ID跳变/缺失">ID跳变/缺失</button>
+            <button type="button" class="tag-chip" data-tag="类别错误">类别错误</button>
+            <button type="button" class="tag-chip" data-tag="背景干扰">背景干扰</button>
+            <button type="button" class="tag-chip" data-tag="质量良好">质量良好</button>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <label class="checkbox-line">
+            <input id="review-attach-crop" type="checkbox">
+            <span>保存当前裁剪区间 <code id="review-crop-preview" class="mono">[0, 0)</code> 供后续批量导出</span>
+          </label>
+        </div>
+
+        <div class="form-section">
+          <label class="field-label" for="review-note">审核备注</label>
+          <textarea id="review-note" rows="3" placeholder="记录边界偏移、缺失帧、类别误标或重裁建议…"></textarea>
+        </div>
+
+        <div class="form-section save-bar">
+          <button id="save-review-btn" type="button" class="btn btn-primary btn-block" disabled>
+            保存审核 (S)
+          </button>
+          <label class="checkbox-line compact">
+            <input id="auto-advance-check" type="checkbox">
+            <span>保存后自动跳转下一条片段</span>
+          </label>
+          <p id="review-sync-status" class="sync-status muted">尚未保存修改</p>
+        </div>
+
+        <div class="form-section export-footer">
+          <div class="section-label-row">
+            <h3>导出审核台账</h3>
+          </div>
+          <div class="btn-row">
+            <button id="export-reviews-json-btn" type="button" class="btn btn-secondary btn-sm">导出 JSON</button>
+            <button id="export-reviews-csv-btn" type="button" class="btn btn-secondary btn-sm">导出 CSV</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: Manual Behavior Clip Collection Panel -->
+      <section id="tab-panel-collect" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-collect" hidden>
+        <div class="form-section">
+          <label class="field-label" for="collect-behavior-select">采集行为类别</label>
+          <select id="collect-behavior-select"></select>
+          <input id="collect-behavior-custom" type="text" class="mt-8" placeholder="输入自定义行为名称（如 Fighting）" hidden aria-label="自定义行为名称">
+        </div>
+
+        <div class="form-section">
+          <div class="section-label-row">
+            <h3>目标鼠 ID <span id="collect-mice-count" class="muted mono">(0 只)</span></h3>
+            <div class="mini-actions">
+              <button id="sync-orig-targets-btn" type="button" class="link-btn">恢复原目标</button>
+              <button id="clear-targets-btn" type="button" class="link-btn">清空</button>
+            </div>
+          </div>
+          <div id="collect-mouse-chips" class="mouse-chip-list" aria-label="目标鼠选择器">
+            <p class="empty-hint">载入片段后展示区间内可见轨迹</p>
+          </div>
+          <p class="helper-text">与左侧画面双向同步：点击标签或直接点击视频画面中的小鼠框即可增删目标。</p>
+        </div>
+
+        <!-- Optional Directional Participants Role Picker -->
+        <div id="participants-card" class="form-section role-card" hidden>
+          <div class="section-label-row">
+            <h3>方向性角色分配 (participants)</h3>
+            <button id="swap-roles-btn" type="button" class="link-btn">互换角色</button>
+          </div>
+          <div id="participants-fields" class="role-fields"></div>
+        </div>
+
+        <div class="form-section">
+          <div class="section-label-row">
+            <h3>采集帧区间</h3>
+            <span class="muted mono">[start 含, end 不含)</span>
+          </div>
+          <div class="frame-input-grid">
+            <label class="num-field">
+              <span>起始帧 (含)</span>
+              <input id="collect-start-input" type="number" min="0" step="1" value="0">
+            </label>
+            <label class="num-field">
+              <span>结束帧 (不含)</span>
+              <input id="collect-end-input" type="number" min="1" step="1" value="1">
+            </label>
+          </div>
+          <p id="collect-duration-preview" class="duration-preview mono">净区间 0 帧 (0.00s)</p>
+        </div>
+
+        <div class="form-section">
+          <label class="field-label" for="collect-padding-select">前后上下文填充 (padding_frames)</label>
+          <select id="collect-padding-select">
+            <option value="0" selected>0 帧精准裁剪</option>
+            <option value="15">±15 帧（约 ±0.5s 上下文）</option>
+            <option value="30">±30 帧（约 ±1.0s，匹配原包风格）</option>
+          </select>
+          <p id="collect-padded-preview" class="helper-text mono"></p>
+        </div>
+
+        <div class="form-section options-stack">
+          <label class="checkbox-line">
+            <input id="collect-include-overlay" type="checkbox" checked>
+            <span>导出目标高亮视频 (<code>clip_overlay.mp4</code>)</span>
+          </label>
+          <label class="checkbox-line">
+            <input id="collect-overwrite" type="checkbox">
+            <span>覆盖已有同名导出包 (<code>overwrite</code>)</span>
+          </label>
+        </div>
+
+        <div class="form-section">
+          <label class="field-label" for="collect-note">采集备注</label>
+          <input id="collect-note" type="text" placeholder="可选：记录行为细节或采集来源说明">
+        </div>
+
+        <div class="form-section">
+          <div id="collect-warning-box" class="inline-warn" hidden></div>
+          <button id="submit-collect-btn" type="button" class="btn btn-accent btn-block" disabled>
+            <span id="submit-collect-label">采集并导出片段</span>
+          </button>
+          <p id="collect-result-hint" class="sync-status muted"></p>
+        </div>
+
+        <!-- Exported Packages for Current Clip -->
+        <div class="form-section">
+          <div class="section-label-row">
+            <h3>当前片段已导出包</h3>
+            <button id="open-drawer-inline-btn" type="button" class="link-btn">查看全部已采集 →</button>
+          </div>
+          <div id="clip-collections-list" class="collection-card-list">
+            <p class="empty-hint">当前片段尚未手动采集导出。</p>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <!-- Slide-Over Drawer: Global Collections Manager + Batch Export -->
+  <div id="collections-drawer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside id="collections-drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
+    <div class="drawer-header">
+      <div>
+        <h2 id="drawer-title">已采集管理与批量重裁</h2>
+        <p id="drawer-output-dir" class="muted mono">输出目录：等待连接</p>
+      </div>
+      <button id="close-collections-btn" type="button" class="btn btn-ghost btn-sm" aria-label="关闭已采集管理">关闭 ✕</button>
+    </div>
+
+    <div class="drawer-toolbar">
+      <div class="btn-row">
+        <button id="refresh-collections-btn" type="button" class="btn btn-quiet btn-sm">刷新清单</button>
+        <button id="export-collections-json-btn" type="button" class="btn btn-secondary btn-sm">导出清单 JSON</button>
+        <button id="export-collections-csv-btn" type="button" class="btn btn-secondary btn-sm">导出清单 CSV</button>
+      </div>
+    </div>
+
+    <!-- Batch Export Card for needs_recrop clips with saved crop_range -->
+    <section class="batch-card" aria-label="批量导出需重裁片段">
+      <div class="batch-header">
+        <div>
+          <h3>批量采集：已标记「需重裁」且含裁剪区间片段</h3>
+          <p id="batch-eligible-summary" class="muted">检测到 0 条可批量导出的片段</p>
+        </div>
+        <button id="run-batch-collect-btn" type="button" class="btn btn-accent btn-sm" disabled>批量导出 (0)</button>
+      </div>
+      <div class="batch-options">
+        <label>
+          <span>填充</span>
+          <select id="batch-padding-select">
+            <option value="0" selected>0 帧精准</option>
+            <option value="15">±15 帧</option>
+            <option value="30">±30 帧</option>
+          </select>
+        </label>
+        <label class="checkbox-line compact">
+          <input id="batch-include-overlay" type="checkbox" checked>
+          <span>同时生成高亮视频</span>
+        </label>
+      </div>
+      <div id="batch-progress-box" class="batch-progress" hidden>
+        <div class="progress-head">
+          <span id="batch-progress-status">正在批量导出…</span>
+          <span id="batch-progress-counts" class="mono">0 / 0</span>
+        </div>
+        <div class="progress-bar-track">
+          <div id="batch-progress-bar" class="progress-bar-fill" style="width:0%"></div>
+        </div>
+        <ul id="batch-errors-list" class="batch-errors" hidden></ul>
+      </div>
+    </section>
+
+    <div class="drawer-filter-row">
+      <input id="drawer-search" type="search" placeholder="按行为、export_id 或 clip_uid 筛选已采集包…" aria-label="筛选已采集片段">
+      <span id="drawer-total-count" class="muted mono">共 0 条</span>
+    </div>
+
+    <div id="all-collections-list" class="drawer-body">
+      <p class="empty-hint">暂无手动采集导出的片段。</p>
+    </div>
+  </aside>
+
+  <!-- Keyboard Shortcuts Modal -->
+  <div id="shortcuts-modal-backdrop" class="modal-backdrop" hidden>
+    <div id="shortcuts-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="modal-header">
+        <h2 id="shortcuts-title">快捷键速查</h2>
+        <button id="close-shortcuts-btn" type="button" class="btn btn-ghost btn-sm" aria-label="关闭快捷键帮助">关闭 ✕</button>
+      </div>
+      <div class="shortcuts-grid">
+        <div>
+          <h3>播放与裁剪</h3>
+          <dl class="shortcut-list">
+            <div><dt><kbd>Space</kbd></dt><dd>播放 / 暂停</dd></div>
+            <div><dt><kbd>←</kbd> / <kbd>,</kbd></dt><dd>后退 1 帧</dd></div>
+            <div><dt><kbd>→</kbd> / <kbd>.</kbd></dt><dd>前进 1 帧</dd></div>
+            <div><dt><kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd></dt><dd>步进 ±10 帧</dd></div>
+            <div><dt><kbd>[</kbd></dt><dd>设当前帧为起始帧 (start)</dd></div>
+            <div><dt><kbd>]</kbd></dt><dd>设当前帧+1 为结束帧 (end)</dd></div>
+            <div><dt><kbd>L</kbd></dt><dd>切换裁剪区间循环预览</dd></div>
+          </dl>
+        </div>
+        <div>
+          <h3>浏览与审核</h3>
+          <dl class="shortcut-list">
+            <div><dt><kbd>J</kbd></dt><dd>上一条片段</dd></div>
+            <div><dt><kbd>K</kbd></dt><dd>下一条片段</dd></div>
+            <div><dt><kbd>1</kbd></dt><dd>审核结论：通过 (pass)</dd></div>
+            <div><dt><kbd>2</kbd></dt><dd>审核结论：驳回 (fail)</dd></div>
+            <div><dt><kbd>3</kbd></dt><dd>审核结论：需重裁 (needs_recrop)</dd></div>
+            <div><dt><kbd>S</kbd></dt><dd>保存当前审核</dd></div>
+            <div><dt><kbd>?</kbd> / <kbd>Esc</kbd></dt><dd>打开/关闭弹窗与抽屉</dd></div>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Region -->
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+
+  <noscript>
+    <div class="alert-banner alert-warning">
+      <strong>需要启用 JavaScript</strong>：小鼠行为审核与手动片段采集工作台依赖浏览器脚本渲染轨迹画布与交互控件。
+    </div>
+  </noscript>
+</body>
+</html>

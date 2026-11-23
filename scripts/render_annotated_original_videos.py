@@ -25,11 +25,13 @@ from mouse_behavior.visualization.clip_overlay_renderer import (
 from mouse_behavior.visualization.comparison_site import (
     DEFAULT_ATTACK_DIR,
     DEFAULT_CHASING_DIR,
+    DEFAULT_DISPERSAL_DIR,
     DEFAULT_EVALUATION_JSON,
     DEFAULT_GROUP_LOCOMOTION_DIR,
     DEFAULT_ISOLATION_DIR,
     DEFAULT_LOCOMOTION_DIR,
     DEFAULT_ORIG_ANNOTATED_DIR,
+    DEFAULT_SOCIAL_CLUSTERING_DIR,
     DEFAULT_STATIC_DIR,
 )
 
@@ -44,6 +46,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chasing-dir", type=Path, default=DEFAULT_CHASING_DIR)
     parser.add_argument("--isolation-dir", type=Path, default=DEFAULT_ISOLATION_DIR)
     parser.add_argument("--group-locomotion-dir", type=Path, default=DEFAULT_GROUP_LOCOMOTION_DIR)
+    parser.add_argument("--dispersal-dir", type=Path, default=DEFAULT_DISPERSAL_DIR)
+    parser.add_argument("--social-clustering-dir", type=Path, default=DEFAULT_SOCIAL_CLUSTERING_DIR)
     parser.add_argument("--static-dir", type=Path, default=DEFAULT_STATIC_DIR)
     parser.add_argument("--locomotion-dir", type=Path, default=DEFAULT_LOCOMOTION_DIR)
     parser.add_argument("--workers", type=int, default=4)
@@ -79,6 +83,8 @@ def main() -> int:
         "Chasing": args.chasing_dir,
         "Isolation": args.isolation_dir,
         "Group locomotion": args.group_locomotion_dir,
+        "Dispersal": args.dispersal_dir,
+        "Social clustering": args.social_clustering_dir,
         "Static": args.static_dir,
         "Locomotion": args.locomotion_dir,
     }

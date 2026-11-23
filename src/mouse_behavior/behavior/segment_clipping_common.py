@@ -4,21 +4,120 @@ from __future__ import annotations
 import copy
 import hashlib
 import math
+import re
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 import numpy as np
 
 from mouse_behavior.behavior.event_boundaries import EventBoundary
-from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
+from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters, LABEL_TO_CANONICAL
 
 __all__ = [
     "InMemoryTrackStore",
+    "MAX_DURATION_S_BY_BEHAVIOR",
+    "MIN_PARTICIPANTS_BY_BEHAVIOR",
     "endpoint_observations",
     "endpoints_fully_observed",
+    "event_participant_ids",
     "is_process_boundary_closed",
+    "max_duration_s_for_behavior",
+    "min_participants_for_behavior",
+    "normalize_behavior_key",
     "update_segment_bounds",
 ]
+
+MIN_PARTICIPANTS_BY_BEHAVIOR: dict[str, int] = {
+    "huddle": 3,
+    "social_clustering": 3,
+    "dispersal": 3,
+    "group_locomotion": 3,
+    "approach": 2,
+    "attack": 2,
+    "chasing": 2,
+    "head_contact": 2,
+    "tail_contact": 2,
+    "together": 2,
+    "static": 1,
+    "locomotion": 1,
+    "grooming": 1,
+    "rearing": 1,
+    "isolation": 1,
+}
+
+MAX_DURATION_S_BY_BEHAVIOR: dict[str, float] = {
+    "huddle": 15.0,
+    "dispersal": 15.0,
+}
+
+_BEHAVIOR_ALIASES: dict[str, str] = {
+    "huddle": "huddle",
+    "huddling": "huddle",
+    "social_clustering": "social_clustering",
+    "dispersal": "dispersal",
+    "dispersal_review": "dispersal",
+    "group_locomotion": "group_locomotion",
+    "approach": "approach",
+    "attack": "attack",
+    "attack_review": "attack",
+    "chasing": "chasing",
+    "chase": "chasing",
+    "head_contact": "head_contact",
+    "nose_head_contact": "head_contact",
+    "snout_head_contact": "head_contact",
+    "tail_contact": "tail_contact",
+    "nose_tail_contact": "tail_contact",
+    "snout_rear_contact": "tail_contact",
+    "snout_tail_contact": "tail_contact",
+    "together": "together",
+    "static": "static",
+    "stationary": "static",
+    "locomotion": "locomotion",
+    "grooming": "grooming",
+    "rearing": "rearing",
+    "posture_review": "rearing",
+    "isolation": "isolation",
+}
+
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])([A-Z])")
+
+
+def normalize_behavior_key(canonical_behavior: str) -> str:
+    """Normalize display or canonical behavior labels to a canonical clipping key."""
+    if not isinstance(canonical_behavior, str):
+        return ""
+    stripped = canonical_behavior.strip()
+    if not stripped:
+        return ""
+    mapped = LABEL_TO_CANONICAL.get(stripped, stripped)
+    snake = _CAMEL_BOUNDARY_RE.sub(r"_\1", mapped).lower().replace("-", "_").replace(" ", "_")
+    snake = re.sub(r"_+", "_", snake).strip("_")
+    return _BEHAVIOR_ALIASES.get(snake, snake)
+
+
+def min_participants_for_behavior(canonical_behavior: str) -> int:
+    """Return the minimum required number of distinct participants for a behavior."""
+    key = normalize_behavior_key(canonical_behavior)
+    return int(MIN_PARTICIPANTS_BY_BEHAVIOR.get(key, 1))
+
+
+def max_duration_s_for_behavior(canonical_behavior: str) -> float | None:
+    """Return the optional maximum clip duration in seconds for a behavior."""
+    key = normalize_behavior_key(canonical_behavior)
+    return MAX_DURATION_S_BY_BEHAVIOR.get(key)
+
+
+def event_participant_ids(event: Mapping[str, Any]) -> list[int]:
+    """Return sorted distinct integer participant IDs referenced by `event`."""
+    beh = normalize_behavior_key(str(event.get("canonical_behavior") or event.get("behavior") or ""))
+    if beh == "isolation" and "target_mouse_id" in event and event["target_mouse_id"] is not None:
+        return [int(event["target_mouse_id"])]
+    seen: set[int] = set()
+    for mid in event.get("mouse_ids", ()):
+        if isinstance(mid, bool):
+            continue
+        seen.add(int(mid))
+    return sorted(seen)
 
 
 class InMemoryTrackStore:
@@ -91,6 +190,24 @@ def _extract_center_px(detection: Mapping[str, Any]) -> np.ndarray | None:
     if box.shape == (4,) and np.isfinite(box).all() and (box[2:] > box[:2]).all():
         return 0.5 * (box[:2] + box[2:])
     return None
+
+
+def _extract_box_px(detection: Mapping[str, Any]) -> np.ndarray | None:
+    box = np.asarray(detection.get("box", []), dtype=float)
+    if box.shape == (4,) and np.isfinite(box).all() and (box[2:] > box[:2]).all():
+        return box
+    return None
+
+
+def _extract_keypoints_px(detection: Mapping[str, Any]) -> np.ndarray | None:
+    """Return (7, 2) export-ordered keypoints in pixels with invalid points set to NaN."""
+    points = np.asarray(detection.get("keypoints", []), dtype=float)
+    if points.shape != (7, 3):
+        return None
+    xy = points[:, :2].copy()
+    valid = np.isfinite(xy).all(axis=1) & np.isfinite(points[:, 2]) & (points[:, 2] >= 0.25)
+    xy[~valid] = np.nan
+    return xy if valid.any() else None
 
 
 def _resolve_scale_cm_per_px(
@@ -172,22 +289,61 @@ def _clip_dense_track_series(
     scale_cm_per_px: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build frame-indexed (span, 1, 2) centers_cm and (span, 1) observed arrays."""
+    centers_cm, observed = _clip_multi_track_series(rows, start, end, [target_id], scale_cm_per_px)
+    return centers_cm, observed
+
+
+def _clip_multi_track_series(
+    rows: Sequence[Mapping[str, Any]],
+    start: int,
+    end: int,
+    target_ids: Sequence[int],
+    scale_cm_per_px: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build frame-indexed (span, k, 2) centers_cm and (span, k) observed arrays."""
     span = max(0, end - start)
-    centers_cm = np.full((span, 1, 2), np.nan, dtype=float)
-    observed = np.zeros((span, 1), dtype=bool)
+    k = len(target_ids)
+    centers_cm = np.full((span, k, 2), np.nan, dtype=float)
+    observed = np.zeros((span, k), dtype=bool)
+    id_to_col = {int(mid): col for col, mid in enumerate(target_ids)}
     for idx, row in enumerate(rows):
         raw_frame = row.get("frame", row.get("source_frame"))
         rel = int(raw_frame) - start if raw_frame is not None else idx
         if not (0 <= rel < span):
             continue
         dmap = _detection_map(row)
-        if target_id not in dmap:
-            continue
-        c = _extract_center_px(dmap[target_id])
-        if c is not None:
-            centers_cm[rel, 0] = c * scale_cm_per_px
-            observed[rel, 0] = True
+        for mid, col in id_to_col.items():
+            if mid not in dmap:
+                continue
+            c = _extract_center_px(dmap[mid])
+            if c is not None:
+                centers_cm[rel, col] = c * scale_cm_per_px
+                observed[rel, col] = True
     return centers_cm, observed
+
+
+def _observed_run_velocity_cm_s(
+    centers_cm: np.ndarray,
+    observed: np.ndarray,
+    fps: float,
+    motion_window_s: float = 0.3,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute smoothed centers, velocity (cm/s), and speed (cm/s) inside observed runs only."""
+    from mouse_behavior.evaluation.screening_signals import ScreenPolicy, observed_run_motion, runs
+
+    n_frames, n_tracks, _ = centers_cm.shape
+    smoothed = np.full_like(centers_cm, np.nan, dtype=float)
+    velocity = np.full_like(centers_cm, np.nan, dtype=float)
+    speed = np.full((n_frames, n_tracks), np.nan, dtype=float)
+    policy = ScreenPolicy(motion_window_s=float(motion_window_s))
+    for col in range(n_tracks):
+        known = observed[:, col] & np.isfinite(centers_cm[:, col]).all(axis=1)
+        for low, high in runs(known):
+            sm, vel, spd = observed_run_motion(centers_cm[low:high, col], float(fps), policy)
+            smoothed[low:high, col] = sm
+            velocity[low:high, col] = vel
+            speed[low:high, col] = spd
+    return smoothed, velocity, speed
 
 
 def _observed_support_intervals(observed_slice: np.ndarray, abs_start: int) -> list[list[int]]:

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>行为识别 · 错误样本复核</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div><p class="eyebrow">MOUSE BEHAVIOR REVIEW</p><h1>行为识别 · 错误样本复核</h1><p class="subtitle">按标注目标 ID 检查视频与评测证据</p></div>
+    <div class="cohort-control"><label for="cohort">评测数据集</label><select id="cohort"><option value="B">B · 605 个样本</option><option value="A">A 数据集</option><option value="union">A ∪ B · 去重合并</option></select></div>
+  </header>
+  <div id="source-warning" class="notice warning" role="status" hidden></div>
+  <div id="catalogue-state" class="notice" role="status"><span id="catalogue-message">正在读取评测记录…</span><button id="retry-catalogue" class="quiet-button" hidden>重新加载</button></div>
+  <div class="workspace">
+    <aside class="behavior-sidebar" aria-label="行为分类">
+      <div class="sidebar-heading"><h2>行为分类</h2><span id="behavior-count" class="muted">15 类</span></div>
+      <div class="cohort-summary"><span class="metric-label">主准确率</span><strong id="overall-accuracy">—</strong><p id="overall-counts">等待评测记录</p></div>
+      <nav id="behavior-nav" aria-label="选择行为"><p class="muted nav-placeholder">加载后可按行为浏览样本。</p></nav>
+    </aside>
+    <main>
+      <section class="section-heading"><div><p class="eyebrow">样本复核</p><h2 id="current-behavior">扎堆 · Huddling</h2><p id="behavior-summary" class="muted">正在读取该行为的评测结果</p></div><div class="heading-metric"><span>该行为主准确率</span><strong id="behavior-accuracy">—</strong></div></section>
+      <section class="filters" aria-label="筛选样本">
+        <div class="filter-group"><label for="status-filter">评测结果</label><select id="status-filter"><option value="failed">仅错误样本</option><option value="passed">仅正确样本</option><option value="all">全部样本</option></select></div>
+        <div class="filter-group"><label for="reason-filter">错误原因</label><select id="reason-filter"><option value="all">全部原因</option></select></div>
+        <div class="filter-group search-group"><label for="search">搜索片段 / 标注 ID</label><input id="search" type="search" placeholder="输入片段编号或目标 ID" autocomplete="off"></div>
+      </section>
+      <div class="review-grid">
+        <section class="sample-panel" aria-label="样本列表"><div class="panel-heading"><h3>样本列表</h3><span id="result-count" class="muted">—</span></div><div id="sample-list" class="sample-list"><p class="empty-message">评测记录加载后显示样本。</p></div><div id="list-empty" class="empty-message" hidden><strong>当前筛选下没有样本</strong><p id="empty-explanation">可调整筛选条件。</p><button id="show-all" class="quiet-button">查看全部样本</button></div></section>
+        <section class="review-panel" aria-label="视频与样本证据">
+          <div class="panel-heading review-heading"><div><h3 id="clip-title">选择一个样本</h3><p id="clip-subtitle" class="muted">视频将按标注目标 ID 高亮</p></div><div class="sample-pagination"><button id="previous" class="icon-button" aria-label="上一个样本" disabled>←</button><span id="sample-position">—</span><button id="next" class="icon-button" aria-label="下一个样本" disabled>→</button></div></div>
+          <div id="detail-state" class="notice detail-state" role="status"><span id="detail-message">从左侧选择样本开始复核。</span><button id="retry-detail" class="quiet-button" hidden>重试此样本</button></div>
+          <div id="video-shell" class="video-shell"><div id="video-stage" class="video-stage"><video id="video" controls playsinline preload="metadata" aria-label="样本视频"></video><canvas id="overlay" aria-hidden="true"></canvas><div id="video-placeholder" class="video-placeholder">视频预览</div></div></div>
+          <div class="video-tools"><div class="tool-group"><button id="frame-back" class="quiet-button" title="后退一帧" disabled>−1 帧</button><button id="frame-forward" class="quiet-button" title="前进一帧" disabled>+1 帧</button><label for="playback-rate">速度</label><select id="playback-rate" aria-label="播放速度"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select><button id="fullscreen" class="quiet-button" disabled>全屏</button></div><span id="frame-position" class="frame-position">帧 — / —</span></div>
+          <div class="overlay-options" aria-label="高亮设置"><label><input id="show-targets" type="checkbox" checked><span class="legend-dot target"></span>标注目标</label><label><input id="show-candidates" type="checkbox" checked><span class="legend-dot candidate"></span>其他候选 ID</label><label><input id="show-others" type="checkbox"><span class="legend-dot other"></span>其他轨迹</label></div>
+          <div class="frame-evidence"><span id="visible-targets">当前帧可见目标：—</span><span id="missing-targets">缺失目标：—</span></div>
+          <div id="clip-evidence" class="clip-evidence" hidden>
+            <div class="result-heading"><span id="result-badge" class="result-badge"></span><h4 id="reason-title"></h4></div><p id="reason-detail" class="reason-detail"></p>
+            <dl class="identity-grid"><div><dt>标注目标 ID</dt><dd id="target-ids"></dd></div><div><dt>最佳候选组 ID</dt><dd id="candidate-ids"></dd></div><div><dt>标注目标行为覆盖</dt><dd id="target-coverage"></dd></div><div><dt>最佳候选组覆盖</dt><dd id="candidate-coverage"></dd></div></dl>
+            <p id="classification-note" class="evidence-note"></p>
+            <details open><summary>目标轨迹可见情况</summary><p class="evidence-note">仅显示实际观测；缺失帧不插值、不补框。</p><div class="table-scroll"><table><thead><tr><th>标注 ID</th><th>观测帧数</th><th>观测比例</th><th>首帧—末帧</th></tr></thead><tbody id="observation-rows"></tbody></table></div></details>
+            <details id="huddle-section" hidden><summary>扎堆判定证据</summary><div id="huddle-evidence" class="gate-summary"></div><div class="table-scroll"><table><thead><tr><th>ID</th><th>实际观测</th><th>保持覆盖</th><th>首—末帧</th></tr></thead><tbody id="huddle-rows"></tbody></table></div></details>
+            <details><summary>候选行为证据与原始记录</summary><p class="evidence-note">候选证据，非准确率。其他 ID 的候选行为不等于标注目标被误判为该行为。</p><div id="candidate-scores" class="score-list"></div><dl class="record-metadata"><dt>评测预测记录</dt><dd id="prediction-text"></dd><dt>样本来源</dt><dd id="source-video"></dd><dt>记录 ID</dt><dd id="record-id"></dd></dl></details>
+          </div>
+        </section>
+      </div>
+      <footer><p>本页展示已保存的评测记录，不是实时推理。高亮 ID 来自样本标注；visual ID 不表示稳定动物身份。</p><p id="provenance">来源信息读取中。</p></footer>
+    </main>
+  </div>
+  <noscript><div class="notice warning">浏览样本和视频证据需要启用 JavaScript。</div></noscript>
+</body>
+</html>

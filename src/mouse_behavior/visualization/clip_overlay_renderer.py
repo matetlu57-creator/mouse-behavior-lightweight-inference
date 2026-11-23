@@ -24,8 +24,11 @@ ROLE_COLORS: dict[str, tuple[int, int, int]] = {
     "Locomotion": (60, 210, 100),    # Emerald
     "Isolation": (255, 180, 20),     # Cyan-Amber
     "Isolated": (255, 180, 20),      # Cyan-Amber
-    "Group locomotion": (20, 140, 255),  # Bright Orange
-    "Group Locomotion": (20, 140, 255),  # Bright Orange
+    "Group locomotion": (20, 140, 255),   # Bright Orange
+    "Group Locomotion": (20, 140, 255),   # Bright Orange
+    "Dispersal": (215, 95, 240),          # Bright Magenta-Rose
+    "Social clustering": (190, 220, 40),  # Bright Teal-Cyan
+    "Social Clustering": (190, 220, 40),  # Bright Teal-Cyan
 }
 NON_TARGET_COLOR: tuple[int, int, int] = (150, 150, 150)
 
@@ -128,6 +131,8 @@ def _draw_detection_boxes(
             beh_role = "Isolated"
         elif behavior == "Group locomotion":
             beh_role = "Group Locomotion"
+        elif behavior == "Social clustering":
+            beh_role = "Social Clustering"
         else:
             beh_role = behavior
 
@@ -273,7 +278,17 @@ def render_cropped_comparison_video(
                             scale=scale,
                             thick=thick,
                             min_tag_y=banner_h + 4,
-                            non_target_role="Conspecific" if gt_behavior in {"Isolation", "Group locomotion", "Static", "Locomotion"} else None,
+                            non_target_role="Conspecific"
+                            if gt_behavior
+                            in {
+                                "Isolation",
+                                "Group locomotion",
+                                "Dispersal",
+                                "Social clustering",
+                                "Static",
+                                "Locomotion",
+                            }
+                            else None,
                         )
 
                     writer.write(frame)

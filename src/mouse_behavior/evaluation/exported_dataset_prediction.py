@@ -48,6 +48,7 @@ def predict_features(
     *,
     temporal_only: bool = False,
     social_config: SocialHeuristicConfig = DEFAULT_SOCIAL_HEURISTIC_CONFIG,
+    enable_posture_screen: bool = False,
 ) -> dict[str, Any]:
     """Infer behavior evidence for every visible ID without consulting annotations.
 
@@ -84,16 +85,18 @@ def predict_features(
         static_transient_max_s=parameters.stationary_transient_max_duration_s,
         static_transient_max_displacement_cm=parameters.stationary_transient_max_displacement_cm,
         locomotion_pause_max_s=parameters.locomotion_stop_gap_s,
+        enable_posture_screen=enable_posture_screen,
     )
     individual = individual_rule_masks(
         features.centers_cm, valid, fps,
         keypoints_cm=features.collective_keypoints_cm,
+        boxes_cm=features.collective_boxes_cm if enable_posture_screen else None,
         reference_body_cm=features.reference_body_cm,
         config=individual_config,
     )
     locomotion = individual.masks['locomotion']
     for behavior, mask in individual.masks.items():
-        if behavior in SUSPENDED_POSTURE_BEHAVIORS:
+        if behavior in SUSPENDED_POSTURE_BEHAVIORS and not enable_posture_screen:
             continue
         durations = _durations_by_column(mask, fps)
         minimum = getattr(individual_config, {
@@ -336,7 +339,7 @@ def predict_features(
         key = _pair_key(track_ids[int(left_slot)], track_ids[int(right_slot)])
         attack_score = _qualifying_score(
             attack_durations[pair_index],
-            (parameters.attack_min_event_duration_s
+            (social_config.attack_min_duration_s
              if parameters.confirmed_rules_v1 > 0
              else parameters.pair_min_duration_s),
             fps,
@@ -374,7 +377,11 @@ def predict_features(
                         )
         values = {
             "approach": _qualifying_score(
-                approach_durations[pair_index], parameters.pair_min_duration_s, fps
+                approach_durations[pair_index],
+                (social_config.approach_min_duration_s
+                 if parameters.confirmed_rules_v1 > 0
+                 else parameters.pair_min_duration_s),
+                fps,
             ),
             "attack": attack_score,
             "nose_head_contact": _qualifying_score(
@@ -384,11 +391,15 @@ def predict_features(
                 nose_tail_cumulative[pair_index], parameters.contact_min_cumulative_seconds, fps
             ),
             "together": _qualifying_score(
-                together_durations[pair_index], parameters.together_min_duration_s, fps
+                together_durations[pair_index],
+                (social_config.together_min_duration_s
+                 if parameters.confirmed_rules_v1 > 0
+                 else parameters.together_min_duration_s),
+                fps,
             ),
             "chase": _qualifying_score(
                 chasing_durations[pair_index],
-                (parameters.chase_min_directed_support_s
+                (social_config.chasing_min_duration_s
                  if parameters.confirmed_rules_v1 > 0
                  else parameters.chase_min_duration_s),
                 fps,
@@ -957,8 +968,8 @@ def predict_features(
                 values = identity_scores[track_id]
                 values[behavior] = max(values[behavior], score)
 
-    # Keep taxonomy slots for historical readers; suspended posture scores stay
-    # zero and cannot become detected labels before manual review/calibration.
+    # Retain taxonomy slots when posture is disabled; explicit calibrated runs
+    # carry their posture evidence through the same blind candidate selection.
     scores: dict[str, float] = {
         behavior: 0.0 for behavior in CANONICAL_BEHAVIORS
     }
@@ -971,7 +982,7 @@ def predict_features(
     detected = sorted(behavior for behavior, score in scores.items() if score > 0.0)
 
     return {
-        "suspended_posture_behaviors": sorted(SUSPENDED_POSTURE_BEHAVIORS),
+        "suspended_posture_behaviors": [] if enable_posture_screen else sorted(SUSPENDED_POSTURE_BEHAVIORS),
         "detected": detected,
         "scores": {key: float(value) for key, value in scores.items()},
         "track_ids": track_ids,

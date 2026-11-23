@@ -1,4 +1,4 @@
-"""Individual-layer behavior segment clipping (Static, Locomotion, Rearing)."""
+"""Individual-layer behavior segment clipping (Static, Locomotion, Rearing, Grooming)."""
 from __future__ import annotations
 
 import copy
@@ -11,15 +11,19 @@ from mouse_behavior.behavior.duration_policy import qualify_event_duration
 from mouse_behavior.behavior.segment_clipping_common import (
     _clip_dense_track_series,
     _detection_map,
+    _extract_box_px,
+    _extract_keypoints_px,
     _observed_support_intervals,
     _resolve_fps,
     _resolve_parameters,
     _resolve_scale_cm_per_px,
+    normalize_behavior_key,
     update_segment_bounds,
 )
 from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
 
 __all__ = [
+    "refine_grooming_segments",
     "refine_locomotion_segments",
     "refine_rearing_segments",
     "refine_static_segments",
@@ -498,6 +502,156 @@ def refine_locomotion_segments(
             cropped["canonical_support_frame_intervals"] = supp_intervals
             cropped["canonical_support_frame_count"] = sum(e - s for s, e in supp_intervals)
 
+            if qualify_event_duration(cropped, fps, parameters=params)["ok"]:
+                refined.append(cropped)
+
+    return refined
+
+
+def refine_grooming_segments(
+    events: Sequence[Mapping[str, Any]],
+    store: Any,
+    binding: Mapping[str, Any] | None = None,
+    *,
+    scale: Mapping[str, Any] | None = None,
+    parameters: HeuristicParameters | None = None,
+    min_duration_s: float = 0.3,
+    max_center_speed_cm_s: float = 6.0,
+) -> list[dict[str, Any]]:
+    """Fine-crop grooming segments so clips stay centered on genuine grooming support."""
+    from mouse_behavior.behavior.individual_rules import (
+        IndividualHeuristicConfig,
+        _bridge_gaps,
+        _runs,
+        individual_rule_masks,
+    )
+
+    fps = _resolve_fps(binding)
+    params = _resolve_parameters(binding, parameters)
+    ref_body_cm = 7.918
+    if isinstance(scale, Mapping) and scale.get("reference_body_cm"):
+        ref_body_cm = float(scale["reference_body_cm"])
+
+    refined: list[dict[str, Any]] = []
+    for event in events:
+        c_beh = normalize_behavior_key(str(event.get("canonical_behavior") or event.get("behavior") or ""))
+        if c_beh != "grooming":
+            refined.append(copy.deepcopy(dict(event)))
+            continue
+
+        start = int(event["start_frame"])
+        end = int(event["end_frame"])
+        mids = [int(m) for m in event.get("mouse_ids", ())]
+        if len(mids) == 0 or end <= start:
+            continue
+        if len(set(mids)) > 1 and "target_mouse_id" not in event:
+            continue
+        target_id = int(event.get("target_mouse_id", mids[0]))
+
+        rows = list(store.rows(start, end))
+        if not rows:
+            continue
+
+        cm_per_px = _resolve_scale_cm_per_px(rows, [target_id], binding, scale=scale)
+        centers_cm, observed = _clip_dense_track_series(rows, start, end, target_id, cm_per_px)
+        span = end - start
+        if int(observed.sum()) < 2 or span <= 0:
+            continue
+
+        keypoints_cm = np.full((span, 1, 7, 2), np.nan, dtype=float)
+        boxes_cm = np.full((span, 1, 4), np.nan, dtype=float)
+        has_any_kp = False
+        has_any_box = False
+        for idx, row in enumerate(rows):
+            raw_frame = row.get("frame", row.get("source_frame"))
+            rel = int(raw_frame) - start if raw_frame is not None else idx
+            if not (0 <= rel < span):
+                continue
+            det = _detection_map(row).get(target_id)
+            if det is None:
+                continue
+            kps = _extract_keypoints_px(det)
+            if kps is not None:
+                # Reorder export [nose, r_ear, l_ear, neck, l_hip, r_hip, tail] -> internal
+                keypoints_cm[rel, 0] = kps[[0, 2, 1, 3, 4, 5, 6]] * cm_per_px
+                has_any_kp = True
+            box = _extract_box_px(det)
+            if box is not None:
+                boxes_cm[rel, 0] = box * cm_per_px
+                has_any_box = True
+
+        cfg = IndividualHeuristicConfig(
+            grooming_min_duration_s=float(min_duration_s),
+            enable_posture_screen=True,
+        )
+        res = individual_rule_masks(
+            centers_cm,
+            observed,
+            fps,
+            keypoints_cm=keypoints_cm if has_any_kp else None,
+            boxes_cm=boxes_cm if has_any_box else None,
+            reference_body_cm=ref_body_cm,
+            config=cfg,
+        )
+        groom_mask = res.masks["grooming"][:, 0]
+        loco_mask = res.masks["locomotion"][:, 0]
+        spd = res.diagnostics.get("body_speed_cm_s", np.full((span, 1), np.nan))[:, 0]
+        low_motion = observed[:, 0] & (~loco_mask) & (~np.isfinite(spd) | (spd <= max_center_speed_cm_s))
+
+        if groom_mask.any():
+            support_mask = groom_mask.copy()
+        else:
+            raw_supp = event.get("canonical_support_frame_intervals")
+            if isinstance(raw_supp, list) and raw_supp:
+                declared = np.zeros(span, dtype=bool)
+                for iv in raw_supp:
+                    a = max(0, int(iv[0]) - start)
+                    b = min(span, int(iv[1]) - start)
+                    if a < b:
+                        declared[a:b] = True
+                support_mask = declared & low_motion
+            elif has_any_kp:
+                head_rel_spd = res.diagnostics.get("head_relative_speed_cm_s", np.full((span, 1), np.nan))[:, 0]
+                step_nose = res.diagnostics.get("grooming_step_nose_speed_cm_s", np.full((span, 1), np.nan))[:, 0]
+                proj = res.diagnostics.get("projection_cm", np.full((span, 1), np.nan))[:, 0]
+                head_active = (
+                    (np.isfinite(head_rel_spd) & (head_rel_spd >= 0.35 * ref_body_cm))
+                    | (np.isfinite(step_nose) & (step_nose >= 0.35 * ref_body_cm))
+                )
+                curled = np.isfinite(proj) & (proj <= 0.90 * ref_body_cm)
+                support_mask = low_motion & (head_active | curled)
+            else:
+                support_mask = np.zeros(span, dtype=bool)
+
+            if support_mask.any():
+                bridge_frames = max(0, int(round(cfg.grooming_bridge_max_s * fps)))
+                bridged, _ = _bridge_gaps(support_mask[:, None], bridge_frames)
+                support_mask = bridged[:, 0] & (low_motion | ~observed[:, 0])
+
+        if not support_mask.any():
+            continue
+
+        min_req_s = float(min_duration_s)
+        if event.get("posture_engine") == "v3_decoupled":
+            from mouse_behavior.behavior.posture_rules import DEFAULT_GROOMING_TEMPORAL
+
+            min_req_s = max(min_req_s, float(DEFAULT_GROOMING_TEMPORAL.min_duration_s))
+
+        for rel_s, rel_e in _runs(support_mask):
+            obs_sub = np.flatnonzero(observed[rel_s:rel_e, 0])
+            if len(obs_sub) < 2:
+                continue
+            true_s = start + rel_s + int(obs_sub[0])
+            true_e = start + rel_s + int(obs_sub[-1]) + 1
+            if (true_e - true_s) / fps + 1e-9 < min_req_s:
+                continue
+            cropped = update_segment_bounds(event, true_s, true_e, fps, suffix="grooming_crop")
+            supp_slice = support_mask[true_s - start : true_e - start] & observed[true_s - start : true_e - start, 0]
+            supp_intervals = _observed_support_intervals(supp_slice, true_s)
+            if not supp_intervals:
+                continue
+            cropped["canonical_support_frame_intervals"] = supp_intervals
+            cropped["canonical_support_frame_count"] = sum(b - a for a, b in supp_intervals)
             if qualify_event_duration(cropped, fps, parameters=params)["ok"]:
                 refined.append(cropped)
 

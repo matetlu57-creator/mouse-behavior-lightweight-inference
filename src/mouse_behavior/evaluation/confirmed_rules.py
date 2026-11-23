@@ -30,7 +30,7 @@ from .pair_roles import (
 )
 from .social_event_geometry import (
     body_footprint_distances, endpoint_distances, observed_path_and_net, snout_surface_distances,
-    directed_snout_body_footprint_distances, observed_body_separation,
+    directed_snout_body_footprint_distances, observed_body_separation, filter_optional_kwargs,
 )
 
 
@@ -103,7 +103,36 @@ def policy_receipt(
         "standalone_contact": f"independent directed measured onset: head<={social_config.contact_head_onset_distance_cm}cm, tail<={social_config.contact_tail_onset_distance_cm}cm; baseline continuation head<={social_config.dist_nose_head_contact_max_cm}cm for>={social_config.nose_contact_min_duration_s}s, tail<={social_config.dist_nose_tail_contact_max_cm}cm for>={social_config.nose_tail_min_duration_s}s; head unknown bridge<={social_config.contact_bridge_max_gap_s}s, tail<={social_config.contact_tail_bridge_max_gap_s}s; short strictly observed nearest-endpoint channels: head<={social_config.contact_head_extension_distance_cm}cm for>={social_config.contact_head_extension_min_duration_s}s, tail<={social_config.contact_tail_extension_distance_cm}cm for>={social_config.contact_tail_extension_min_duration_s}s; each channel rechecks its own measured support after priority; qualified Together and sustained directed Chase exclude contact; head/tail lowest priorities; over15s review flag",
         "chase": "jointly visible measured actor/target motion and sustained front-back pursuit, including existing bounded0.5s observed leader-turn path; actual neck-to-nose head and tailroot-to-neck body directions support roles, never legacy velocity-fallback heading; observed incompatible facing splits except bounded interior0.5s pose-only turns with continuous pursuit motion, whose contradictory rows keep unknown roles; eligible observed support>=1s and adjacent observed path/net>=10.7cm for both; missing rows never positive frames/time/travel or roles; a qualified chase can reclaim Approach/Chasing and lower-priority contact occupancy after original six-way arbitration, preserving selected Attack/Together; lower-priority contacts cannot reserve its remainder and block the full directed process",
         "approach": "actor moves toward partner and mutual distance shrinks; stationary, lateral or receding target allowed without target-path or relative-speed gates; measured head/body facing caps use full755 retrospective p99 support envelopes; missing measured head may retain an undirected closing candidate but never obtains a role from velocity; observed reversed pose is not positive direction; start>=12cm at first measured directed anchor in bounded lag lookback; >=80percent candidate-prefix validity and duration>=0.3s with existing exact-final-frame fitted snout-surface envelope; sustained qualified Chase reclaims overlap while preserving Attack/Together and superseding lower-priority contacts",
-        "together": f"center strictly<{social_config.dist_together_max_cm}cm AND each participant center speed strictly<{social_config.vel_together_max_cm_s}cm/s, symmetric independent AND; smoothed_speed={social_config.together_use_smoothed_speed}; continuous>=1s; bounded unknown gaps<=0.15s; no contact veto; Approach wins",
+        "together": (
+            f"center strictly<{social_config.dist_together_max_cm}cm AND each participant center speed "
+            f"strictly<{social_config.vel_together_max_cm_s}cm/s, symmetric independent AND; "
+            f"smoothed_speed={social_config.together_use_smoothed_speed}; "
+            + (
+                "continuous>=1s; bounded unknown gaps<=0.15s; no contact veto; Approach wins"
+                if social_config == DEFAULT_SOCIAL_HEURISTIC_CONFIG
+                else (
+                    f"continuous>={social_config.together_min_duration_s:g}s; "
+                    f"bounded unknown gaps<={social_config.together_bridge_max_gap_s:g}s; "
+                    f"no contact veto; priority_order={','.join(social_config.priority_order)}"
+                    + (
+                        f"; wide_branch: center<{social_config.together_wide_max_distance_cm:g}cm "
+                        f"AND each smoothed_speed<{social_config.vel_together_max_cm_s if social_config.together_wide_max_speed_cm_s is None else social_config.together_wide_max_speed_cm_s:g}cm/s "
+                        f"AND body_gap>={social_config.together_wide_min_body_gap_cm:g}cm "
+                        + (
+                            f"AND endpoint_gap>={social_config.together_wide_min_endpoint_gap_cm:g}cm "
+                            if social_config.together_wide_min_endpoint_gap_cm > 0.0
+                            else ""
+                        )
+                        + f"(footprint_span<={social_config.together_wide_max_footprint_body_lengths:g}bw)"
+                        if (
+                            social_config.together_wide_max_distance_cm is not None
+                            and social_config.together_wide_max_distance_cm > social_config.dist_together_max_cm
+                        )
+                        else ""
+                    )
+                )
+            )
+        ),
     }
     groups = {
         "huddling": f"at_least3 observed visual IDs; connected graph center<={DEFAULT_GROUP_HEURISTIC_CONFIG.huddle_neighbor_distance_cm}cm OR nose<=4.0125cm; compact support>=5s; quiet last observed in-pile member held<=5s without reappearance; observed departure or moving pile ends hold; raw missing rows preserved",
@@ -309,9 +338,14 @@ def social_profiles(
 def _toward_cosine(vector: np.ndarray, offset: np.ndarray) -> np.ndarray:
     vector = np.asarray(vector, float)
     offset = np.asarray(offset, float)
-    denominator = np.linalg.norm(vector, axis=1) * np.linalg.norm(offset, axis=1)
+    if vector.ndim == 2 and offset.ndim == 2 and vector.shape[1] == 2 and offset.shape[1] == 2:
+        denominator = np.hypot(vector[:, 0], vector[:, 1]) * np.hypot(offset[:, 0], offset[:, 1])
+        dot = vector[:, 0] * offset[:, 0] + vector[:, 1] * offset[:, 1]
+    else:
+        denominator = np.linalg.norm(vector, axis=1) * np.linalg.norm(offset, axis=1)
+        dot = np.sum(vector * offset, axis=1)
     cosine = np.divide(
-        np.sum(vector * offset, axis=1), denominator,
+        dot, denominator,
         out=np.full(len(vector), -np.inf), where=denominator > 1e-9,
     )
     return np.clip(cosine, -1.0, 1.0)
@@ -795,12 +829,44 @@ def _coherent_observed_attack_action(
     return _single_bout_mask(result, f.fps, social_config.attack_min_duration_s)
 
 
+def _edge_endpoint_distances(
+    f: ExportedFeatures, edge: int, endpoint: str, geom_cache: dict | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if geom_cache is None:
+        return endpoint_distances(f, edge, endpoint)
+    key = ("endpoint", edge, endpoint)
+    if key not in geom_cache:
+        geom_cache[key] = endpoint_distances(
+            f,
+            edge,
+            endpoint,
+            **filter_optional_kwargs(endpoint_distances, {"_geom_cache": geom_cache}),
+        )
+    return geom_cache[key]
+
+
+def _edge_snout_surface_distances(
+    f: ExportedFeatures, edge: int, geom_cache: dict | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if geom_cache is None:
+        return snout_surface_distances(f, edge)
+    key = ("surface", edge)
+    if key not in geom_cache:
+        geom_cache[key] = snout_surface_distances(
+            f,
+            edge,
+            **filter_optional_kwargs(snout_surface_distances, {"_geom_cache": geom_cache}),
+        )
+    return geom_cache[key]
+
+
 def _attack_action_mask(
     f: ExportedFeatures, edge: int,
     social_config: SocialHeuristicConfig = DEFAULT_SOCIAL_HEURISTIC_CONFIG,
     *, point_kinematics: dict | None = None, channels: dict | None = None,
     allow_contact_rescue: bool = True, proximity_mask: np.ndarray | None = None,
     allow_observed_attack_extension: bool = True,
+    geom_cache: dict | None = None,
 ) -> np.ndarray:
     """Light: measured directed nose/head acceleration with both IDs visible.
 
@@ -830,6 +896,11 @@ def _attack_action_mask(
         gap = body_footprint_distances(
             f, edge, max_body_lengths=social_config.attack_contact_max_footprint_body_lengths,
             frame_mask=visible & ~near,
+            **(
+                filter_optional_kwargs(body_footprint_distances, {"_geom_cache": geom_cache})
+                if geom_cache is not None
+                else {}
+            ),
         )
         contact = visible & np.isfinite(gap) & (gap <= social_config.attack_contact_surface_max_gap_cm)
         candidate_channels = {}
@@ -865,7 +936,7 @@ def _attack_action_mask(
         # Tail-follow pursuit check to suppress chasing false positives in strike channel
         suppress_mask = np.zeros(len(f.valid), bool)
         if f.heading_unit is not None:
-            tail = endpoint_distances(f, edge, "tail")
+            tail = _edge_endpoint_distances(f, edge, "tail", geom_cache)
             aligned_cosine = float(np.cos(np.deg2rad(social_config.attack_tail_follow_max_heading_angle_deg)))
             for direction, (actor, target) in enumerate(((left, right), (right, left))):
                 directed_tail = tail[direction]
@@ -1074,6 +1145,8 @@ def _open_approach_mask(
     social_config: SocialHeuristicConfig = DEFAULT_SOCIAL_HEURISTIC_CONFIG,
     *, direction_evidence: dict | None = None,
     retained_mask: np.ndarray | None = None,
+    orientation=None,
+    geom_cache: dict | None = None,
 ) -> np.ndarray:
     """Directed closing ending before observed projected body contact.
 
@@ -1102,7 +1175,13 @@ def _open_approach_mask(
         raise ValueError("retained Approach support must match the frame axis")
     if social_config.approach_require_no_body_contact:
         separated = observed_body_separation(
-            f, edge, max_body_lengths=social_config.approach_max_footprint_body_lengths)
+            f, edge, max_body_lengths=social_config.approach_max_footprint_body_lengths,
+            **(
+                filter_optional_kwargs(observed_body_separation, {"_geom_cache": geom_cache})
+                if geom_cache is not None
+                else {}
+            ),
+        )
         retained = retained & separated
     span_start = np.maximum.accumulate(np.where(~retained, np.arange(len(visible)) + 1, 0))
     distance = np.asarray(f.pair_distance_cm[:, edge], float)
@@ -1117,8 +1196,9 @@ def _open_approach_mask(
         difference = np.full(len(earlier), np.nan)
         np.subtract(earlier, later, out=difference, where=measured)
         closing[lag:] = difference * f.fps / lag > social_config.approach_min_closing_speed_cm_s
-    surfaces = snout_surface_distances(f, edge)
-    orientation = observed_orientations(f)
+    surfaces = _edge_snout_surface_distances(f, edge, geom_cache)
+    if orientation is None:
+        orientation = observed_orientations(f)
     ratio = social_config.approach_window_min_valid_ratio
     for direction, (actor, target) in enumerate(((left, right), (right, left))):
         surface_raw = np.where(retained, np.asarray(surfaces[direction], float), np.nan)
@@ -1290,6 +1370,7 @@ def _chase_mask(
     social_config: SocialHeuristicConfig = DEFAULT_SOCIAL_HEURISTIC_CONFIG,
     *, measured_motion: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     direction_evidence: dict | None = None,
+    orientation=None,
 ) -> np.ndarray:
     """Constrain pursuit only with jointly visible measured body motion."""
     result = np.zeros(len(f.valid), dtype=bool)
@@ -1310,19 +1391,20 @@ def _chase_mask(
                     & np.isfinite(speed[:, [left, right]]).all(axis=1)
                     & np.isfinite(f.centers_cm[:, [left, right]]).all(axis=(1, 2)))
     direction_cosine_min = float(np.cos(np.deg2rad(social_config.angle_chasing_dir_max_deg)))
-    orientation = observed_orientations(f)
+    if orientation is None:
+        orientation = observed_orientations(f)
     for direction, (actor, target) in enumerate(((left, right), (right, left))):
-        direction_cosine = _pursuit_direction_cosine(f, actor, target, social_config)
-        base_motion_support = (
-            motion_known
-            & (speed[:, actor] >= social_config.vel_chasing_min_cm_s)
-            & (speed[:, target] >= social_config.vel_chasing_target_min_cm_s)
-            & (direction_cosine >= direction_cosine_min)
-        )
         high_speed = (
             motion_known
             & (speed[:, actor] >= social_config.vel_chasing_min_cm_s)
             & (speed[:, target] >= social_config.vel_chasing_target_min_cm_s)
+        )
+        if not high_speed.any():
+            continue
+        direction_cosine = _pursuit_direction_cosine(f, actor, target, social_config)
+        base_motion_support = (
+            high_speed
+            & (direction_cosine >= direction_cosine_min)
         )
         bridged_motion_support = _bridge_internal_gaps(
             base_motion_support, high_speed, f.fps, maximum_gap_s=0.15, unknown=high_speed,
@@ -1364,6 +1446,9 @@ def _base_pair_rule_masks(
     social_config: SocialHeuristicConfig = DEFAULT_SOCIAL_HEURISTIC_CONFIG,
     *, allow_observed_attack_extension: bool = True, diagnostics: dict | None = None,
     role_evidence: dict | None = None,
+    geom_cache: dict | None = None,
+    orientation=None,
+    edge_subset: set[int] | None = None,
 ) -> dict[str, np.ndarray]:
     """Build six independent candidates, then resolve their temporal overlaps.
 
@@ -1416,27 +1501,42 @@ def _base_pair_rule_masks(
     chase_motion = body_motion(f, CONFIRMED_POLICY)
     together_speed = (chase_motion[2] if social_config.together_use_smoothed_speed
                       else f.speed_cm_s)
+    if orientation is None:
+        orientation = observed_orientations(f)
+    if geom_cache is None:
+        geom_cache = {}
     for edge in range(shape[1]):
+        if edge_subset is not None and edge not in edge_subset:
+            continue
         if not visible[:, edge].any():
             continue
         left, right = int(f.pair_i[edge]), int(f.pair_j[edge])
         approach_evidence, chase_evidence = {}, {}
         approach = _open_approach_mask(
-            f, edge, p, social_config, direction_evidence=approach_evidence)
-        head_directed = endpoint_distances(f, edge, "head")
-        tail_directed = endpoint_distances(f, edge, "tail")
+            f, edge, p, social_config, direction_evidence=approach_evidence,
+            **filter_optional_kwargs(_open_approach_mask, {"orientation": orientation, "geom_cache": geom_cache}),
+        )
+        head_directed = _edge_endpoint_distances(f, edge, "head", geom_cache)
+        tail_directed = _edge_endpoint_distances(f, edge, "tail", geom_cache)
         observed_pair = visible[:, edge]
         center = f.pair_distance_cm[:, edge]
-        chase = _chase_mask(f, edge, social_config, measured_motion=chase_motion,
-                            direction_evidence=chase_evidence)
+        chase = _chase_mask(
+            f, edge, social_config, measured_motion=chase_motion,
+            direction_evidence=chase_evidence,
+            **filter_optional_kwargs(_chase_mask, {"orientation": orientation}),
+        )
         if role_evidence is not None:
             role_evidence[edge] = {"approach": approach_evidence, "chasing": chase_evidence}
         attack_channels = {}
-        attack = _attack_action_mask(f, edge, social_config, point_kinematics=point_kinematics,
-                                     channels=attack_channels,
-                                     allow_observed_attack_extension=allow_observed_attack_extension)
+        attack = _attack_action_mask(
+            f, edge, social_config, point_kinematics=point_kinematics,
+            channels=attack_channels,
+            allow_observed_attack_extension=allow_observed_attack_extension,
+            **filter_optional_kwargs(_attack_action_mask, {"geom_cache": geom_cache}),
+        )
         if diagnostics is not None and np.any(attack_channels.get('coherent_v25_observed_extension', False)):
             diagnostics['new_coherent_candidate'] = True
+            diagnostics.setdefault('new_coherent_edges', set()).add(edge)
         center_only_attack = attack_channels.get('center_only_raw', attack)
 
         head = np.zeros(len(f.valid), bool)
@@ -1444,7 +1544,7 @@ def _base_pair_rule_masks(
         contact_bout_seconds = {"head": 0.0, "tail": 0.0}
         overlong_head = np.zeros(len(f.valid), dtype=bool)
         overlong_tail = np.zeros(len(f.valid), dtype=bool)
-        surface_distances = snout_surface_distances(f, edge)
+        surface_distances = _edge_snout_surface_distances(f, edge, geom_cache)
         for name, directed, requested_distance in (
             ("head", head_directed, social_config.dist_nose_head_contact_max_cm),
             ("tail", tail_directed, social_config.dist_nose_tail_contact_max_cm),
@@ -1492,12 +1592,55 @@ def _base_pair_rule_masks(
         result["long_contact_review"][:, edge] = overlong_head | overlong_tail
         # Together is independent evidence. Six-way arbitration below decides
         # its overlap with Approach, Attack, Chase and the two contact subtypes.
-        together_support = np.isfinite(center) & (center < social_config.dist_together_max_cm)
-        together_raw = (
-            observed_pair & together_support
+        together_tight_support = np.isfinite(center) & (center < social_config.dist_together_max_cm)
+        together_tight = (
+            observed_pair & together_tight_support
             & (together_speed[:, left] < social_config.vel_together_max_cm_s)
             & (together_speed[:, right] < social_config.vel_together_max_cm_s)
         )
+        together_support = together_tight_support
+        together_raw = together_tight
+        if (
+            social_config.together_wide_max_distance_cm is not None
+            and social_config.together_wide_max_distance_cm > social_config.dist_together_max_cm
+        ):
+            wide_speed_max = (
+                social_config.vel_together_max_cm_s
+                if social_config.together_wide_max_speed_cm_s is None
+                else social_config.together_wide_max_speed_cm_s
+            )
+            together_support = np.isfinite(center) & (
+                center < social_config.together_wide_max_distance_cm
+            )
+            wide_candidates = (
+                observed_pair & together_support & ~together_tight
+                & (together_speed[:, left] < wide_speed_max)
+                & (together_speed[:, right] < wide_speed_max)
+            )
+            if social_config.together_wide_min_endpoint_gap_cm > 0.0 and wide_candidates.any():
+                min_endpoint_gap = np.fmin(
+                    np.fmin(head_directed[0], head_directed[1]),
+                    np.fmin(tail_directed[0], tail_directed[1]),
+                )
+                wide_candidates = wide_candidates & (
+                    ~np.isfinite(min_endpoint_gap)
+                    | (min_endpoint_gap >= social_config.together_wide_min_endpoint_gap_cm)
+                )
+            if social_config.together_wide_min_body_gap_cm > 0.0:
+                if wide_candidates.any():
+                    body_gap = body_footprint_distances(
+                        f,
+                        edge,
+                        max_body_lengths=social_config.together_wide_max_footprint_body_lengths,
+                        frame_mask=wide_candidates,
+                    )
+                    together_raw = together_tight | (
+                        wide_candidates
+                        & np.isfinite(body_gap)
+                        & (body_gap >= social_config.together_wide_min_body_gap_cm)
+                    )
+            else:
+                together_raw = together_tight | wide_candidates
         together_unknown = ~(
             observed_pair & np.isfinite(center)
             & np.isfinite(together_speed[:, left]) & np.isfinite(together_speed[:, right])
@@ -1546,7 +1689,12 @@ def _base_pair_rule_masks(
                   "chasing": social_config.chasing_min_duration_s,
                   "head_contact": social_config.nose_contact_min_duration_s,
                   "tail_contact": social_config.nose_tail_min_duration_s}
-        for behavior in social_config.priority_order:
+        pair_order = _effective_pair_priority_order(
+            social_config, approach_s=approach_s, head_s=head_s, tail_s=tail_s,
+        )
+        if diagnostics is not None:
+            diagnostics.setdefault("pair_priority_orders", {})[edge] = pair_order
+        for behavior in pair_order:
             mask, qualified = candidates[behavior]
             if not qualified:
                 continue
@@ -1618,7 +1766,9 @@ def _base_pair_rule_masks(
             result["chasing"][:, edge] |= restored
             result["approach"][:, edge] = _open_approach_mask(
                 f, edge, p, social_config,
-                retained_mask=result["approach"][:, edge] & ~restored)
+                retained_mask=result["approach"][:, edge] & ~restored,
+                **filter_optional_kwargs(_open_approach_mask, {"orientation": orientation, "geom_cache": geom_cache}),
+            )
             for name, kind, values, cap in (
                 ("head_contact", "head", head_directed, social_config.dist_nose_head_contact_max_cm),
                 ("tail_contact", "tail", tail_directed, social_config.dist_nose_tail_contact_max_cm),
@@ -1637,6 +1787,8 @@ def _base_pair_rule_masks(
 def _restrict_contact_unknown_support(
     result: dict, reference: dict, f: ExportedFeatures,
     social_config: SocialHeuristicConfig, *, allow_contact_extension: bool = True,
+    _edge_subset: set[int] | None = None,
+    _geom_cache: dict | None = None,
 ) -> None:
     """Keep historical unknown rows only in the same canonical contact subtype.
 
@@ -1645,13 +1797,14 @@ def _restrict_contact_unknown_support(
     Requalify each remaining fragment without reallocating deleted support.
     """
     visible = f.valid[:, f.pair_i] & f.valid[:, f.pair_j]
+    edges_to_check = sorted(_edge_subset) if _edge_subset is not None else range(visible.shape[1])
     for name, minimum in (
         ('head_contact', social_config.contact_head_extension_min_duration_s),
         ('tail_contact', social_config.contact_tail_extension_min_duration_s),
     ):
         if not allow_contact_extension:
             minimum = social_config.contact_minimum_s('head' if name == 'head_contact' else 'tail')
-        for edge in range(visible.shape[1]):
+        for edge in edges_to_check:
             selected = _single_bout_mask(
                 result[name][:, edge] & (visible[:, edge] | reference[name][:, edge]),
                 f.fps, minimum,
@@ -1660,11 +1813,44 @@ def _restrict_contact_unknown_support(
                 kind = 'head' if name == 'head_contact' else 'tail'
                 selected = _qualify_contact_channels(
                     selected, visible[:, edge],
-                    {k: endpoint_distances(f, edge, k) for k in ('head', 'tail')},
+                    {k: _edge_endpoint_distances(f, edge, k, _geom_cache) for k in ('head', 'tail')},
                     kind, f.fps, social_config, extension=allow_contact_extension)
             result[name][:, edge] = selected
             result[name + '_seconds'][edge] = max(
                 ((end - start) / f.fps for start, end in runs(selected)), default=0.)
+
+
+def _effective_pair_priority_order(
+    social_config: SocialHeuristicConfig,
+    *,
+    approach_s: float,
+    head_s: float,
+    tail_s: float,
+) -> tuple[str, ...]:
+    """Yield short (<0.30s) approach fragments behind longer qualified contact."""
+    order = social_config.priority_order
+    if social_config.approach_min_duration_s + 1e-12 >= 0.30:
+        return order
+    if approach_s + 1e-12 >= 0.30 or approach_s + 1e-12 < social_config.approach_min_duration_s:
+        return order
+    contact_s = max(
+        head_s if head_s + 1e-12 >= social_config.nose_contact_min_duration_s else 0.0,
+        tail_s if tail_s + 1e-12 >= social_config.nose_tail_min_duration_s else 0.0,
+    )
+    if contact_s <= 0.0 or contact_s + 1e-12 < approach_s:
+        return order
+    remaining = tuple(name for name in order if name != "approach")
+    last_contact_idx = max(
+        (idx for idx, name in enumerate(remaining) if name in ("head_contact", "tail_contact")),
+        default=-1,
+    )
+    if order.index("approach") <= last_contact_idx:
+        return (
+            remaining[: last_contact_idx + 1]
+            + ("approach",)
+            + remaining[last_contact_idx + 1 :]
+        )
+    return order
 
 
 def pair_rule_masks(
@@ -1674,6 +1860,9 @@ def pair_rule_masks(
     *, allow_contact_extension: bool = True,
     allow_observed_attack_extension: bool = True,
     roles: dict[str, np.ndarray] | None = None,
+    _geom_cache: dict | None = None,
+    _orientation=None,
+    _edge_subset: set[int] | None = None,
 ) -> dict[str, np.ndarray]:
     """Add subtype-specific, jointly observed short bouts to canonical support.
 
@@ -1682,24 +1871,51 @@ def pair_rule_masks(
     the default order, all four higher-priority masks remain exactly unchanged.
     """
     diagnostics, role_evidence = {}, {}
+    geom_cache = _geom_cache if _geom_cache is not None else {}
+    orientation = _orientation if _orientation is not None else observed_orientations(f)
     role_options = {"role_evidence": role_evidence} if roles is not None else {}
     result = _base_pair_rule_masks(
         f, p, social_config, allow_observed_attack_extension=allow_observed_attack_extension,
-        diagnostics=diagnostics, **role_options)
+        diagnostics=diagnostics,
+        **role_options,
+        **filter_optional_kwargs(
+            _base_pair_rule_masks,
+            {"geom_cache": geom_cache, "orientation": orientation, "edge_subset": _edge_subset},
+        ),
+    )
 
     def guard_contact_unknowns() -> dict:
         visible = f.valid[:, f.pair_i] & f.valid[:, f.pair_j]
+        unknown_contact = (result['head_contact'] | result['tail_contact']) & ~visible
         if (allow_observed_attack_extension and diagnostics.get('new_coherent_candidate', False)
-                and ((result['head_contact'] | result['tail_contact']) & ~visible).any()):
+                and unknown_contact.any()):
             # Recompute the exact retained V24 public path, including priority
-            # and short contacts. A same-new-attack baseline cannot detect a
-            # head-to-tail transfer, even when total unknown support is stable.
-            reference = pair_rule_masks(
-                f, p, social_config, allow_contact_extension=allow_contact_extension,
-                allow_observed_attack_extension=False)
-            _restrict_contact_unknown_support(
-                result, reference, f, social_config,
-                allow_contact_extension=allow_contact_extension)
+            # and short contacts, only on the affected edges.
+            affected_edges = set(int(e) for e in np.flatnonzero(unknown_contact.any(axis=0)))
+            coherent_edges = diagnostics.get('new_coherent_edges')
+            if coherent_edges is not None:
+                affected_edges &= coherent_edges
+            if affected_edges:
+                reference = pair_rule_masks(
+                    f, p, social_config, allow_contact_extension=allow_contact_extension,
+                    allow_observed_attack_extension=False,
+                    **filter_optional_kwargs(
+                        pair_rule_masks,
+                        {
+                            "_geom_cache": geom_cache,
+                            "_orientation": orientation,
+                            "_edge_subset": affected_edges,
+                        },
+                    ),
+                )
+                _restrict_contact_unknown_support(
+                    result, reference, f, social_config,
+                    allow_contact_extension=allow_contact_extension,
+                    **filter_optional_kwargs(
+                        _restrict_contact_unknown_support,
+                        {"_edge_subset": affected_edges, "_geom_cache": geom_cache},
+                    ),
+                )
         if roles is not None:
             _collect_pair_roles(f, result, role_evidence, roles)
         return result
@@ -1718,15 +1934,18 @@ def pair_rule_masks(
         "head_contact": ("head", social_config.contact_head_extension_distance_cm),
         "tail_contact": ("tail", social_config.contact_tail_extension_distance_cm),
     }
+    pair_orders = diagnostics.get("pair_priority_orders", {})
     for edge in range(f.pair_distance_cm.shape[1]):
+        if _edge_subset is not None and edge not in _edge_subset:
+            continue
         left, right = int(f.pair_i[edge]), int(f.pair_j[edge])
         joint = f.valid[:, left] & f.valid[:, right]
         if not joint.any():
             continue
-        endpoints = {kind: endpoint_distances(f, edge, kind) for kind in ("head", "tail")}
+        endpoints = {kind: _edge_endpoint_distances(f, edge, kind, geom_cache) for kind in ("head", "tail")}
         claimed = np.zeros(len(f.valid), bool)
         higher_noncontact = np.zeros(len(f.valid), bool)
-        for name in social_config.priority_order:
+        for name in pair_orders.get(edge, social_config.priority_order):
             baseline = result[name][:, edge].copy()
             candidate = baseline.copy()
             if name in contacts:

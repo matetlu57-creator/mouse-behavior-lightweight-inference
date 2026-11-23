@@ -581,7 +581,14 @@ def _write_core_tracks(path: Path, store, start: int, end: int, fps: float) -> N
         handle.write("\n]\n")
 
 
-def huddle_output_events(events: list[dict], store, binding: dict, scale: dict) -> tuple[list[dict], list[dict]]:
+def huddle_output_events(
+    events: list[dict],
+    store,
+    binding: dict,
+    scale: dict,
+    *,
+    max_duration_s: float | None = None,
+) -> tuple[list[dict], list[dict]]:
     """Sliding stable-state qualification followed by frame-level huddle bounds.
 
     Five seconds is a qualification window, never the exported clip length.
@@ -595,6 +602,14 @@ def huddle_output_events(events: list[dict], store, binding: dict, scale: dict) 
     fps = binding["source_video"]["fps"]
     parameters = _duration_parameters(binding) or HeuristicParameters()
     minimum = parameters.huddle_min_duration_s
+    if max_duration_s is not None:
+        if isinstance(max_duration_s, bool) or not math.isfinite(max_duration_s) or max_duration_s <= 0:
+            raise ValueError("max_duration_s must be None or a finite positive number")
+    max_frames = (
+        max(1, int(math.floor(float(max_duration_s) * fps + 1e-9)))
+        if max_duration_s is not None
+        else None
+    )
     width = int(math.ceil(minimum * fps - 1e-9))
     neighbor_cm, fraction, separation_s = 10., .6, .5
     confirmation = max(1, int(math.ceil(separation_s * fps - 1e-9)))
@@ -604,7 +619,18 @@ def huddle_output_events(events: list[dict], store, binding: dict, scale: dict) 
             result.append(copy.deepcopy(parent))
             continue
         low, high = parent["start_frame"], parent["end_frame"]
-        ids = parent["mouse_ids"]
+        ids = list(dict.fromkeys(int(mid) for mid in parent.get("mouse_ids", ())))
+        if len(ids) < 3 or high <= low:
+            audit.append(dict(
+                parent_event_id=parent.get("event_id"),
+                accepted=[],
+                rejected_bouts_below_minimum=[],
+                qualifying_sliding_windows=0,
+                visible_separated_frames=0,
+                unknown_frames=0,
+                reason="insufficient_participants",
+            ))
+            continue
         observed = np.zeros((high-low, len(ids)), bool)
         states = np.full(high-low, -1, np.int8)
         touching_endpoints = np.zeros(high-low, bool)
@@ -674,49 +700,84 @@ def huddle_output_events(events: list[dict], store, binding: dict, scale: dict) 
             np.add.at(delta, starts+width, -1)
             qualified = np.cumsum(delta[:-1]) > 0
         accepted, rejected = [], []
-        for start, end in mask_intervals(qualified & ~blocked):
-            endpoints = np.flatnonzero((states[start:end] == 1) & touching_endpoints[start:end])
+        for raw_start, raw_end in mask_intervals(qualified & ~blocked):
+            endpoints = np.flatnonzero((states[raw_start:raw_end] == 1) & touching_endpoints[raw_start:raw_end])
             if not len(endpoints):
                 continue
-            start, end = start+int(endpoints[0]), start+int(endpoints[-1])+1
-            support = spatial[start:end]
-            if (end-start)/fps + 1e-12 < minimum or support.sum()/fps + 1e-12 < minimum:
-                rejected.append(dict(start_frame=low+start, end_frame=low+end,
-                                     measured_compact_seconds=float(support.sum()/fps)))
-                continue
-            key = (tuple(ids), low+start, low+end)
-            if key in seen:
-                continue
-            seen.add(key)
-            event = copy.deepcopy(parent)
-            for name in list(event):
-                if name.endswith(("_frame_intervals", "_frame_count")):
-                    del event[name]
-            source_start, source_end = low+start, low+end
-            intervals = [[source_start+a, source_start+b] for a, b in mask_intervals(support)]
-            all_visible = observed[start:end].all(axis=1)
-            event.update(start_frame=source_start, end_frame=source_end,
-                event_id=f"huddle_sliding_{source_start:08d}_{source_end:08d}_" +
-                         hashlib.sha256(str(tuple(ids)).encode()).hexdigest()[:10],
-                parent_candidate_event_id=parent["event_id"],
-                canonical_support_frame_intervals=intervals,
-                canonical_support_frame_count=int(support.sum()),
-                observed_all_participants_frame_intervals=[[source_start+a, source_start+b]
-                    for a, b in mask_intervals(all_visible)],
-                observed_all_participants_frame_count=int(all_visible.sum()),
-                inferred_or_partially_unobserved_frame_count=int(len(support)-all_visible.sum()),
-                boundary=EventBoundary(source_start, source_end, source_start, source_end, fps).as_dict(),
-                process_boundary_status=dict(output_revision="huddle-sliding-output-v37",
-                    center_neighbor_cm=neighbor_cm, centroid_radius_cm=neighbor_cm,
-                    sliding_window_seconds=minimum, sliding_step_frames=1,
-                    minimum_member_visibility_fraction=fraction, minimum_spatial_support_fraction=fraction,
-                    separation_confirmation_seconds=separation_s,
-                    support_semantics="at least two observed compact members; missing IDs have no measured position",
-                    starts_and_ends_with_all_targets_observed=True, endpoint_body_boxes_connected=True,
-                    minimum_duration_used_as_crop_length=False))
-            require_event_duration(event, fps, parameters=parameters)
-            result.append(event)
-            accepted.append(event["event_id"])
+            bout_start, bout_end = raw_start + int(endpoints[0]), raw_start + int(endpoints[-1]) + 1
+            sub_intervals: list[tuple[int, int]] = []
+            if max_frames is None or (bout_end - bout_start) <= max_frames:
+                sub_intervals.append((bout_start, bout_end))
+            else:
+                cur = bout_start
+                while cur < bout_end:
+                    rem_ep = np.flatnonzero((states[cur:bout_end] == 1) & touching_endpoints[cur:bout_end])
+                    if not len(rem_ep):
+                        break
+                    cs = cur + int(rem_ep[0])
+                    if (bout_end - cs) <= max_frames:
+                        tail_ep = np.flatnonzero((states[cs:bout_end] == 1) & touching_endpoints[cs:bout_end])
+                        if len(tail_ep):
+                            sub_intervals.append((cs, cs + int(tail_ep[-1]) + 1))
+                        break
+                    cap_end = cs + max_frames
+                    win_ep = np.flatnonzero((states[cs:cap_end] == 1) & touching_endpoints[cs:cap_end])
+                    if len(win_ep):
+                        ce = cs + int(win_ep[-1]) + 1
+                        if ((ce - cs) / fps + 1e-12 >= minimum
+                                and spatial[cs:ce].sum() / fps + 1e-12 >= minimum):
+                            sub_intervals.append((cs, ce))
+                            cur = ce
+                            continue
+                    next_ep = np.flatnonzero((states[cs + 1:bout_end] == 1) & touching_endpoints[cs + 1:bout_end])
+                    if not len(next_ep):
+                        break
+                    cur = cs + 1 + int(next_ep[0])
+            for start, end in sub_intervals:
+                support = spatial[start:end]
+                if (end-start)/fps + 1e-12 < minimum or support.sum()/fps + 1e-12 < minimum:
+                    rejected.append(dict(start_frame=low+start, end_frame=low+end,
+                                         measured_compact_seconds=float(support.sum()/fps)))
+                    continue
+                if max_duration_s is not None and (end - start) / fps > max_duration_s + 1e-9:
+                    rejected.append(dict(start_frame=low+start, end_frame=low+end,
+                                         measured_compact_seconds=float(support.sum()/fps),
+                                         reason="exceeds_max_duration_s"))
+                    continue
+                key = (tuple(ids), low+start, low+end)
+                if key in seen:
+                    continue
+                seen.add(key)
+                event = copy.deepcopy(parent)
+                for name in list(event):
+                    if name.endswith(("_frame_intervals", "_frame_count")):
+                        del event[name]
+                source_start, source_end = low+start, low+end
+                intervals = [[source_start+a, source_start+b] for a, b in mask_intervals(support)]
+                all_visible = observed[start:end].all(axis=1)
+                event.update(start_frame=source_start, end_frame=source_end,
+                    mouse_ids=list(ids),
+                    event_id=f"huddle_sliding_{source_start:08d}_{source_end:08d}_" +
+                             hashlib.sha256(str(tuple(ids)).encode()).hexdigest()[:10],
+                    parent_candidate_event_id=parent["event_id"],
+                    canonical_support_frame_intervals=intervals,
+                    canonical_support_frame_count=int(support.sum()),
+                    observed_all_participants_frame_intervals=[[source_start+a, source_start+b]
+                        for a, b in mask_intervals(all_visible)],
+                    observed_all_participants_frame_count=int(all_visible.sum()),
+                    inferred_or_partially_unobserved_frame_count=int(len(support)-all_visible.sum()),
+                    boundary=EventBoundary(source_start, source_end, source_start, source_end, fps).as_dict(),
+                    process_boundary_status=dict(output_revision="huddle-sliding-output-v37",
+                        center_neighbor_cm=neighbor_cm, centroid_radius_cm=neighbor_cm,
+                        sliding_window_seconds=minimum, sliding_step_frames=1,
+                        minimum_member_visibility_fraction=fraction, minimum_spatial_support_fraction=fraction,
+                        separation_confirmation_seconds=separation_s,
+                        support_semantics="at least two observed compact members; missing IDs have no measured position",
+                        starts_and_ends_with_all_targets_observed=True, endpoint_body_boxes_connected=True,
+                        minimum_duration_used_as_crop_length=False))
+                require_event_duration(event, fps, parameters=parameters)
+                result.append(event)
+                accepted.append(event["event_id"])
         audit.append(dict(parent_event_id=parent["event_id"], accepted=accepted,
                           rejected_bouts_below_minimum=rejected, qualifying_sliding_windows=window_count,
                           visible_separated_frames=int((states == 0).sum()),

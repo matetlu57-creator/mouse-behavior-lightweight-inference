@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>小鼠行为分析 · 统一常驻站点中心</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到站点面板</a>
+
+  <header class="portal-header">
+    <div class="brand-block">
+      <p class="eyebrow">PERSISTENT LOCAL SITE HUB · 脱离网关独立运行</p>
+      <h1>小鼠行为审核与错误展示站点中心</h1>
+      <p class="subtitle">统一入口管理人工审核网站与错误样本复核网站，网关断开或重启后站点仍持续在线。</p>
+    </div>
+
+    <div class="header-actions">
+      <div class="hub-badge-group" aria-live="polite">
+        <span id="hub-status-pill" class="status-pill status-starting">正在探测站点服务…</span>
+        <span id="hub-meta" class="mono muted">PID — · 运行 —</span>
+      </div>
+      <div class="control-strip">
+        <label class="toggle-chip" for="auto-refresh-toggle">
+          <input id="auto-refresh-toggle" type="checkbox" checked>
+          <span>8s 自动刷新</span>
+        </label>
+        <button id="theme-toggle" type="button" class="btn btn-quiet" aria-label="切换深浅色主题">深/浅色</button>
+        <button id="reload-registry-btn" type="button" class="btn btn-quiet" title="重新加载 sites.json 并校验配置">重载配置</button>
+        <button id="refresh-now-btn" type="button" class="btn btn-primary">立即刷新</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main-content" class="portal-main">
+    <section id="connection-banner" class="notice-banner notice-info" role="status" aria-live="polite">
+      <div class="notice-copy">
+        <strong id="banner-title">正在连接站点守护中心…</strong>
+        <p id="banner-detail">页面框架与导航已就绪，正在异步拉取各站点实时健康状态。</p>
+      </div>
+      <div class="notice-actions">
+        <button id="retry-connection-btn" type="button" class="btn btn-primary" hidden>重试连接</button>
+      </div>
+    </section>
+
+    <section class="kpi-grid" aria-label="站点中心概览">
+      <article class="kpi-card">
+        <span class="kpi-label">已注册站点</span>
+        <strong id="kpi-total" class="kpi-value mono">—</strong>
+        <span class="kpi-sub">全部纳管网站</span>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">在线可用</span>
+        <strong id="kpi-healthy" class="kpi-value mono status-ok-text">—</strong>
+        <span class="kpi-sub">通过 HTTP /api/health 探测</span>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">人工审核站</span>
+        <strong id="kpi-review" class="kpi-value mono">—</strong>
+        <span class="kpi-sub">片段核查 / 长视频复核</span>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">错误显示站</span>
+        <strong id="kpi-error-site" class="kpi-value mono">—</strong>
+        <span class="kpi-sub">错误归因与逐帧高亮</span>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">开机自启</span>
+        <strong id="kpi-autostart" class="kpi-value">—</strong>
+        <span id="kpi-autostart-sub" class="kpi-sub">Windows 登录自启守护</span>
+      </article>
+    </section>
+
+    <nav class="category-bar" aria-label="站点分类导航">
+      <div class="category-tabs" role="tablist" aria-label="筛选站点类型">
+        <button type="button" class="tab-btn is-active" role="tab" aria-selected="true" data-category="all">全部站点</button>
+        <button type="button" class="tab-btn" role="tab" aria-selected="false" data-category="review">人工审核网站</button>
+        <button type="button" class="tab-btn" role="tab" aria-selected="false" data-category="error_display">错误显示网站</button>
+        <button type="button" class="tab-btn" role="tab" aria-selected="false" data-category="other">其他站点</button>
+      </div>
+      <div class="search-wrap">
+        <label class="sr-only" for="site-search">搜索站点名称或端口</label>
+        <input id="site-search" type="search" placeholder="筛选站点名称 / 端口 / 数据集…" autocomplete="off">
+      </div>
+    </nav>
+
+    <section aria-label="站点列表">
+      <div id="offline-fallback-header" class="fallback-tag" hidden>
+        <strong>离线参考视图 · 非实时运行状态</strong>
+        <span>以下为预设站点入口参考；后端站点守护进程当前未响应，请先在本机启动站点中心或点击上方“重试连接”。</span>
+      </div>
+      <div id="site-grid" class="site-grid"></div>
+      <div id="site-empty" class="empty-box" hidden>
+        <strong>当前筛选条件下没有匹配的站点</strong>
+        <p>可清除搜索关键词或切换到“全部站点”查看所有注册服务。</p>
+      </div>
+    </section>
+
+    <section class="command-panel" aria-label="长期运维与命令行指引">
+      <div class="command-header">
+        <h2>可复现启动与新增注册命令</h2>
+        <span class="muted">守护进程采用独立进程树启动，不会因会话网关断开而退出</span>
+      </div>
+      <div class="command-grid">
+        <div class="cmd-card">
+          <div class="cmd-title">启动 / 查看常驻站点中心（默认入口 http://127.0.0.1:8788/）</div>
+          <pre class="cmd-pre mono"><code>D:\Anaconda3\python.exe scripts/manage_site_hub.py start
+D:\Anaconda3\python.exe scripts/manage_site_hub.py status</code></pre>
+        </div>
+        <div class="cmd-card">
+          <div class="cmd-title">开启 Windows 登录自启（重启电脑后自动上线）</div>
+          <pre class="cmd-pre mono"><code>D:\Anaconda3\python.exe scripts/manage_site_hub.py install-autostart</code></pre>
+        </div>
+        <div class="cmd-card">
+          <div class="cmd-title">将新开发的审核站或错误显示站部署到本中心</div>
+          <pre class="cmd-pre mono"><code>D:\Anaconda3\python.exe scripts/manage_site_hub.py register --id my_review --title "我的新审核站" --category review --port 8796 -- D:\Anaconda3\python.exe scripts/serve_xxx.py --port 8796</code></pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="portal-footer">
+    <span>Mouse Behavior Persistent Site Hub · 仅绑定本机回环地址（127.0.0.1）· 零外部 CDN 依赖</span>
+    <span id="last-updated" class="mono">最后探测：—</span>
+  </footer>
+
+  <dialog id="logs-dialog" class="logs-dialog" aria-labelledby="logs-dialog-title">
+    <div class="dialog-head">
+      <div>
+        <p class="eyebrow">SITE RUNTIME LOGS</p>
+        <h3 id="logs-dialog-title">站点运行日志</h3>
+        <p id="logs-dialog-path" class="mono muted"></p>
+      </div>
+      <div class="dialog-actions">
+        <button id="logs-refresh-btn" type="button" class="btn btn-quiet">刷新日志</button>
+        <button id="logs-copy-btn" type="button" class="btn btn-quiet">复制日志</button>
+        <button id="logs-close-btn" type="button" class="btn btn-primary">关闭</button>
+      </div>
+    </div>
+    <div id="logs-error" class="notice-banner notice-danger" hidden></div>
+    <pre id="logs-content" class="logs-pre mono">等待加载日志…</pre>
+  </dialog>
+
+  <noscript>
+    <div class="notice-banner notice-warn">
+      <strong>需要启用 JavaScript</strong>
+      <p>站点实时探测、启停控制和日志查看需要启用浏览器 JavaScript；下方命令仍可在终端直接启动站点。</p>
+    </div>
+  </noscript>
+</body>
+</html>

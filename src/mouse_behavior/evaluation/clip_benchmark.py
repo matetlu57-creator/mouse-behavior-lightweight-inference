@@ -61,6 +61,16 @@ __all__ = [
 ]
 
 
+def _normalize_moving_behavior(behavior: str | None) -> str | None:
+    """Normalize legacy/alias display label ``Moving`` (any case) to ``Locomotion``."""
+    if behavior is None:
+        return None
+    cleaned = str(behavior).strip()
+    if cleaned.casefold() == "moving":
+        return "Locomotion"
+    return cleaned
+
+
 def compute_temporal_iou(
     pred_interval: tuple[int, int] | None,
     gt_interval: tuple[int, int],
@@ -361,8 +371,9 @@ def evaluate_isolation_gloco_clip(
     orig_annotated_dir: Path | None = None,
     visualize: bool = True,
     render_videos: bool = True,
+    overwrite_videos: bool = False,
 ) -> dict[str, Any]:
-    """Evaluate a single Isolation or Group locomotion clip and perform segment cropping."""
+    """Evaluate a collective/group-layer clip (Isolation, Group locomotion, Dispersal, Social clustering)."""
     clip_dir = Path(clip_dir)
     clip_id = clip_dir.name
     if params is None:
@@ -377,6 +388,7 @@ def evaluate_isolation_gloco_clip(
         "predicted_behavior": None,
         "is_correct": False,
         "target_mouse_ids": [],
+        "semantic_roles": {},
         "ground_truth_range_half_open": None,
         "predicted_range_half_open": None,
         "temporal_iou": 0.0,
@@ -396,8 +408,15 @@ def evaluate_isolation_gloco_clip(
             annotation, metadata, raw_tracks
         )
 
+        semantic_roles: dict[str, list[int]] = {}
+        for p in annotation.get("participants", []):
+            role_name = str(p.get("role_name", "")).strip()
+            if role_name:
+                semantic_roles[role_name] = [int(t) for t in p.get("track_ids", [])]
+
         record.update(
             target_mouse_ids=target_ids,
+            semantic_roles=semantic_roles,
             ground_truth_behavior=gt_behavior,
             ground_truth_range_half_open={"start": gt_start, "end": gt_end_half_open},
             total_frames=total_frames,
@@ -519,6 +538,17 @@ def evaluate_isolation_gloco_clip(
         is_correct = bool(pred_behavior and gt_behavior and pred_behavior.lower() == gt_behavior.lower())
         record["is_correct"] = is_correct
 
+        if not semantic_roles and target_ids:
+            role_beh = pred_behavior or gt_behavior
+            default_role_map = {
+                "Isolation": "Isolated",
+                "Group locomotion": "Group Locomotion",
+                "Dispersal": "Dispersal",
+                "Social clustering": "Social Clustering",
+            }
+            semantic_roles = {default_role_map.get(role_beh, role_beh): list(target_ids)}
+        record["semantic_roles"] = semantic_roles
+
         if is_correct and refined_events:
             p_s = int(refined_events[0]["start_frame"])
             p_e = int(refined_events[0]["end_frame"])
@@ -534,7 +564,17 @@ def evaluate_isolation_gloco_clip(
 
         if crop_output_dir is not None and record["predicted_range_half_open"]:
             out_cropped = Path(crop_output_dir) / clip_id / "clip_cropped.mp4"
-            if out_cropped.is_file() and out_cropped.stat().st_size > 0:
+            expected_crop_frames = (
+                record["predicted_range_half_open"]["end"]
+                - record["predicted_range_half_open"]["start"]
+            )
+            reuse_existing = (
+                not overwrite_videos
+                and out_cropped.is_file()
+                and out_cropped.stat().st_size > 0
+                and video_frame_count(out_cropped) == expected_crop_frames
+            )
+            if reuse_existing:
                 record["cropped_video_path"] = str(out_cropped)
             elif render_videos and video_path.is_file():
                 ok = render_cropped_comparison_video(
@@ -545,6 +585,7 @@ def evaluate_isolation_gloco_clip(
                     fps,
                     tracks=raw_tracks,
                     target_mouse_ids=target_ids,
+                    semantic_roles=semantic_roles,
                     pred_behavior=pred_behavior,
                     gt_behavior=gt_behavior,
                     iou=iou,
@@ -554,7 +595,13 @@ def evaluate_isolation_gloco_clip(
 
         if orig_annotated_dir is not None:
             out_annotated = Path(orig_annotated_dir) / clip_id / "clip_annotated.mp4"
-            if out_annotated.is_file() and out_annotated.stat().st_size > 0:
+            reuse_orig = (
+                not overwrite_videos
+                and out_annotated.is_file()
+                and out_annotated.stat().st_size > 0
+                and video_frame_count(out_annotated) > 0
+            )
+            if reuse_orig:
                 record["annotated_orig_path"] = str(out_annotated)
             elif render_videos and video_path.is_file():
                 ok_orig = render_annotated_original_video(
@@ -563,7 +610,9 @@ def evaluate_isolation_gloco_clip(
                     fps,
                     tracks=raw_tracks,
                     target_mouse_ids=target_ids,
+                    semantic_roles=semantic_roles,
                     behavior=gt_behavior,
+                    show_banner=True,
                 )
                 record["annotated_orig_path"] = str(out_annotated) if ok_orig else None
 
@@ -595,13 +644,14 @@ def evaluate_static_loco_clip(
     clip_id = clip_dir.name
     if params is None:
         params = _default_parameters()
+    normalized_expected = _normalize_moving_behavior(expected_behavior)
 
     record: dict[str, Any] = {
         "clip_id": clip_id,
         "clip_dir": str(clip_dir),
         "status": "ok",
         "error": None,
-        "ground_truth_behavior": expected_behavior,
+        "ground_truth_behavior": normalized_expected,
         "predicted_behavior": None,
         "is_correct": False,
         "target_mouse_ids": [],
@@ -619,7 +669,8 @@ def evaluate_static_loco_clip(
 
     try:
         annotation, metadata, raw_tracks, video_path = _load_clip_files(clip_dir)
-        gt_behavior = str(annotation.get("behavior", expected_behavior or "Unknown"))
+        raw_gt_behavior = str(annotation.get("behavior", normalized_expected or "Unknown"))
+        gt_behavior = _normalize_moving_behavior(raw_gt_behavior) or "Unknown"
         target_ids = sorted(int(m) for m in annotation.get("mouse_ids", []))
         gt_start, _, gt_end_half_open, fps, total_frames = _parse_clip_timing(
             annotation, metadata, raw_tracks
@@ -763,16 +814,18 @@ def evaluate_six_behavior_clip(
     orig_annotated_dir: Path | None = None,
     visualize: bool = True,
     render_videos: bool = True,
+    overwrite_videos: bool = False,
 ) -> dict[str, Any]:
     """Unified dispatcher evaluating a clip belonging to any of the six benchmark behaviors."""
     anno_path = Path(clip_dir) / "annotation.json"
-    behavior_hint = expected_behavior
+    normalized_expected = _normalize_moving_behavior(expected_behavior)
+    behavior_hint = normalized_expected
     if not behavior_hint and anno_path.is_file():
         try:
             behavior_hint = str(json.loads(anno_path.read_text(encoding="utf-8")).get("behavior", ""))
         except Exception:
             behavior_hint = ""
-    normalized = str(behavior_hint or "").strip().lower()
+    normalized = str(_normalize_moving_behavior(behavior_hint) or "").strip().lower()
     if normalized in {"attack", "chasing", "chase"}:
         return evaluate_attack_chasing_clip(
             clip_dir,
@@ -791,22 +844,24 @@ def evaluate_six_behavior_clip(
     }:
         return evaluate_isolation_gloco_clip(
             clip_dir,
-            expected_behavior=expected_behavior,
+            expected_behavior=normalized_expected,
             params=params,
             crop_output_dir=crop_output_dir,
             orig_annotated_dir=orig_annotated_dir,
             visualize=visualize,
             render_videos=render_videos,
+            overwrite_videos=overwrite_videos,
         )
     if normalized in {"static", "stationary", "locomotion"}:
         return evaluate_static_loco_clip(
             clip_dir,
-            expected_behavior=expected_behavior,
+            expected_behavior=normalized_expected,
             params=params,
             crop_output_dir=crop_output_dir,
             orig_annotated_dir=orig_annotated_dir,
             visualize=visualize,
             render_videos=render_videos,
+            overwrite_videos=overwrite_videos,
         )
     # Fallback based on target participant count
     if anno_path.is_file():
@@ -823,23 +878,25 @@ def evaluate_six_behavior_clip(
             if len(mouse_ids) >= 3:
                 return evaluate_isolation_gloco_clip(
                     clip_dir,
-                    expected_behavior=expected_behavior,
+                    expected_behavior=normalized_expected,
                     params=params,
                     crop_output_dir=crop_output_dir,
                     orig_annotated_dir=orig_annotated_dir,
                     visualize=visualize,
                     render_videos=render_videos,
+                    overwrite_videos=overwrite_videos,
                 )
         except Exception:
             pass
     return evaluate_static_loco_clip(
         clip_dir,
-        expected_behavior=expected_behavior,
+        expected_behavior=normalized_expected,
         params=params,
         crop_output_dir=crop_output_dir,
         orig_annotated_dir=orig_annotated_dir,
         visualize=visualize,
         render_videos=render_videos,
+        overwrite_videos=overwrite_videos,
     )
 
 
@@ -869,7 +926,11 @@ def combine_evaluation_reports(
     }
 
     for beh in BEHAVIOR_ORDER:
-        b_clips = [c for c in merged_clips if c.get("ground_truth_behavior") == beh]
+        b_clips = [
+            c
+            for c in merged_clips
+            if (_normalize_moving_behavior(c.get("ground_truth_behavior")) or "") == beh
+        ]
         b_key = beh.lower().replace(" ", "_")
         summary[f"{b_key}_clips"] = len(b_clips)
         acc = (

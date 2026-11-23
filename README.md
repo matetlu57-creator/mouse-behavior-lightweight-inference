@@ -91,7 +91,7 @@ start_frame,end_frame,visual_track_id,animal_id,identity_confidence
 
 历史扩展接口保留跟随、群体同步运动、社会聚集和群体分散的定义。当前正典视频管线的默认活跃集合为 13 类，Following/Avoiding 停用，Grooming/Rearing 仅通过显式审核模式产生候选；不要把历史接口标签清单当作当前启用集合。角色、人数和时空定义见 [行为定义](docs/behavior-definitions.md)，当前实现、合并记录与限制见 [本轮记录](docs/posture-v3-duration-review-2026-10-21.md)。群体成员和角色不会用于反推或修复身份。
 
-更完整的数据契约、输出语义和模块边界见 `docs/index.md` 与 `docs/adr/0001-external-tracking-and-rfid-identity.md`。
+更完整的数据契约、输出语义和模块边界见 `docs/index.md` 与 `docs/adr/0001-external-tracking-and-rfid-identity.md`。15 类行为启发式识别与分层片段裁剪的模块化结构及统一公开门面 `mouse_behavior.heuristics` 见 [启发式识别与片段裁剪架构](docs/heuristic-and-clipping-architecture.md)。
 
 ## 独立姿态候选与完整视频导出
 
@@ -116,6 +116,16 @@ python scripts/serve_comparison_site.py --port 8769
 ```
 
 启动后默认访问地址为 `http://127.0.0.1:8769/`。
+
+如仅需查看并对比三种群体行为（散开 `Dispersal`、群体同步运动 `Group locomotion`、社会聚集 `Social clustering`）的**完全独立本地网站**（与主对比站点完全隔离，自带本地视频副本并支持独立双击启动），可执行：
+
+```powershell
+python scripts/evaluate_group_behaviors.py
+python scripts/build_group_behaviors_site.py
+python scripts/serve_group_behaviors_site.py --port 8780
+```
+
+启动后默认访问地址为 `http://127.0.0.1:8780/`；也可直接双击 `outputs/group_behaviors_website/start_local_site.bat` 或用浏览器直接打开 `outputs/group_behaviors_website/index.html`。
 
 每个分类包包含 `clip.mp4`、`annotation.json`、`metadata.json`、`tracks.json`。参与鼠以绿色粗框和原始视觉 ID 标注；缺失目标不伪造位置。独立事件在角色拆分、分段边界和编码前后按实际有效配置检查时长，保留严格 `>` 与 `>=` 的区别。
 

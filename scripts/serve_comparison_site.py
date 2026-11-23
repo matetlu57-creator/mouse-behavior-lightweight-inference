@@ -17,12 +17,14 @@ from mouse_behavior.visualization.comparison_site import (
     DEFAULT_COMBINED_EVALUATION_JSON,
     DEFAULT_CROPS_DIR,
     DEFAULT_DATASET_DIR,
+    DEFAULT_DISPERSAL_DIR,
     DEFAULT_EVALUATION_JSON,
     DEFAULT_GROUP_LOCOMOTION_DIR,
     DEFAULT_ISOLATION_DIR,
     DEFAULT_ISO_GLOCO_EVALUATION_JSON,
     DEFAULT_LOCOMOTION_DIR,
     DEFAULT_ORIG_ANNOTATED_DIR,
+    DEFAULT_SOCIAL_CLUSTERING_DIR,
     DEFAULT_STATIC_DIR,
     DEFAULT_STATIC_LOCOMOTION_EVALUATION_JSON,
     create_comparison_server,
@@ -81,6 +83,18 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_GROUP_LOCOMOTION_DIR,
         help="Directory containing original Group locomotion dataset clips",
+    )
+    parser.add_argument(
+        "--dispersal-dir",
+        type=Path,
+        default=DEFAULT_DISPERSAL_DIR,
+        help="Directory containing original Dispersal dataset clips",
+    )
+    parser.add_argument(
+        "--social-clustering-dir",
+        type=Path,
+        default=DEFAULT_SOCIAL_CLUSTERING_DIR,
+        help="Directory containing original Social clustering dataset clips",
     )
     parser.add_argument(
         "--static-dir",
@@ -160,6 +174,8 @@ def main() -> int:
         dataset_dir=args.dataset_dir,
         isolation_dir=args.isolation_dir,
         group_locomotion_dir=args.group_locomotion_dir,
+        dispersal_dir=args.dispersal_dir,
+        social_clustering_dir=args.social_clustering_dir,
         static_dir=args.static_dir,
         locomotion_dir=args.locomotion_dir,
         attack_dir=args.attack_dir,

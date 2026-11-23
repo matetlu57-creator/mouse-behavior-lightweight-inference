@@ -46,13 +46,13 @@ class IndividualHeuristicConfig:
     grooming_min_duration_s: float = 0.3
     grooming_min_head_amplitude_body_ratio: float = 0.07
     grooming_min_reversals: int = 3
-    posterior_max_excursion_body_ratio: float = 0.12
+    posterior_max_excursion_body_ratio: float = 0.28
     back_groom_max_nose_posterior_body_ratio: float = 0.45
     rearing_context_window_s: float = 2.0
     rearing_min_duration_s: float = 0.5
     rearing_min_projection_change_body_ratio: float = 0.15
     rearing_max_short_projection_body_ratio: float = 0.95
-    wall_min_neck_excursion_body_ratio: float = 0.21
+    wall_min_neck_excursion_body_ratio: float = 0.14
     # --- v16.2 module 2: posture rebuilt on 7-point trajectory + detection box ---
     #
     # ERA INVARIANCE. evaluation/scale_migration.py multiplies cm_per_pixel by
@@ -78,10 +78,10 @@ class IndividualHeuristicConfig:
     grooming_min_step_nose_speed_body_ratio: float = 6.0 / 10.7
     grooming_min_nose_posterior_speed_ratio: float = 1.8
     grooming_min_head_posterior_speed_ratio: float = 1.3
-    grooming_max_seated_projection_body_ratio: float = 0.90
+    grooming_max_seated_projection_body_ratio: float = 1.15
     grooming_box_pulsation_body_ratio: float = 0.07
     grooming_min_nose_ear_codirection: float = 0.55
-    grooming_max_lateral_amplitude_body_ratio: float = 0.08
+    grooming_max_lateral_amplitude_body_ratio: float = 0.12
     grooming_bridge_max_s: float = 0.5
     rearing_max_posterior_excursion_body_ratio: float = 1.15
     rearing_max_box_shrink_ratio: float = 0.78
@@ -100,6 +100,13 @@ class IndividualHeuristicConfig:
     motion_interpolation_max_gap_s: float = 0.3
     # Appended for positional compatibility; opt-in remains audit-only.
     enable_posture_screen: bool = False
+    # Posture screen refinement fields (appended after enable_posture_screen for positional compatibility).
+    grooming_fore_aft_min_reversals: int = 5
+    grooming_min_sustained_nose_speed_body_ratio: float = 0.50
+    grooming_seed_nose_speed_body_ratio: float = 0.85
+    grooming_max_center_speed_ratio: float = 1.5
+    rearing_veto_max_box_pulsation_body_ratio: float = 0.26
+    rearing_veto_min_nose_to_pulsation_ratio: float = 5.5
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
@@ -731,6 +738,7 @@ def individual_rule_masks(
             )
             box_pulsation = np.maximum(_range(box_width, context), _range(box_height, context))
             box_pulsation = np.where(np.isfinite(box_pulsation), box_pulsation, -np.inf)
+            has_box = np.isfinite(box_pulsation)
             near_wall = (np.isfinite(d_wall) & (
                 d_wall <= config.rearing_max_wall_distance_body_ratio * reference_body_cm)) | np.isnan(d_wall)
             shrink_ok = np.isfinite(rho_box) & (rho_box <= config.rearing_max_box_shrink_ratio)
@@ -742,6 +750,7 @@ def individual_rule_masks(
             rho_box = np.full(observed.shape, np.nan)
             d_wall = np.full(observed.shape, np.nan)
             box_pulsation = np.full(observed.shape, np.nan)
+            has_box = np.zeros(observed.shape, dtype=bool)
             shrink_ok = np.ones(observed.shape, dtype=bool)
             near_wall = np.ones(observed.shape, dtype=bool)
             pulsation_ok = np.zeros(observed.shape, dtype=bool)
@@ -752,6 +761,13 @@ def individual_rule_masks(
         step_nose = _step_speed(raw_points[:, :, 0] - raw_posterior, fps, step_frames, dead_zone)
         step_posterior = _step_speed(raw_posterior, fps, step_frames, dead_zone)
         step_head = _step_speed(raw_head - raw_posterior, fps, step_frames, dead_zone)
+        sustained_step_nose = _trailing_mean(
+            step_nose, max(1, int(round(config.grooming_signal_window_s * fps)))
+        )
+        posterior_speed = _rolling_mean_path_speed(
+            posterior, pose_observed, fps, config.motion_window_s,
+            max_gap_s=config.motion_interpolation_max_gap_s,
+        )
         speed_ratio = np.divide(step_nose, step_posterior, out=np.full_like(step_nose, np.nan),
                                 where=np.isfinite(step_posterior) & (step_posterior > 0))
         head_ratio = np.divide(step_head, step_posterior, out=np.full_like(step_head, np.nan),
@@ -788,39 +804,87 @@ def individual_rule_masks(
             rear_frames,
         )
 
-        open_sweep = (~near_wall
-                      & (head_excursion >= 0.25 * reference_body_cm)
-                      & (neck_excursion >= 0.16 * reference_body_cm)
-                      & (projection_change >= 0.10 * reference_body_cm))
-        wall_sweep = (np.isfinite(d_wall)
-                      & (d_wall >= 0.25 * reference_body_cm)
-                      & (d_wall <= 0.70 * reference_body_cm)
-                      & (head_excursion >= 0.12 * reference_body_cm)
-                      & (neck_excursion >= 0.11 * reference_body_cm)
-                      & (projection_change >= 0.11 * reference_body_cm))
-        classical_sweep = (near_wall
-                           & (neck_excursion >= config.wall_min_neck_excursion_body_ratio * reference_body_cm)
-                           & (head_excursion >= config.wall_min_neck_excursion_body_ratio * reference_body_cm))
-        standing_wall = (near_wall
-                         & (projection <= 0.65 * reference_body_cm)
-                         & (head_excursion >= 0.24 * reference_body_cm)
-                         & (projection_change >= 0.15 * reference_body_cm))
+        open_sweep_base = (
+            ~near_wall
+            & (head_excursion >= 0.22 * reference_body_cm)
+            & (neck_excursion >= 0.16 * reference_body_cm)
+            & (projection_change >= 0.13 * reference_body_cm)
+        )
+        open_sweep_extended = (
+            ~near_wall
+            & (head_excursion >= 0.28 * reference_body_cm)
+            & (neck_excursion >= 0.20 * reference_body_cm)
+            & (projection_change >= 0.20 * reference_body_cm)
+            & (~has_box | (box_pulsation >= 0.15 * reference_body_cm))
+        )
+        open_sweep = open_sweep_base | open_sweep_extended
+        wall_sweep = (
+            np.isfinite(d_wall)
+            & (d_wall >= 0.25 * reference_body_cm)
+            & (d_wall <= 0.70 * reference_body_cm)
+            & (head_excursion >= 0.13 * reference_body_cm)
+            & (neck_excursion >= 0.12 * reference_body_cm)
+            & (projection_change >= 0.13 * reference_body_cm)
+        )
+        classical_sweep = (
+            near_wall
+            & (neck_excursion >= config.wall_min_neck_excursion_body_ratio * reference_body_cm)
+            & (head_excursion >= 0.16 * reference_body_cm)
+            & (projection_change >= config.rearing_min_projection_change_body_ratio * reference_body_cm)
+        )
+        long_flat = (
+            (projection > 1.02 * reference_body_cm)
+            & has_box
+            & (box_pulsation < 0.13 * reference_body_cm)
+            & (~shrink_ok)
+        )
+        classical_sweep &= ~long_flat
+        standing_wall = (
+            near_wall
+            & (projection <= 0.65 * reference_body_cm)
+            & (head_excursion >= 0.24 * reference_body_cm)
+            & (projection_change >= config.rearing_min_projection_change_body_ratio * reference_body_cm)
+        )
 
         scene_b = open_sweep | wall_sweep | classical_sweep | standing_wall
         scene_b &= ((head_neck_cos > 0)
                     | (window_covariance >= config.rearing_min_head_neck_covariance))
         wall_pattern = near_wall & scene_b & rear_stable
 
-        strong_rearing_excursion = (
-            (head_excursion >= 0.28 * reference_body_cm)
-            & (neck_excursion >= 0.18 * reference_body_cm)
-            & (projection_change >= 0.15 * reference_body_cm)
+        safe_pulsation = np.maximum(
+            np.where(has_box, box_pulsation, 0.04 * reference_body_cm),
+            0.04 * reference_body_cm,
         )
-        rearing_veto = wall_sweep | standing_wall | classical_sweep | strong_rearing_excursion
+        safe_proj_change = np.maximum(projection_change, 0.04 * reference_body_cm)
+        nose_to_pulsation = sustained_step_nose / safe_pulsation
+        nose_to_proj_change = sustained_step_nose / safe_proj_change
+        high_pulsation = has_box & (
+            box_pulsation > config.rearing_veto_max_box_pulsation_body_ratio * reference_body_cm
+        )
+        morph_rear = np.where(
+            has_box,
+            (projection_change >= 0.18 * reference_body_cm)
+            & (neck_excursion >= config.wall_min_neck_excursion_body_ratio * reference_body_cm)
+            & (nose_to_pulsation < config.rearing_veto_min_nose_to_pulsation_ratio),
+            (projection_change >= 0.20 * reference_body_cm)
+            & (neck_excursion >= 0.16 * reference_body_cm)
+            & (nose_to_proj_change < 4.5),
+        )
+        stand_veto = standing_wall & np.where(
+            has_box,
+            nose_to_pulsation < config.rearing_veto_min_nose_to_pulsation_ratio,
+            nose_to_proj_change < 4.5,
+        )
+        rearing_veto = high_pulsation | morph_rear | stand_veto
 
         # --- grooming ------------------------------------------------------
-        stable = pose_observed & np.isfinite(speed) & (
-            speed <= config.motion_speed_threshold_cm_s)
+        stable = (
+            pose_observed
+            & np.isfinite(posterior_speed)
+            & (posterior_speed <= config.motion_speed_threshold_cm_s)
+            & np.isfinite(speed)
+            & (speed <= config.grooming_max_center_speed_ratio * config.motion_speed_threshold_cm_s)
+        )
         stable &= posterior_excursion <= config.posterior_max_excursion_body_ratio * reference_body_cm
         axial = np.sum((head - neck) * unit, axis=2)
         lateral = (head - neck)[..., 0] * unit[..., 1] - (head - neck)[..., 1] * unit[..., 0]
@@ -840,12 +904,15 @@ def individual_rule_masks(
         seated = np.isfinite(projection) & (
             projection <= config.grooming_max_seated_projection_body_ratio * reference_body_cm)
         fore_aft = step_nose >= config.grooming_min_step_nose_speed_body_ratio * reference_body_cm
+        fore_aft &= np.isfinite(sustained_step_nose) & (
+            sustained_step_nose >= config.grooming_min_sustained_nose_speed_body_ratio * reference_body_cm
+        )
         fore_aft &= _positive_motion_dominance(
             step_nose, step_posterior, config.grooming_min_nose_posterior_speed_ratio)
         fore_aft &= _positive_motion_dominance(
             step_head, step_posterior, config.grooming_min_head_posterior_speed_ratio)
         fore_aft &= seated
-        fore_aft &= reversal_count(axial_velocity) >= config.grooming_min_reversals
+        fore_aft &= reversal_count(axial_velocity) >= config.grooming_fore_aft_min_reversals
         fore_aft &= lateral_amp <= config.grooming_max_lateral_amplitude_body_ratio * reference_body_cm
         fore_aft &= ~rearing_veto
 
@@ -875,10 +942,22 @@ def individual_rule_masks(
         back &= np.linalg.norm(_range(nose_relative, context), axis=2) >= min_amplitude
 
         # --- grooming evidence & qualification -----------------------------
-        grooming_evidence = stable & (fore_aft | back)
+        raw_grooming = stable & (fore_aft | back)
         grooming_evidence, grooming_filled = _bridge_gaps(
-            grooming_evidence, round(config.grooming_bridge_max_s * fps))
+            raw_grooming, round(config.grooming_bridge_max_s * fps))
         grooming = _qualify(grooming_evidence, config.grooming_min_duration_s, fps)
+        grooming_seed = (
+            (
+                np.isfinite(sustained_step_nose)
+                & (sustained_step_nose >= config.grooming_seed_nose_speed_body_ratio * reference_body_cm)
+            )
+            | back
+        )
+        for slot in range(grooming.shape[1]):
+            for bout_start, bout_end in _runs(grooming[:, slot]):
+                if not (raw_grooming[bout_start:bout_end, slot] & grooming_seed[bout_start:bout_end, slot]).any():
+                    grooming[bout_start:bout_end, slot] = False
+                    grooming_filled[bout_start:bout_end, slot] = False
 
         # --- rearing -------------------------------------------------------
         mounted_veto = np.zeros_like(rear_stable)
@@ -930,9 +1009,9 @@ def individual_rule_masks(
         dorsal_groom_veto = dorsal_groom_curled | back
 
         rearing_active = rear_stable & (scene_a | scene_b) & ~grooming & ~mounted_veto & ~dorsal_groom_veto
-        rearing_active &= (short_projection | scene_a | standing_wall | wall_pattern)
+        rearing_active &= (short_projection | scene_a | open_sweep_extended | standing_wall | wall_pattern)
         rearing_evidence, rearing_filled = _bridge_gaps(
-            rearing_active, round(0.3 * fps))
+            rearing_active, round(config.rearing_bridge_max_s * fps))
         rearing_evidence &= ~grooming & ~mounted_veto & ~dorsal_groom_veto
         rearing = _qualify(rearing_evidence, config.rearing_min_duration_s, fps)
 
@@ -944,9 +1023,11 @@ def individual_rule_masks(
                             "grooming_fore_aft": fore_aft & stable,
                             "grooming_back": back & stable, "wall_like_pattern": wall_pattern,
                             "rho_box": rho_box, "d_wall_cm": d_wall,
+                            "box_pulsation_cm": box_pulsation,
                             "spine_collinearity": spine_collinearity,
                             "head_neck_window_covariance": window_covariance,
                             "grooming_step_nose_speed_cm_s": step_nose,
+                            "grooming_sustained_nose_speed_cm_s": sustained_step_nose,
                             "grooming_step_posterior_speed_cm_s": step_posterior,
                             "grooming_nose_posterior_speed_ratio": speed_ratio,
                             "grooming_head_posterior_speed_ratio": head_ratio,

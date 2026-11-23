@@ -570,3 +570,106 @@ class TestAdversarialAndResilience:
         assert res["predicted_behavior"] == "Chasing"
         assert res["temporal_iou"] >= 0.90
 
+
+def test_optimized_social_heuristic_config_and_priority_arbitration(monkeypatch, tmp_path):
+    """Verify optimized social config thresholds and Attack/Chasing priority arbitration."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    import mouse_behavior.evaluation.clip_benchmark as clip_benchmark
+    from mouse_behavior.evaluation.social_heuristic_config import (
+        DEFAULT_SOCIAL_HEURISTIC_CONFIG,
+        OPTIMIZED_SOCIAL_HEURISTIC_CONFIG,
+    )
+
+    assert OPTIMIZED_SOCIAL_HEURISTIC_CONFIG.attack_min_duration_s == pytest.approx(0.10)
+    assert OPTIMIZED_SOCIAL_HEURISTIC_CONFIG.chasing_min_duration_s == pytest.approx(0.50)
+
+    fps = 30.0
+    total_frames = 60
+    clip_dir = tmp_path / "arb_clip"
+    clip_dir.mkdir()
+    (clip_dir / "annotation.json").write_text(
+        json.dumps({
+            "behavior": "Attack",
+            "mouse_ids": [1, 2],
+            "frame_range": {"start": 0, "end": total_frames - 1},
+        }),
+        encoding="utf-8",
+    )
+    (clip_dir / "metadata.json").write_text(
+        json.dumps({"clip": {"fps": fps, "frame_count": total_frames}}),
+        encoding="utf-8",
+    )
+    (clip_dir / "tracks.json").write_text(
+        json.dumps([
+            {
+                "frame": f,
+                "detections": [
+                    {"track_id": 1, "box": [10.0, 10.0, 30.0, 30.0]},
+                    {"track_id": 2, "box": [40.0, 10.0, 60.0, 30.0]},
+                ],
+            }
+            for f in range(total_frames)
+        ]),
+        encoding="utf-8",
+    )
+
+    fake_features = SimpleNamespace(
+        track_ids=np.array([1, 2]),
+        pair_i=np.array([0]),
+        pair_j=np.array([1]),
+    )
+    monkeypatch.setattr(clip_benchmark, "load_exported_features", lambda *args, **kwargs: fake_features)
+
+    captured_calls: list[tuple[str, float, object]] = []
+
+    def _run_case(attack_frames: int, chasing_frames: int, social_config=None) -> dict:
+        captured_calls.clear()
+
+        def _fake_pair_rule_masks(_features, _params, cfg):
+            attack = np.zeros((total_frames, 1), dtype=bool)
+            chasing = np.zeros((total_frames, 1), dtype=bool)
+            if attack_frames > 0:
+                attack[:attack_frames, 0] = True
+            if chasing_frames > 0:
+                chasing[attack_frames : attack_frames + chasing_frames, 0] = True
+            captured_calls.append(("masks", cfg.attack_min_duration_s, cfg))
+            return {"attack": attack, "chasing": chasing}
+
+        def _fake_refine_attack(events, _store, _binding, min_duration_s=None):
+            captured_calls.append(("refine_attack", float(min_duration_s), events[0]["canonical_behavior"]))
+            return events
+
+        def _fake_refine_chasing(events, _store, _binding, min_duration_s=None):
+            captured_calls.append(("refine_chasing", float(min_duration_s), events[0]["canonical_behavior"]))
+            return events
+
+        monkeypatch.setattr(clip_benchmark, "pair_rule_masks", _fake_pair_rule_masks)
+        monkeypatch.setattr(clip_benchmark.segment_clipping, "refine_attack_segments", _fake_refine_attack)
+        monkeypatch.setattr(clip_benchmark.segment_clipping, "refine_chasing_segments", _fake_refine_chasing)
+
+        return clip_benchmark.evaluate_attack_chasing_clip(
+            clip_dir,
+            social_config=social_config,
+            visualize=False,
+        )
+
+    # Prolonged pursuit (>= 1.0s and >= 2x attack frames) predicts Chasing and defaults to optimized config.
+    res_chase = _run_case(attack_frames=10, chasing_frames=35, social_config=DEFAULT_SOCIAL_HEURISTIC_CONFIG)
+    assert res_chase["predicted_behavior"] == "Chasing"
+    assert ("refine_chasing", 0.50, "chasing") in captured_calls
+    assert ("masks", 0.10, OPTIMIZED_SOCIAL_HEURISTIC_CONFIG) in captured_calls
+
+    # Pursuit >= 1.0s but below 2x attack frames stays Attack by priority.
+    res_attack_ratio = _run_case(attack_frames=20, chasing_frames=35)
+    assert res_attack_ratio["predicted_behavior"] == "Attack"
+    assert ("refine_attack", 0.10, "attack") in captured_calls
+
+    # Short pursuit (< 1.0s) alongside attack stays Attack by priority.
+    res_attack_short = _run_case(attack_frames=5, chasing_frames=20)
+    assert res_attack_short["predicted_behavior"] == "Attack"
+    assert ("refine_attack", 0.10, "attack") in captured_calls
+
+

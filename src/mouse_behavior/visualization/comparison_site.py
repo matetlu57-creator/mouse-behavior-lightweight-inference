@@ -14,6 +14,8 @@ DEFAULT_CHASING_DIR = Path(r"F:\补全行为素材429_261107\四行为训练素�
 DEFAULT_DATASET_DIR = Path(r"E:\鼠行为数据集_人工清洗完成_605段_20261024\dataset")
 DEFAULT_ISOLATION_DIR = DEFAULT_DATASET_DIR / "Isolation"
 DEFAULT_GROUP_LOCOMOTION_DIR = DEFAULT_DATASET_DIR / "Group locomotion"
+DEFAULT_DISPERSAL_DIR = DEFAULT_DATASET_DIR / "Dispersal"
+DEFAULT_SOCIAL_CLUSTERING_DIR = DEFAULT_DATASET_DIR / "Social clustering"
 DEFAULT_STATIC_DIR = DEFAULT_DATASET_DIR / "Static"
 DEFAULT_LOCOMOTION_DIR = DEFAULT_DATASET_DIR / "Locomotion"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -21,6 +23,7 @@ _OUTPUTS_DIR = _REPO_ROOT / "outputs"
 DEFAULT_CROPS_DIR = _OUTPUTS_DIR / "visualized_cropped_videos"
 DEFAULT_ORIG_ANNOTATED_DIR = _OUTPUTS_DIR / "visualized_original_videos"
 DEFAULT_COMBINED_EVALUATION_JSON = _OUTPUTS_DIR / "combined_behavior_visualized_evaluation.json"
+DEFAULT_GROUP_BEHAVIORS_EVALUATION_JSON = _OUTPUTS_DIR / "group_behaviors_evaluation.json"
 DEFAULT_STATIC_LOCOMOTION_EVALUATION_JSON = _OUTPUTS_DIR / "static_locomotion_evaluation.json"
 DEFAULT_ISO_GLOCO_EVALUATION_JSON = _OUTPUTS_DIR / "isolation_group_locomotion_evaluation.json"
 DEFAULT_ATTACK_CHASING_EVALUATION_JSON = _OUTPUTS_DIR / "missing_id_visualized_evaluation.json"
@@ -278,10 +281,63 @@ DEMO_FALLBACK_DATA_COMBINED = {
 }
 
 
+DEMO_FALLBACK_DATA_GROUP_BEHAVIORS = {
+    "is_fallback_demo": True,
+    "demo_warning": "当前展示为内置离线演示数据（仅用于界面交互验证，非后端实时科研结果）",
+    "evaluation_title": "三种群体行为边界裁剪与视频验证演示集 (Dispersal / Group locomotion / Social clustering)",
+    "total_clips": 3,
+    "dispersal_clips": 1,
+    "group_locomotion_clips": 1,
+    "social_clustering_clips": 1,
+    "overall_accuracy": 1.0,
+    "overall_mean_iou": 1.0,
+    "iou_ge_90_rate": 1.0,
+    "iou_ge_95_rate": 1.0,
+    "iou_ge_05_rate": 1.0,
+    "per_clip_results": [
+        {
+            "clip_id": "083919df8ea7f9a223008fbb",
+            "ground_truth_behavior": "Dispersal",
+            "predicted_behavior": "Dispersal",
+            "is_correct": True,
+            "target_mouse_ids": [5178, 5194, 5281, 5432],
+            "semantic_roles": {"Dispersal": [5178, 5194, 5281, 5432]},
+            "ground_truth_range_half_open": {"start": 0, "end": 325},
+            "predicted_range_half_open": {"start": 0, "end": 325},
+            "temporal_iou": 1.0,
+            "iou_ge_90": True,
+            "iou_ge_95": True,
+            "iou_ge_05": True,
+            "total_frames": 325,
+            "fps": 30.01,
+        },
+        DEMO_FALLBACK_DATA_ISO_GLOCO["per_clip_results"][0],
+        {
+            "clip_id": "0127c0e6bfc16e1d626a1224",
+            "ground_truth_behavior": "Social clustering",
+            "predicted_behavior": "Social clustering",
+            "is_correct": True,
+            "target_mouse_ids": [3329, 3509, 3525, 3545],
+            "semantic_roles": {"Social Clustering": [3329, 3509, 3525, 3545]},
+            "ground_truth_range_half_open": {"start": 0, "end": 96},
+            "predicted_range_half_open": {"start": 0, "end": 96},
+            "temporal_iou": 1.0,
+            "iou_ge_90": True,
+            "iou_ge_95": True,
+            "iou_ge_05": True,
+            "total_frames": 96,
+            "fps": 30.01,
+        },
+    ],
+}
+
+
 def _select_demo_fallback(evaluation_file: Path) -> dict[str, Any]:
     name = evaluation_file.name.lower()
     if "combined" in name:
         return DEMO_FALLBACK_DATA_COMBINED
+    if "group_behaviors" in name or "dispersal" in name or "clustering" in name:
+        return DEMO_FALLBACK_DATA_GROUP_BEHAVIORS
     if "static" in name or ("locomotion" in name and "group" not in name):
         return DEMO_FALLBACK_DATA_STATIC_LOCO
     if "isolation" in name or "group" in name:
@@ -646,6 +702,18 @@ def render_comparison_page(
     border: 1px solid rgba(139, 92, 246, 0.4);
   }}
 
+  .badge-dispersal {{
+    background: rgba(236, 72, 153, 0.2);
+    color: #f472b6;
+    border: 1px solid rgba(236, 72, 153, 0.4);
+  }}
+
+  .badge-clustering {{
+    background: rgba(20, 184, 166, 0.2);
+    color: #2dd4bf;
+    border: 1px solid rgba(20, 184, 166, 0.4);
+  }}
+
   .badge-static {{
     background: rgba(14, 165, 233, 0.2);
     color: #38bdf8;
@@ -955,6 +1023,52 @@ def render_comparison_page(
     transition: width 0.3s ease;
   }}
 
+  /* Collapsible Algorithm & Dataset Share Drawer */
+  .rules-drawer {{
+    display: none;
+    flex-shrink: 0;
+    background: rgba(15, 23, 42, 0.96);
+    border-bottom: 1px solid var(--border-color);
+    padding: 12px 18px;
+    max-height: 44vh;
+    overflow-y: auto;
+  }}
+
+  .rules-drawer.open {{
+    display: block;
+  }}
+
+  .rules-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }}
+
+  .rule-spec-card {{
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: var(--text-secondary);
+  }}
+
+  .rule-spec-card h3 {{
+    font-size: 0.88rem;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }}
+
+  .rule-spec-card ul {{
+    padding-left: 16px;
+    margin-top: 4px;
+  }}
+
   /* Responsive */
   @media (max-width: 1024px) {{
     html, body {{
@@ -992,6 +1106,7 @@ def render_comparison_page(
     </span>
   </div>
   <div style="display:flex; align-items:center; gap:8px;">
+    <button class="btn" id="btnToggleRules" onclick="toggleRulesDrawer()" title="展开/收起启发式算法边界规则与数据集占比说明">📖 算法边界与占比</button>
     <button class="btn" id="btnToggleMetrics" onclick="toggleMetricsBar()" title="展开/收起顶部统计面板">📊 折叠统计</button>
     <button class="btn" onclick="retryFetchData()">🔄 刷新数据</button>
   </div>
@@ -1001,6 +1116,10 @@ def render_comparison_page(
   <span id="alertMsg">⚠️ 无法连接后端数据 API。当前已自动呈现离线演示数据集。</span>
   <button class="alert-btn" onclick="retryFetchData()">重试 API 连接</button>
 </div>
+
+<section class="rules-drawer" id="rulesDrawer" aria-label="行为边界规则与数据集占比说明">
+  <div class="rules-grid" id="rulesGrid"></div>
+</section>
 
 <!-- Dashboard Metrics Bar -->
 <section class="metrics-bar" id="metricsBar" aria-label="核心指标统计">
@@ -1097,6 +1216,11 @@ def render_comparison_page(
           </div>
           <div class="video-wrapper">
             <video id="origVideo" playsinline preload="auto" controls></video>
+            <div id="origOverlay" style="display:none; position:absolute; top:0; left:0; right:0; bottom:0; background:rgba(15,23,42,0.92); color:#fbbf24; flex-direction:column; align-items:center; justify-content:center; padding:20px; text-align:center; z-index:10;">
+              <div style="font-size:2rem; margin-bottom:8px;">📹</div>
+              <div id="origOverlayTitle" style="font-weight:700; font-size:1rem; margin-bottom:4px; color:#fbbf24;">原视频加载受限</div>
+              <div id="origOverlayDesc" style="font-size:0.8rem; color:#94a3b8; max-width:320px; line-height:1.6;">当前为离线演示模式或本地原视频路径不可用，无法播放原始监控视频。</div>
+            </div>
           </div>
           <div class="video-card-footer" id="origFooter">
             标注真实时序区间: 载入中...
@@ -1260,10 +1384,23 @@ function updateOrigVideoSource(preserveTime = false) {{
   const behDir = currentClip.ground_truth_behavior;
   const param = showOrigBoxes ? '1' : '0';
   const spd = _getSelectedPlaybackRate();
+  const origOverlay = document.getElementById('origOverlay');
+  if (origOverlay) origOverlay.style.display = 'none';
+  origVideo.style.display = 'block';
   origVideo.defaultPlaybackRate = spd;
   origVideo.playbackRate = spd;
   origVideo.src = `/api/video/original/${{encodeURIComponent(behDir)}}/${{encodeURIComponent(currentClip.clip_id)}}?annotated=${{param}}`;
+  origVideo.onerror = () => {{
+    if (origOverlay) {{
+      origOverlay.style.display = 'flex';
+      document.getElementById('origOverlayTitle').textContent = '原视频加载失败';
+      document.getElementById('origOverlayDesc').textContent = '本地视频流不可用或当前处于离线演示模式，请确认后端服务与视频路径可用后重试。';
+      origVideo.style.display = 'none';
+    }}
+  }};
   origVideo.addEventListener('loadedmetadata', () => {{
+    if (origOverlay) origOverlay.style.display = 'none';
+    origVideo.style.display = 'block';
     origVideo.playbackRate = _getSelectedPlaybackRate();
     if (curTime > 0 && Number.isFinite(origVideo.duration)) {{
       origVideo.currentTime = Math.min(curTime, Math.max(0, origVideo.duration - 0.01));
@@ -1380,6 +1517,7 @@ function escapeHtml(value) {{
 function loadData(dataset, isFallback) {{
   currentData = dataset;
   updateDashboardMetrics(dataset, isFallback);
+  renderRulesDrawer(dataset);
   renderFilterPills(dataset);
   renderClipList();
   
@@ -1390,9 +1528,74 @@ function loadData(dataset, isFallback) {{
   }}
 }}
 
+function toggleRulesDrawer() {{
+  const drawer = document.getElementById('rulesDrawer');
+  const btn = document.getElementById('btnToggleRules');
+  if (!drawer || !btn) return;
+  const willOpen = !drawer.classList.contains('open');
+  drawer.classList.toggle('open', willOpen);
+  btn.textContent = willOpen ? '📖 收起边界与占比' : '📖 算法边界与占比';
+}}
+
+function renderRulesDrawer(data) {{
+  const grid = document.getElementById('rulesGrid');
+  if (!grid) return;
+  const specs = Array.isArray(data && data.behavior_specs) ? data.behavior_specs : [];
+  if (specs.length === 0) {{
+    grid.innerHTML = `
+      <div class="rule-spec-card">
+        <h3><span>散开 / 群体分散 (Dispersal)</span><span class="clip-badge badge-dispersal">≥2离群 / 3+群</span></h3>
+        <ul>
+          <li><b>起始边界</b>：群体仍处于紧凑聚集（R ≤ 10.0 cm / 120 px），支持最长 4.0s 向前平滑回溯。</li>
+          <li><b>扩散条件</b>：至少 2 只个体向外辐射净位移 ≥ 4.0 cm（25 px），半径峰值增益 ≥ 35 px。</li>
+          <li><b>终止与门控</b>：持续扩散至末端或重新靠拢之前；总时长严格 <code>&gt; 5.0 s</code>。</li>
+        </ul>
+      </div>
+      <div class="rule-spec-card">
+        <h3><span>群体同步运动 (Group locomotion)</span><span class="clip-badge badge-gloco">≥3只小鼠</span></h3>
+        <ul>
+          <li><b>起始边界</b>：全体成员同时进入协同活跃运动帧，持续同步支撑 ≥ 0.933 s。</li>
+          <li><b>协同条件</b>：平均方向余弦 ≥ 0.628，净位移 ≥ 13.84 cm，路径均衡比 ≥ 0.40，间距 &lt; 64.04 cm。</li>
+          <li><b>终止与门控</b>：同步减速或队列消散前最后一帧；总时长严格 <code>&gt; 3.0 s</code>。</li>
+        </ul>
+      </div>
+      <div class="rule-spec-card">
+        <h3><span>社会聚集 (Social clustering)</span><span class="clip-badge badge-clustering">≥3只小鼠</span></h3>
+        <ul>
+          <li><b>起始边界</b>：最多向前回溯 3.0s 定位发起者定向靠近（速度 ≥ 2.0 cm/s，余弦 ≥ 0.5）的起点。</li>
+          <li><b>收敛条件</b>：聚集前 90% 半径与核心半径落差 ≥ 1.0 cm，发起路径 ≥ 10.0 cm，排除平行同步移动。</li>
+          <li><b>终止与门控</b>：稳定紧凑核心末端或再次散开之前；终态稳定持续 <code>≥ 0.50 s</code>。</li>
+        </ul>
+      </div>
+    `;
+    return;
+  }}
+
+  grid.innerHTML = specs.map(spec => {{
+    const badgeCls = getBehaviorBadgeClass(spec.behavior);
+    const shareText = (typeof spec.dataset_share_pct === 'number' && spec.dataset_total_clips)
+      ? `${{spec.clip_count}} / ${{spec.dataset_total_clips}} (${{spec.dataset_share_pct.toFixed(2)}}%)`
+      : `${{spec.clip_count || 0}} 段`;
+    const points = Array.isArray(spec.rules) ? spec.rules : [];
+    return `
+      <div class="rule-spec-card">
+        <h3>
+          <span>${{escapeHtml(spec.zh_name || spec.behavior)}} (${{escapeHtml(spec.behavior)}})</span>
+          <span class="${{badgeCls}}">${{escapeHtml(shareText)}}</span>
+        </h3>
+        <ul>
+          ${{points.map(pt => `<li>${{escapeHtml(pt)}}</li>`).join('')}}
+        </ul>
+      </div>
+    `;
+  }}).join('');
+}}
+
 function getBehaviorBadgeClass(beh) {{
   if (beh === 'Isolation') return 'clip-badge badge-isolation';
   if (beh === 'Group locomotion') return 'clip-badge badge-gloco';
+  if (beh === 'Dispersal') return 'clip-badge badge-dispersal';
+  if (beh === 'Social clustering') return 'clip-badge badge-clustering';
   if (beh === 'Attack') return 'clip-badge badge-attack';
   if (beh === 'Chasing') return 'clip-badge badge-chasing';
   if (beh === 'Static') return 'clip-badge badge-static';
@@ -1433,17 +1636,36 @@ function updateDashboardMetrics(data, isFallback) {{
     'Chasing': '#fbbf24',
     'Isolation': '#22d3ee',
     'Group locomotion': '#a78bfa',
+    'Dispersal': '#f472b6',
+    'Social clustering': '#2dd4bf',
     'Static': '#38bdf8',
     'Locomotion': '#34d399'
   }};
 
+  const behZhNames = {{
+    'Dispersal': '群体分散',
+    'Group locomotion': '群体同步运动',
+    'Social clustering': '社会聚集',
+    'Isolation': '孤立',
+    'Attack': '攻击',
+    'Chasing': '追逐',
+    'Static': '静止',
+    'Locomotion': '移动'
+  }};
+
   const behSub = Object.entries(behMap).map(([k, v]) => `${{v.total}} ${{escapeHtml(k)}}`).join(' / ');
+  const datasetTotal = typeof data.dataset_total_clips === 'number' && data.dataset_total_clips > 0
+    ? data.dataset_total_clips
+    : null;
+  const totalShareText = datasetTotal && !isFallback
+    ? ` (占全量 ${{datasetTotal}} 段 ${{(total / datasetTotal * 100).toFixed(2)}}%)`
+    : '';
 
   let html = `
     <div class="kpi-card">
       <div class="kpi-label">视频样本总数</div>
       <div class="kpi-value" id="kpiTotal">${{total}}</div>
-      <div class="kpi-sub" id="kpiTotalSub">${{behSub}}</div>
+      <div class="kpi-sub" id="kpiTotalSub">${{behSub}}${{totalShareText}}</div>
     </div>
   `;
 
@@ -1451,11 +1673,15 @@ function updateDashboardMetrics(data, isFallback) {{
     const acc = stats.total > 0 ? (stats.correct / stats.total) * 100 : 0;
     const col = behColors[beh] || '#38bdf8';
     const valIdAttr = beh === 'Attack' ? ' id="kpiAttack"' : (beh === 'Chasing' ? ' id="kpiChasing"' : '');
+    const zhTag = behZhNames[beh] ? ` · ${{behZhNames[beh]}}` : '';
+    const sharePart = datasetTotal && !isFallback
+      ? ` · 占比 ${{(stats.total / datasetTotal * 100).toFixed(2)}}%`
+      : '';
     html += `
       <div class="kpi-card">
-        <div class="kpi-label">${{escapeHtml(beh)}} 准确率</div>
+        <div class="kpi-label">${{escapeHtml(beh + zhTag)}} 准确率</div>
         <div class="kpi-value"${{valIdAttr}} style="color:${{col}};">${{acc.toFixed(2)}}%</div>
-        <div class="kpi-sub">${{stats.correct}} / ${{stats.total}} 段正确</div>
+        <div class="kpi-sub">${{stats.correct}} / ${{stats.total}} 段正确${{sharePart}}</div>
       </div>
     `;
   }}
@@ -1928,6 +2154,8 @@ class ComparisonServerHandler(BaseHTTPRequestHandler):
     dataset_dir: Path = DEFAULT_DATASET_DIR
     isolation_dir: Path = DEFAULT_ISOLATION_DIR
     group_locomotion_dir: Path = DEFAULT_GROUP_LOCOMOTION_DIR
+    dispersal_dir: Path = DEFAULT_DISPERSAL_DIR
+    social_clustering_dir: Path = DEFAULT_SOCIAL_CLUSTERING_DIR
     static_dir: Path = DEFAULT_STATIC_DIR
     locomotion_dir: Path = DEFAULT_LOCOMOTION_DIR
     attack_dir: Path = DEFAULT_ATTACK_DIR
@@ -2093,6 +2321,10 @@ class ComparisonServerHandler(BaseHTTPRequestHandler):
                 source_file = self.isolation_dir / clip_id / "clip.mp4"
             elif beh_lower in ("group locomotion", "group_locomotion") and (self.group_locomotion_dir / clip_id / "clip.mp4").is_file():
                 source_file = self.group_locomotion_dir / clip_id / "clip.mp4"
+            elif beh_lower in ("dispersal",) and (self.dispersal_dir / clip_id / "clip.mp4").is_file():
+                source_file = self.dispersal_dir / clip_id / "clip.mp4"
+            elif beh_lower in ("social clustering", "social_clustering") and (self.social_clustering_dir / clip_id / "clip.mp4").is_file():
+                source_file = self.social_clustering_dir / clip_id / "clip.mp4"
             elif beh_lower in ("attack",) and (self.attack_dir / clip_id / "clip.mp4").is_file():
                 source_file = self.attack_dir / clip_id / "clip.mp4"
             elif beh_lower in ("chasing",) and (self.chasing_dir / clip_id / "clip.mp4").is_file():
@@ -2138,6 +2370,8 @@ def create_comparison_server(
     dataset_dir: Path = DEFAULT_DATASET_DIR,
     isolation_dir: Path = DEFAULT_ISOLATION_DIR,
     group_locomotion_dir: Path = DEFAULT_GROUP_LOCOMOTION_DIR,
+    dispersal_dir: Path = DEFAULT_DISPERSAL_DIR,
+    social_clustering_dir: Path = DEFAULT_SOCIAL_CLUSTERING_DIR,
     static_dir: Path = DEFAULT_STATIC_DIR,
     locomotion_dir: Path = DEFAULT_LOCOMOTION_DIR,
     attack_dir: Path = DEFAULT_ATTACK_DIR,
@@ -2158,6 +2392,8 @@ def create_comparison_server(
     ConfiguredHandler.dataset_dir = Path(dataset_dir)
     ConfiguredHandler.isolation_dir = Path(isolation_dir)
     ConfiguredHandler.group_locomotion_dir = Path(group_locomotion_dir)
+    ConfiguredHandler.dispersal_dir = Path(dispersal_dir)
+    ConfiguredHandler.social_clustering_dir = Path(social_clustering_dir)
     ConfiguredHandler.static_dir = Path(static_dir)
     ConfiguredHandler.locomotion_dir = Path(locomotion_dir)
     ConfiguredHandler.attack_dir = Path(attack_dir)
