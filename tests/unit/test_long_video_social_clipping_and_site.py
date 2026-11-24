@@ -88,7 +88,8 @@ def test_social_validation_summary_and_review_clip_selection() -> None:
     assert audit["role_summary_zh"]
     assert audit["full_crop_precision_ok"] is True
 
-    # Verify >0.7s calibrated Chase annotation & package qualification
+    # Verify trusted binding authorizes calibrated >0.7s Chasing / max caps,
+    # while untrusted event dicts alone cannot bypass standalone require_event_duration.
     from mouse_behavior.visualization.behavior_packages import _annotation, _require_package_event_duration
 
     chase_ev = {
@@ -106,7 +107,18 @@ def test_social_validation_summary_and_review_clip_selection() -> None:
         "end_frame": 34,
         "chase_min_duration_policy_s": 0.7,
     }
-    assert _require_package_event_duration(chase_ev, 30.0)["ok"] is True
+    with pytest.raises(ValueError, match="duration rejected"):
+        _require_package_event_duration(chase_ev, 30.0)
+    cal_binding = {"clipping_duration_policy": "calibrated_clip_v1"}
+    assert _require_package_event_duration(chase_ev, 30.0, binding=cal_binding)["ok"] is True
+    for bad_ev in (
+        {"event_id": "hc_bad", "canonical_behavior": "nose_head_contact", "behavior": "Snout-head_contact", "mouse_ids": [1, 2], "start_frame": 0, "end_frame": 12},
+        {"event_id": "sc_bad", "canonical_behavior": "social_clustering", "behavior": "Social clustering", "mouse_ids": [1, 2, 3], "start_frame": 0, "end_frame": 90},
+        {"event_id": "gl_bad", "canonical_behavior": "group_locomotion", "behavior": "Group locomotion", "mouse_ids": [1, 2, 3], "start_frame": 0, "end_frame": 300, "canonical_support_frame_intervals": [[0, 300]]},
+        {"event_id": "iso_bad", "canonical_behavior": "isolation", "behavior": "Isolation", "mouse_ids": [1], "target_mouse_id": 1, "start_frame": 0, "end_frame": 660, "canonical_support_frame_intervals": [[0, 660]]},
+    ):
+        with pytest.raises(ValueError, match="duration rejected"):
+            _require_package_event_duration(bad_ev, 30.0, binding=cal_binding)
     ann = _annotation(chase_ev, [], 24, 30.0, crop_start=10)
     assert ann["actor_id"] == 1
     assert ann["target_id"] == 2
@@ -304,6 +316,47 @@ def test_social_review_site_build_resilience_and_http_routes(tmp_path: Path) -> 
             fallback = json.loads(resp.read())
             assert fallback["is_fallback_demo"] is True
         bundle_path.write_text(original_bundle, encoding="utf-8")
+
+        # Security hardening: path traversal -> 400, cross-origin POST -> 403,
+        # bad Content-Length / malformed JSON -> 400, corrupt reviews store -> 500 without overwrite
+        import http.client
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.request("GET", "/videos/../../etc/passwd")
+            assert conn.getresponse().status == 400
+
+            conn.request("GET", "/videos/%2e%2e/data/bundle.json")
+            assert conn.getresponse().status == 400
+
+            conn.request(
+                "POST",
+                "/api/reviews",
+                body=b'{"clip_uid":"video22::att_1","status":"fail"}',
+                headers={"Content-Type": "application/json", "Origin": "https://evil.example"},
+            )
+            assert conn.getresponse().status == 403
+
+            conn.request(
+                "POST",
+                "/api/reviews",
+                body=b"",
+                headers={"Content-Type": "application/json", "Content-Length": "-1"},
+            )
+            assert conn.getresponse().status == 400
+
+            rev_path = site_dir / "data" / "human_reviews.json"
+            rev_path.write_text("{corrupt_reviews", encoding="utf-8")
+            conn.request(
+                "POST",
+                "/api/reviews",
+                body=b'{"clip_uid":"video22::att_1","status":"fail"}',
+                headers={"Content-Type": "application/json"},
+            )
+            assert conn.getresponse().status == 500
+            assert rev_path.read_text(encoding="utf-8") == "{corrupt_reviews"
+        finally:
+            conn.close()
     finally:
         server.shutdown()
         server.server_close()

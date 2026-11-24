@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-import mimetypes
+import os
 import re
 import shutil
 import threading
@@ -23,6 +23,63 @@ DEFAULT_SOCIAL_REVIEW_SITE_DIR = _REPO_ROOT / "outputs" / "long_video_social_val
 DEFAULT_SOCIAL_REVIEW_PORT = 8797
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._\-\u4e00-\u9fff]+$")
 _REVIEWS_LOCK = threading.Lock()
+_MAX_REVIEW_BODY_BYTES = 256 * 1024
+_STATIC_MIME_BY_SUFFIX: dict[str, str] = {
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".json": "application/json; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+
+
+def _is_safe_videos_req_path(req_path: str) -> bool:
+    """Validate relative URL path syntax for ``videos/...`` without normalizing away traversal segments."""
+    if not req_path or "\\" in req_path or "\x00" in req_path:
+        return False
+    parts = req_path.split("/")
+    if len(parts) < 2 or parts[0] != "videos":
+        return False
+    return all(
+        bool(seg) and seg not in {".", ".."} and bool(_SAFE_SEGMENT_RE.fullmatch(seg))
+        for seg in parts[1:]
+    )
+
+
+def _lookup_safe_video_file(site_dir: Path, req_path: str) -> tuple[Path, str] | None:
+    """Resolve an existing file under ``site_dir/videos`` using directory entry matching (zero raw path joins)."""
+    if not _is_safe_videos_req_path(req_path):
+        return None
+    parts = req_path.split("/")[1:]
+    current = (site_dir / "videos").resolve()
+    if not current.is_dir():
+        return None
+    for idx, seg in enumerate(parts):
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            return None
+        matched = next((entry for entry in entries if entry.name == seg), None)
+        if matched is None or matched.is_symlink():
+            return None
+        if idx < len(parts) - 1:
+            if not matched.is_dir():
+                return None
+            current = matched
+        else:
+            if not matched.is_file():
+                return None
+            resolved_root = (site_dir / "videos").resolve()
+            resolved_file = matched.resolve()
+            if not resolved_file.is_relative_to(resolved_root):
+                return None
+            mime = _STATIC_MIME_BY_SUFFIX.get(matched.suffix.lower(), "application/octet-stream")
+            return resolved_file, mime
+    return None
 
 DEMO_FALLBACK_SOCIAL_BUNDLE: dict[str, Any] = {
     "schema_version": 1,
@@ -54,15 +111,15 @@ DEMO_FALLBACK_SOCIAL_BUNDLE: dict[str, Any] = {
                 "approach": {
                     "behavior": "approach",
                     "label": SOCIAL_BEHAVIOR_LABELS["approach"],
-                    "required_duration_s": 0.3,
-                    "duration_comparator": ">",
+                    "required_duration_s": 1.0,
+                    "duration_comparator": ">=",
                     "raw_candidate_count": 3,
                     "post_crop_count": 2,
                     "changed_bounds_count": 1,
                     "rejected_by_fine_crop_count": 1,
-                    "min_post_duration_s": 0.4,
-                    "mean_raw_duration_s": 0.55,
-                    "mean_post_duration_s": 0.72,
+                    "min_post_duration_s": 1.15,
+                    "mean_raw_duration_s": 0.85,
+                    "mean_post_duration_s": 1.45,
                     "duration_pass_rate": 1.0,
                     "endpoint_observed_rate": 1.0,
                     "full_crop_precision_rate": 1.0,
@@ -519,6 +576,10 @@ textarea {{ width: 100%; min-height: 58px; background: var(--bg); color: var(--t
     return (v === null || v === undefined || Number.isNaN(v)) ? '—' : (v * 100).toFixed(1) + '%';
   }}
 
+  function escHtml(v) {{
+    return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }}
+
   function populateFilters() {{
     const vSel = el('filter-video');
     const prevV = vSel.value;
@@ -561,9 +622,9 @@ textarea {{ width: 100%; min-height: 58px; background: var(--bg); color: var(--t
     const avgFull = fullRates.length ? fullRates.reduce((a, b) => a + b, 0) / fullRates.length : null;
 
     el('kpi-grid').innerHTML = `
-      <div class="kpi"><div class="label">已验证长视频</div><div class="value">${{vids.length}}</div><div class="sub">${{vids.map(v => v.title).join(' + ') || '—'}}</div></div>
+      <div class="kpi"><div class="label">已验证长视频</div><div class="value">${{vids.length}}</div><div class="sub">${{escHtml(vids.map(v => v.title).join(' + ') || '—')}}</div></div>
       <div class="kpi"><div class="label">社交片段总量 (裁剪前 → 裁剪后)</div><div class="value">${{totalRaw}} → ${{totalPost}}</div><div class="sub">边界调整 ${{totalAdj}} 段 · 严格淘汰 ${{totalRej}} 段 · 重叠 0</div></div>
-      <div class="kpi"><div class="label">最低时长达标 / 完整度</div><div class="value">${{fmtPct(avgDurRate)}} / ${{fmtPct(avgFull)}}</div><div class="sub">严格执行最低时长门控 + 端点双鼠完整可见</div></div>
+      <div class="kpi"><div class="label">最低时长达标 / 完整度</div><div class="value">${{escHtml(fmtPct(avgDurRate))}} / ${{escHtml(fmtPct(avgFull))}}</div><div class="sub">严格执行最低时长门控 + 端点双鼠完整可见</div></div>
       <div class="kpi"><div class="label">导出片段人工审核进度</div><div class="value">${{decDone}} / ${{clips.length}}</div><div class="sub">通过 ${{decPass}} · 不通过 ${{decFail}} ${{decDone ? '(通过率 ' + (100 * decPass / decDone).toFixed(1) + '%)' : ''}}</div></div>
     `;
 
@@ -582,19 +643,19 @@ textarea {{ width: 100%; min-height: 58px; background: var(--bg); color: var(--t
         const adjTxt = `${{r.changed_bounds_count}} (${{r.extended_count || 0}}延/${{r.trimmed_count || 0}}修)`;
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td class="left">${{v.title}}</td>
-          <td class="left">${{r.label}}</td>
-          <td>${{r.duration_comparator || '>='}}${{r.required_duration_s}}s</td>
-          <td>${{r.raw_candidate_count}}</td>
-          <td>${{r.post_crop_count}}</td>
-          <td>${{adjTxt}}</td>
-          <td>${{r.rejected_by_fine_crop_count}}</td>
-          <td>${{r.min_post_duration_s}}s</td>
-          <td>${{r.mean_raw_duration_s}}s → ${{r.mean_post_duration_s}}s</td>
-          <td>${{fmtPct(r.duration_pass_rate)}}</td>
-          <td>${{fmtPct(r.endpoint_observed_rate)}}</td>
-          <td><span class="tag ${{fpClass}}">${{fmtPct(r.full_crop_precision_rate)}}</span></td>
-          <td>${{revTxt}}</td>
+          <td class="left">${{escHtml(v.title)}}</td>
+          <td class="left">${{escHtml(r.label)}}</td>
+          <td>${{escHtml(r.duration_comparator || '>=')}}${{escHtml(r.required_duration_s)}}s</td>
+          <td>${{escHtml(r.raw_candidate_count)}}</td>
+          <td>${{escHtml(r.post_crop_count)}}</td>
+          <td>${{escHtml(adjTxt)}}</td>
+          <td>${{escHtml(r.rejected_by_fine_crop_count)}}</td>
+          <td>${{escHtml(r.min_post_duration_s)}}s</td>
+          <td>${{escHtml(r.mean_raw_duration_s)}}s → ${{escHtml(r.mean_post_duration_s)}}s</td>
+          <td>${{escHtml(fmtPct(r.duration_pass_rate))}}</td>
+          <td>${{escHtml(fmtPct(r.endpoint_observed_rate))}}</td>
+          <td><span class="tag ${{escHtml(fpClass)}}">${{escHtml(fmtPct(r.full_crop_precision_rate))}}</span></td>
+          <td>${{escHtml(revTxt)}}</td>
         `;
         tbody.append(tr);
       }}
@@ -643,10 +704,10 @@ textarea {{ width: 100%; min-height: 58px; background: var(--bg); color: var(--t
       btn.className = 'clip-item' + (idx === currentIdx ? ' selected' : '');
       btn.innerHTML = `
         <div class="row-top">
-          <span>#${{idx + 1}} · ${{c.behavior_display}}</span>
-          <span class="tag ${{stCls}}">${{stLabel}}</span>
+          <span>#${{idx + 1}} · ${{escHtml(c.behavior_display)}}</span>
+          <span class="tag ${{escHtml(stCls)}}">${{escHtml(stLabel)}}</span>
         </div>
-        <div class="row-sub">${{c.video_title}} · ${{(c.duration_s || 0).toFixed(2)}}s · ID ${{ (c.mouse_ids || []).join(',') }}${{roleSummary ? ' · ' + roleSummary : ''}}</div>
+        <div class="row-sub">${{escHtml(c.video_title)}} · ${{(c.duration_s || 0).toFixed(2)}}s · ID ${{escHtml((c.mouse_ids || []).join(','))}}${{roleSummary ? ' · ' + escHtml(roleSummary) : ''}}</div>
       `;
       btn.onclick = () => {{ currentIdx = idx; renderClipList(); renderCurrentClip(); }};
       box.append(btn);
@@ -678,30 +739,35 @@ textarea {{ width: 100%; min-height: 58px; background: var(--bg); color: var(--t
 
     const srcUrl = variant === 'overlay' ? (c.overlay_url || c.raw_url) : (c.raw_url || c.overlay_url);
     const vid = el('video-player');
-    if (srcUrl && vid.getAttribute('data-src') !== srcUrl) {{
+    if (!srcUrl) {{
+      vid.removeAttribute('data-src');
+      vid.removeAttribute('src');
+      vid.load();
+    }} else if (vid.getAttribute('data-src') !== srcUrl) {{
       vid.setAttribute('data-src', srcUrl);
       vid.src = srcUrl;
     }}
 
     const a = c.audit || {{}};
+    const sa = Object.fromEntries(Object.entries(a).map(([k, v]) => [k, (v === null || v === undefined || typeof v === 'object') ? v : escHtml(v)]));
     const bd = a.boundary_delta || {{}};
     const rawInfo = a.raw_start_frame !== undefined
       ? `[${{a.raw_start_frame}}, ${{a.raw_end_frame}}) · ${{a.raw_duration_s}}s`
       : '同裁剪窗口';
     const metricItems = Object.entries(a)
       .filter(([k]) => !['audit_notes','boundary_delta','raw_parent_event_id','raw_start_frame','raw_end_frame','raw_duration_s'].includes(k))
-      .map(([k, v]) => `${{k}}: ${{v}}`)
+      .map(([k, v]) => `${{escHtml(k)}}: ${{escHtml(v)}}`)
       .join('<br>');
     let kinBadges = '';
     const idswBadge = c.has_visual_id_switch
       ? `<span style="display:inline-block;margin-right:6px;padding:1px 6px;border-radius:4px;background:#78350f;color:#fde68a;font-weight:600;">含YOLO ID切换/合并 · 保留原始Visual ID</span>`
       : '';
-    if (c.canonical_behavior === 'approach' && a.approach_start_dist_cm !== undefined) {{
-      kinBadges = `<div style="margin-bottom:6px;color:#7dd3fc;">起止距离: ${{a.approach_start_dist_cm}} → ${{a.approach_end_dist_cm}} cm (缩短 ${{a.approach_closing_cm}} cm) · 末段速度cos/头指向cos: ${{a.approach_end_toward_cos ?? '—'}} / ${{a.approach_end_heading_cos ?? '—'}} (主导差 ${{a.approach_end_actor_dominance_cm_s ?? '—'}} cm/s) · 末帧接框间隙 ${{a.approach_end_box_gap_cm ?? a.min_pair_box_gap_cm}} cm · 距他鼠 ≥ ${{a.min_other_mouse_dist_cm}} cm</div>`;
-    }} else if (c.canonical_behavior === 'attack' && a.attack_peak_speed_cm_s !== undefined) {{
-      kinBadges = `<div style="margin-bottom:6px;color:#fda4af;">${{idswBadge}}面积倍率/IoU: ${{a.attack_max_area_ratio ?? '—'}}x / ${{a.attack_max_iou ?? '—'}} · ID轮换: ${{a.attack_id_churn ?? 0}} · 峰值/均速: ${{a.attack_peak_speed_cm_s}} / ${{a.attack_close_mean_speed_cm_s ?? '—'}} cm/s · 翻滚路径: ${{a.attack_tumble_path_cm ?? a.attack_mid_path_cm ?? '—'}} cm</div>`;
-    }} else if ((c.canonical_behavior === 'chase' || c.canonical_behavior === 'chasing') && a.chase_mean_follower_speed_cm_s !== undefined) {{
-      kinBadges = `<div style="margin-bottom:6px;color:#86efac;">${{idswBadge}}追/逃均速: ${{a.chase_mean_follower_speed_cm_s}} / ${{a.chase_mean_leader_speed_cm_s}} cm/s (P25双鼠速 ${{a.chase_both_p25_speed_cm_s ?? '—'}} · 峰值 ${{a.chase_peak_follower_speed_cm_s}} / ${{a.chase_peak_leader_speed_cm_s}} cm/s) · 速度同向cos(P25): ${{a.chase_mean_vel_cos ?? '—'}} (${{a.chase_vel_cos_p25 ?? '—'}}) · 追向cos: ${{a.chase_mean_cos ?? '—'}} · 体轴cos: ${{a.chase_body_heading_cos ?? '—'}} · 尾迹误差: ${{a.chase_trail_error_cm ?? '—'}} cm · 净位移: ${{a.chase_min_net_disp_cm ?? '—'}} cm</div>`;
+    if (c.canonical_behavior === 'approach' && sa.approach_start_dist_cm !== undefined) {{
+      kinBadges = `<div style="margin-bottom:6px;color:#7dd3fc;">起止距离: ${{sa.approach_start_dist_cm}} → ${{sa.approach_end_dist_cm}} cm (缩短 ${{sa.approach_closing_cm}} cm) · 末段速度cos/头指向cos: ${{sa.approach_end_toward_cos ?? '—'}} / ${{sa.approach_end_heading_cos ?? '—'}} (主导差 ${{sa.approach_end_actor_dominance_cm_s ?? '—'}} cm/s) · 末帧接框间隙 ${{sa.approach_end_box_gap_cm ?? sa.min_pair_box_gap_cm}} cm · 距他鼠 ≥ ${{sa.min_other_mouse_dist_cm}} cm</div>`;
+    }} else if (c.canonical_behavior === 'attack' && sa.attack_peak_speed_cm_s !== undefined) {{
+      kinBadges = `<div style="margin-bottom:6px;color:#fda4af;">${{idswBadge}}面积倍率/IoU: ${{sa.attack_max_area_ratio ?? '—'}}x / ${{sa.attack_max_iou ?? '—'}} · ID轮换: ${{sa.attack_id_churn ?? 0}} · 峰值/均速: ${{sa.attack_peak_speed_cm_s}} / ${{sa.attack_close_mean_speed_cm_s ?? '—'}} cm/s · 翻滚路径: ${{sa.attack_tumble_path_cm ?? sa.attack_mid_path_cm ?? '—'}} cm</div>`;
+    }} else if ((c.canonical_behavior === 'chase' || c.canonical_behavior === 'chasing') && sa.chase_mean_follower_speed_cm_s !== undefined) {{
+      kinBadges = `<div style="margin-bottom:6px;color:#86efac;">${{idswBadge}}追/逃均速: ${{sa.chase_mean_follower_speed_cm_s}} / ${{sa.chase_mean_leader_speed_cm_s}} cm/s (P25双鼠速 ${{sa.chase_both_p25_speed_cm_s ?? '—'}} · 峰值 ${{sa.chase_peak_follower_speed_cm_s}} / ${{sa.chase_peak_leader_speed_cm_s}} cm/s) · 速度同向cos(P25): ${{sa.chase_mean_vel_cos ?? '—'}} (${{sa.chase_vel_cos_p25 ?? '—'}}) · 追向cos: ${{sa.chase_mean_cos ?? '—'}} · 体轴cos: ${{sa.chase_body_heading_cos ?? '—'}} · 尾迹误差: ${{sa.chase_trail_error_cm ?? '—'}} cm · 净位移: ${{sa.chase_min_net_disp_cm ?? '—'}} cm</div>`;
     }}
 
     const roleDisplay = c.roles?.summary_zh || a.role_summary_zh || (c.canonical_behavior === 'together' ? '无方向（共同伴随）' : '未指定');
@@ -709,15 +775,15 @@ textarea {{ width: 100%; min-height: 58px; background: var(--bg); color: var(--t
     el('audit-grid').innerHTML = `
       <div class="audit-box">
         <strong>裁剪帧区间、参与鼠与角色分工</strong>
-        裁剪后源帧: [${{c.start_frame}}, ${{c.end_frame}}) (${{c.frame_count}} 帧 / ${{(c.duration_s||0).toFixed(2)}}s)<br>
+        裁剪后源帧: [${{escHtml(c.start_frame)}}, ${{escHtml(c.end_frame)}}) (${{escHtml(c.frame_count)}} 帧 / ${{(c.duration_s||0).toFixed(2)}}s)<br>
         时间段: ${{(c.start_time_s||0).toFixed(2)}}s – ${{(c.end_time_s||0).toFixed(2)}}s<br>
-        参与 Visual ID: [${{(c.mouse_ids || []).join(', ')}}] · 角色分工: <span style="color:#fcd34d;">${{roleDisplay}}</span>
+        参与 Visual ID: [${{escHtml((c.mouse_ids || []).join(', '))}}] · 角色分工: <span style="color:#fcd34d;">${{escHtml(roleDisplay)}}</span>
       </div>
       <div class="audit-box">
         <strong>裁剪前后边界对比</strong>
-        裁剪前规则窗口: ${{rawInfo}}<br>
-        起点偏移: ${{bd.start_shift_s ?? 0}}s · 尾段裁剪: ${{bd.end_trim_s ?? 0}}s<br>
-        变化状态: ${{bd.classification || (bd.changed ? '已调整' : '未变')}}
+        裁剪前规则窗口: ${{escHtml(rawInfo)}}<br>
+        起点偏移: ${{escHtml(bd.start_shift_s ?? 0)}}s · 尾段裁剪: ${{escHtml(bd.end_trim_s ?? 0)}}s<br>
+        变化状态: ${{escHtml(bd.classification || (bd.changed ? '已调整' : '未变'))}}
       </div>
       <div class="audit-box">
         <strong>严格时长与完整性校验 (${{a.full_crop_precision_ok ? 'PASS' : '待关注'}})</strong>
@@ -725,13 +791,13 @@ textarea {{ width: 100%; min-height: 58px; background: var(--bg); color: var(--t
       </div>
       <div class="audit-box">
         <strong>自动审计结论</strong>
-        ${{(a.audit_notes || []).join('；') || '—'}}
+        ${{escHtml((a.audit_notes || []).join('；') || '—')}}
       </div>
     `;
 
     el('clip-links').innerHTML = c.json_base_url
       ? ['annotation.json', 'metadata.json', 'tracks.json']
-          .map(f => `<a href="${{c.json_base_url}}/${{f}}" target="_blank" style="color:#7dd3fc;margin-right:12px;">${{f}}</a>`)
+          .map(f => `<a href="${{escHtml(c.json_base_url)}}/${{f}}" target="_blank" rel="noopener" style="color:#7dd3fc;margin-right:12px;">${{f}}</a>`)
           .join('')
       : '';
 
@@ -856,6 +922,14 @@ class LongVideoSocialReviewHandler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").split(":")[0].lower()
         return host in ("", "127.0.0.1", "localhost", "::1")
 
+    def _origin_ok(self) -> bool:
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        parsed = urlsplit(origin)
+        hostname = (parsed.hostname or "").lower()
+        return parsed.scheme in ("http", "https") and hostname in ("127.0.0.1", "localhost", "::1")
+
     def _send_json(self, code: int, payload: Any) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(code)
@@ -977,31 +1051,50 @@ class LongVideoSocialReviewHandler(BaseHTTPRequestHandler):
             return
 
         if req_path.startswith("videos/"):
-            target = (self.site_dir / Path(req_path)).resolve()
-            videos_root = (self.site_dir / "videos").resolve()
-            if not target.is_relative_to(videos_root):
+            if not _is_safe_videos_req_path(req_path):
                 self._send_json(400, {"error": "Invalid path"})
                 return
-            mime, _ = mimetypes.guess_type(str(target))
-            self._stream_file(target, mime or "application/octet-stream", head_only)
+            found = _lookup_safe_video_file(self.site_dir, req_path)
+            if found is None:
+                self._send_json(404, {"error": "File not found"})
+                return
+            target_path, safe_mime = found
+            self._stream_file(target_path, safe_mime, head_only)
             return
 
-        self._send_json(404, {"error": "Not found", "route": req_path})
+        self._send_json(404, {"error": "Not found"})
 
     def do_POST(self) -> None:
         if not self._host_ok():
             self._send_json(403, {"error": "Loopback access only"})
             return
+        if not self._origin_ok():
+            self._send_json(403, {"error": "Cross-origin POST rejected"})
+            return
         req_path = unquote(urlsplit(self.path).path).strip("/")
         if req_path != "api/reviews":
             self._send_json(404, {"error": "Not found"})
             return
+        raw_len = self.headers.get("Content-Length")
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(min(length, 256 * 1024))
+            length = int(raw_len) if raw_len is not None else 0
+        except ValueError:
+            self._send_json(400, {"error": "Invalid Content-Length"})
+            return
+        if length <= 0:
+            self._send_json(400, {"error": "Positive Content-Length required"})
+            return
+        if length > _MAX_REVIEW_BODY_BYTES:
+            self._send_json(413, {"error": "Payload too large"})
+            return
+        try:
+            raw = self.rfile.read(length)
             payload = json.loads(raw.decode("utf-8"))
         except Exception as exc:
             self._send_json(400, {"error": f"Malformed JSON payload: {exc}"})
+            return
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "JSON object payload required"})
             return
         clip_uid = str(payload.get("clip_uid", ""))
         status = str(payload.get("status", ""))
@@ -1011,16 +1104,23 @@ class LongVideoSocialReviewHandler(BaseHTTPRequestHandler):
         rev_file = self.site_dir / "data" / "human_reviews.json"
         rev_file.parent.mkdir(parents=True, exist_ok=True)
         with _REVIEWS_LOCK:
-            existing = {"schema": "long-video-social-review-v1", "decisions": {}}
+            existing: dict[str, Any] = {"schema": "long-video-social-review-v1", "decisions": {}}
             if rev_file.is_file():
                 try:
-                    existing = json.loads(rev_file.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+                    loaded = json.loads(rev_file.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    self._send_json(500, {"error": f"Existing reviews store is corrupt: {exc}"})
+                    return
+                if not isinstance(loaded, dict) or not isinstance(loaded.get("decisions", {}), dict):
+                    self._send_json(500, {"error": "Existing reviews store schema is invalid"})
+                    return
+                existing = loaded
             decisions = existing.setdefault("decisions", {})
             decisions[clip_uid] = payload
             existing["updated_at"] = datetime.now(timezone.utc).isoformat()
-            rev_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_file = rev_file.with_suffix(".json.tmp")
+            tmp_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_file, rev_file)
         self._send_json(200, {"status": "saved", "clip_uid": clip_uid, "total_decisions": len(decisions)})
 
 

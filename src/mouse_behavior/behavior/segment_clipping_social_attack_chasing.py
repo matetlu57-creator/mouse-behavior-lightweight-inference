@@ -1737,7 +1737,10 @@ def discover_id_switch_chasing_candidates(
 
         onset_chaser, onset_chased = int(chain[0][1]), int(chain[0][2])
         end_chaser, end_chased = int(chain[-1][1]), int(chain[-1][2])
-        ordered_mids = [onset_chaser, onset_chased]
+        ordered_mids: list[int] = []
+        for tid in (onset_chaser, onset_chased, end_chaser, end_chased):
+            if tid not in ordered_mids:
+                ordered_mids.append(tid)
         for h in chain:
             for tid in (int(h[1]), int(h[2])):
                 if tid not in ordered_mids and len(ordered_mids) < 6:
@@ -2063,7 +2066,10 @@ def discover_fight_ball_attack_episodes(
 
         attacker_id, victim_id = (pair_a, pair_b) if score_a >= score_b else (pair_b, pair_a)
         freq_counts = {t: sum(1 for f in range(ts, te) if t in fmap.get(f, ())) for t in active_core}
-        ordered_mids = [attacker_id, victim_id]
+        ordered_mids = []
+        for t in (attacker_id, victim_id, *start_obs_ids, *end_obs_ids):
+            if t not in ordered_mids:
+                ordered_mids.append(t)
         for t in sorted(active_core, key=lambda x: (-freq_counts[x], x)):
             if t not in ordered_mids and len(ordered_mids) < 6:
                 ordered_mids.append(t)
@@ -2077,7 +2083,8 @@ def discover_fight_ball_attack_episodes(
             [1 if (attacker_id in fmap.get(f, ()) and victim_id in fmap.get(f, ())) else 0 for f in range(ts, te)],
             dtype=bool,
         )
-        onset_supp = _observed_support_intervals(onset_supp_mask, ts) or [[onset_f, onset_f + 1]]
+        clamped_f = max(ts, min(te - 1, onset_f))
+        onset_supp = _observed_support_intervals(onset_supp_mask, ts) or [[clamped_f, clamped_f + 1]]
 
         ev: dict[str, Any] = {
             "event_id": f"attack_fightball_{attacker_id}_{victim_id}_{ts:08d}_{te:08d}",

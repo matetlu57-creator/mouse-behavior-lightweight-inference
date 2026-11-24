@@ -89,6 +89,16 @@ def test_endpoint_observations_and_boundary_checks():
     ev_bad_start = {"canonical_behavior": "chase", "mouse_ids": [1, 2], "start_frame": 0, "end_frame": 18}
     assert not endpoints_fully_observed(store, ev_bad_start, info)
 
+    # Isolation checks target_mouse_id rather than context mouse_ids
+    ev_iso_target = {
+        "canonical_behavior": "isolation",
+        "mouse_ids": [1, 2],
+        "target_mouse_id": 1,
+        "start_frame": 0,
+        "end_frame": 20,
+    }
+    assert endpoints_fully_observed(store, ev_iso_target, info)
+
     # Boundary closure checks
     assert is_process_boundary_closed({"canonical_behavior": "attack"})
     assert not is_process_boundary_closed({
@@ -1888,4 +1898,16 @@ def test_all_15_behaviors_have_explicit_clip_min_duration_and_strict_enforcement
     assert [e["event_id"] for e in selected] == ["app_ok", "att_ok", "ch_ok", "hc_ok", "tc_ok", "sc_ok"]
     assert summary["rejected_counts"]["duration_policy"] == 6
     assert summary["max_per_behavior"] is None
+
+    # Max duration cap enforcement in qualify_clip_duration (default enforce_max_duration=True)
+    for over_ev in (
+        {"event_id": "hud_16s", "canonical_behavior": "huddle", "mouse_ids": [1, 2, 3], "start_frame": 0, "end_frame": 480, "canonical_support_frame_intervals": [[0, 480]]},
+        {"event_id": "disp_16s", "canonical_behavior": "dispersal", "mouse_ids": [1, 2, 3], "start_frame": 0, "end_frame": 480},
+        {"event_id": "gl_10s", "canonical_behavior": "group_locomotion", "mouse_ids": [1, 2, 3], "start_frame": 0, "end_frame": 300, "canonical_support_frame_intervals": [[0, 300]]},
+        {"event_id": "iso_21s", "canonical_behavior": "isolation", "mouse_ids": [1], "target_mouse_id": 1, "start_frame": 0, "end_frame": 630, "canonical_support_frame_intervals": [[0, 630]]},
+    ):
+        diag_rej = qualify_clip_duration(over_ev, fps)
+        assert diag_rej["ok"] is False
+        assert diag_rej["reason"] == "clip_duration_exceeds_max_cap"
+        assert qualify_clip_duration(over_ev, fps, enforce_max_duration=False)["ok"] is True
 

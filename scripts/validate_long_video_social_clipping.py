@@ -97,6 +97,7 @@ def run_long_video_social_validation(
     params = config_seed_parameters(load_config(config_path))
     # Refresh rule binding with current modular social clipping provenance.
     binding.update(rule_execution_binding(params, "calibrated"))
+    binding["clipping_duration_policy"] = "calibrated_clip_v1"
 
     if replay_json is not None and replay_json.is_file():
         replay_data = json.loads(replay_json.read_text(encoding="utf-8"))

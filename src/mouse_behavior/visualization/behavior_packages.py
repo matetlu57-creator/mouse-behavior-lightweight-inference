@@ -22,7 +22,7 @@ from mouse_behavior.evaluation.segment_export import _sha256, _verify_video, _wr
 from mouse_behavior.behavior.individual_rules import INDIVIDUAL_RULE_REVISION
 from mouse_behavior.behavior.duration_policy import require_event_duration
 from mouse_behavior.behavior.event_boundaries import EventBoundary
-from mouse_behavior.behavior.segment_clipping_common import normalize_behavior_key, qualify_clip_duration
+from mouse_behavior.behavior.segment_clipping_common import qualify_clip_duration
 from mouse_behavior.evaluation.group_event_rules import GROUP_RULE_REVISION
 from mouse_behavior.evaluation.confirmed_rules import policy_receipt
 from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
@@ -47,14 +47,21 @@ def _duration_parameters(binding: dict):
     return HeuristicParameters(**effective)
 
 
-def _require_package_event_duration(event: dict, fps: float, *, parameters=None) -> dict:
-    """Enforce >=duration policy while supporting calibrated >0.7s Chasing exports."""
-    beh_key = normalize_behavior_key(str(event.get("canonical_behavior") or event.get("behavior") or ""))
-    if event.get("chase_min_duration_policy_s") == 0.7 and beh_key == "chasing":
-        diag = qualify_clip_duration(event, fps, parameters=parameters)
+def _require_package_event_duration(
+    event: dict,
+    fps: float,
+    *,
+    parameters=None,
+    binding: dict | None = None,
+) -> dict:
+    """Enforce standalone event duration, honoring trusted binding clip-duration policy."""
+    if isinstance(binding, dict) and binding.get("clipping_duration_policy") == "calibrated_clip_v1":
+        diag = qualify_clip_duration(event, fps, parameters=parameters, enforce_max_duration=True)
         if not diag["ok"]:
             raise ValueError(
-                f"chasing duration {float(diag.get('actual_s') or 0.0):.4f}s does not satisfy >0.7s policy for {event.get('event_id')}"
+                f"standalone clip duration rejected: {diag.get('reason')} "
+                f"(actual={diag.get('actual_s')}, required {diag.get('comparator')} {diag.get('required_s')} s, "
+                f"max={diag.get('max_duration_s')} s) for {event.get('event_id')}"
             )
         return diag
     return require_event_duration(event, fps, parameters=parameters)
@@ -350,7 +357,9 @@ def _metadata(binding: dict, scale: dict, start: int, end: int, video_variant: s
         metadata["provenance"]["boundary"] = EventBoundary(
             event["start_frame"], event["end_frame"], start, end, info["fps"]).as_dict()
         context = qualification_context or {}
-        duration_qualification = _require_package_event_duration(event, info["fps"], parameters=_duration_parameters(binding))
+        duration_qualification = _require_package_event_duration(
+            event, info["fps"], parameters=_duration_parameters(binding), binding=binding
+        )
         metadata["provenance"]["event_qualification"] = dict(
             export_unit="standalone_candidate_process_interval",
             standalone_duration_qualification=duration_qualification,
@@ -521,7 +530,9 @@ def _export_one_package(root: Path, rendered: Path, store, event: dict,
                         clip_codec: str = "libx264", target_overlay: bool = False) -> dict:
     info = binding["source_video"]
     start, end, context_metadata = crop_bounds(event, info, clip_context_seconds)
-    _require_package_event_duration(event, info["fps"], parameters=_duration_parameters(binding))
+    _require_package_event_duration(
+        event, info["fps"], parameters=_duration_parameters(binding), binding=binding
+    )
     target = root / event["behavior"] / event["event_id"]
     _new_directory(target)
     if target_overlay:
@@ -560,7 +571,9 @@ def _export_one_package(root: Path, rendered: Path, store, event: dict,
     encoded_event = dict(event)
     # Context is playback only. Recheck just the true event frame count at the
     # actual encoded FPS, never the longer decoded crop duration.
-    encoded_qualification = _require_package_event_duration(encoded_event, verified["fps"], parameters=_duration_parameters(binding))
+    encoded_qualification = _require_package_event_duration(
+        encoded_event, verified["fps"], parameters=_duration_parameters(binding), binding=binding
+    )
     _write_json(target / "annotation.json", _annotation(event, [], end - start, info["fps"], crop_start=start))
     variant = ("frame_exact_event_target_overlay" if target_overlay else
                "frame_exact_cut_of_original_video" if original_video else "frame_exact_cut_of_canonical_overlay_full")
@@ -874,7 +887,9 @@ def export_packages(root: Path, rendered: Path, store, events: list[dict], bindi
     # Validate the complete batch before any directory, decoder or encoder is
     # opened, so one rejected child interval cannot leave partial packages.
     for event in events:
-        _require_package_event_duration(event, info["fps"], parameters=_duration_parameters(binding))
+        _require_package_event_duration(
+            event, info["fps"], parameters=_duration_parameters(binding), binding=binding
+        )
     capture = cv2.VideoCapture(str(rendered))
     try:
         seek_fps = float(capture.get(cv2.CAP_PROP_FPS))

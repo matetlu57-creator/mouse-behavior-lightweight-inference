@@ -574,29 +574,19 @@ def refine_social_clustering_segments(
                     for idx in range(arr_s + min_stable_frames - 1, n)
                     if int(f_in[idx]) < cap_end_frame and all_obs[idx] and dense_env[idx]
                 ]
-                cand_vis = [
-                    idx
-                    for idx in range(arr_s + min_stable_frames - 1, n)
-                    if int(f_in[idx]) < cap_end_frame and obs_cnt[idx] >= 2 and dense_env[idx]
-                ]
-                chosen_e = cand_all if cand_all else cand_vis
-                if chosen_e and (
-                    (int(f_in[chosen_e[-1]]) + 1 - new_s) >= min_total_frames
-                    or (new_e - new_s) < min_total_frames
-                ):
-                    new_e = int(f_in[chosen_e[-1]]) + 1
-                else:
-                    post_min = [
+                cand_vis = (
+                    [
                         idx
                         for idx in range(arr_s + min_stable_frames - 1, n)
-                        if (new_s + min_total_frames - 1) <= int(f_in[idx]) < new_e
-                        and obs_cnt[idx] >= 2
-                        and dense_env[idx]
+                        if int(f_in[idx]) < cap_end_frame and obs_cnt[idx] >= 2 and dense_env[idx]
                     ]
-                    if post_min and (new_e - new_s) >= min_total_frames:
-                        new_e = int(f_in[post_min[0]]) + 1
-                    else:
-                        new_e = min(new_e, cap_end_frame)
+                    if used_occ_channel
+                    else []
+                )
+                chosen_e = cand_all if cand_all else cand_vis
+                if not chosen_e:
+                    continue
+                new_e = int(f_in[chosen_e[-1]]) + 1
 
         if (new_e - new_s) / fps <= eff_min_duration_s + 1e-9:
             continue

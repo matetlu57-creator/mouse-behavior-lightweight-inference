@@ -527,7 +527,7 @@ def test_refine_social_clustering_scene_veto_occlusion_and_bounds() -> None:
         c3 = (320.0, 280.0 - 180.0 * (1.0 - frac))
         c4 = (320.0, 320.0 + 180.0 * (1.0 - frac))
         dets = [_det(1, c1), _det(2, c2), _det(3, c3)]
-        if f < 72 or f >= 125:
+        if f < 72 or f >= 105:
             dets.append(_det(4, c4))
         rows_occ.append(_row(f, fps, dets))
     ev_occ = {
@@ -545,6 +545,8 @@ def test_refine_social_clustering_scene_veto_occlusion_and_bounds() -> None:
         scale=scale,
     )
     assert len(res_occ) == 1
+    assert res_occ[0]["duration_s"] > 3.0
+    assert res_occ[0]["end_frame"] <= 125
     assert res_occ[0]["canonical_support_frame_count"] <= (res_occ[0]["end_frame"] - res_occ[0]["start_frame"])
 
 
@@ -1067,3 +1069,26 @@ def test_refine_group_locomotion_caps_at_9s_and_isolation_caps_at_20s() -> None:
     )
     assert audit_sc_short["duration_bounds_ok"] is False
     assert audit_sc_short["full_crop_precision_ok"] is False
+
+    # Frames where no other mouse is detected must NOT count as confirmed isolation support
+    rows_missing_other = []
+    for f in range(360):
+        dets = [_det(1, (500.0, 500.0))]
+        if f >= 180:
+            dets.append(_det(2, (100.0, 100.0)))
+        rows_missing_other.append(_row(f, fps, dets))
+    iso_partial_other = {
+        **iso_ev_35s,
+        "event_id": "iso_missing_other",
+        "start_frame": 0,
+        "end_frame": 360,
+    }
+    assert (
+        refine_isolation_segments(
+            [iso_partial_other],
+            InMemoryTrackStore(rows_missing_other),
+            {"source_video": {"fps": fps, "frame_count": 360}, "scale_px_per_cm": 10.0},
+            parameters=params,
+        )
+        == []
+    )

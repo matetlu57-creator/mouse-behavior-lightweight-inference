@@ -171,8 +171,9 @@ def qualify_clip_duration(
     fps: float,
     *,
     parameters: HeuristicParameters | None = None,
+    enforce_max_duration: bool = True,
 ) -> dict[str, Any]:
-    """Validate standalone half-open clip bounds against per-behavior minimum duration gates."""
+    """Validate standalone half-open clip bounds against per-behavior min/max duration gates."""
     result: dict[str, Any] = {
         "ok": False,
         "behavior": None,
@@ -214,6 +215,10 @@ def qualify_clip_duration(
         passes = (actual_s > req_s + 1e-9) if comp == ">" else (actual_s >= req_s - 1e-9)
         if not passes:
             result["reason"] = "clip_duration_below_requirement"
+            return result
+        max_dur_s = result["max_duration_s"]
+        if enforce_max_duration and max_dur_s is not None and actual_s > float(max_dur_s) + 1e-9:
+            result["reason"] = "clip_duration_exceeds_max_cap"
             return result
         if key not in _CLIP_CALIBRATED_OVERRIDE_DURATIONS:
             base_diag = qualify_event_duration(event, float(fps), parameters=parameters)
@@ -586,7 +591,7 @@ def endpoint_observations(
             "start_keypoints": False,
             "end_keypoints": False,
         }
-    ids = [int(mid) for mid in event.get("mouse_ids", ())]
+    ids = event_participant_ids(event)
     if not ids:
         return {
             "start_observed": False,

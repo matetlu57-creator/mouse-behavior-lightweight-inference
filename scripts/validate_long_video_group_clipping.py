@@ -205,6 +205,7 @@ def run_long_video_group_validation(
     if db_path.is_file() and binding_path.is_file() and scale_path.is_file() and pre_path.is_file():
         LOGGER.info("Reusing pre-crop inference results in %s", inf_dir)
         binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        binding["clipping_duration_policy"] = "calibrated_clip_v1"
         scale = json.loads(scale_path.read_text(encoding="utf-8"))
         pre_events = json.loads(pre_path.read_text(encoding="utf-8"))
         store = TrackStore(db_path)
@@ -215,6 +216,7 @@ def run_long_video_group_validation(
         binding, scale = bind_cache(source_video, cache_dir, db_path, source_receipt=source_receipt)
         store = TrackStore(db_path)
         binding.update(rule_execution_binding(params, "calibrated"))
+        binding["clipping_duration_policy"] = "calibrated_clip_v1"
         pre_events, _pre_audit = infer_video_events(
             store,
             binding,

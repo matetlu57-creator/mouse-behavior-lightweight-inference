@@ -296,7 +296,12 @@ def refine_group_locomotion_segments(
                 supp_intervals = _observed_support_intervals(bout_sync, sub_true_s)
                 cropped["canonical_support_frame_intervals"] = supp_intervals
                 cropped["canonical_support_frame_count"] = sync_count
-                if qualify_clip_duration(cropped, fps, parameters=params)["ok"]:
+                if qualify_clip_duration(
+                    cropped,
+                    fps,
+                    parameters=params,
+                    enforce_max_duration=(eff_max_duration_s is not None),
+                )["ok"]:
                     return cropped
                 return None
 
@@ -314,13 +319,23 @@ def refine_group_locomotion_segments(
                             break
                         cs = cs + int(rem_obs[0])
                     if (b_e - cs) <= max_frames:
-                        cand_ev = _evaluate_gloco_subbout(cs, b_e)
+                        if cs > b_s:
+                            tail_obs = np.flatnonzero(all_obs[cs:b_e])
+                            if not len(tail_obs):
+                                break
+                            ce_tail = cs + int(tail_obs[-1]) + 1
+                        else:
+                            ce_tail = b_e
+                        cand_ev = _evaluate_gloco_subbout(cs, ce_tail)
                         if cand_ev is not None:
                             refined.append(cand_ev)
                         break
                     cap_e = cs + max_frames
                     win_obs = np.flatnonzero(all_obs[cs:cap_e])
-                    ce = cs + int(win_obs[-1]) + 1 if len(win_obs) else cap_e
+                    if not len(win_obs):
+                        cur = cap_e
+                        continue
+                    ce = cs + int(win_obs[-1]) + 1
                     cand_ev = _evaluate_gloco_subbout(cs, ce) if ce > cs else None
                     if cand_ev is not None:
                         refined.append(cand_ev)
@@ -402,7 +417,7 @@ def refine_isolation_segments(
                 c_other = _extract_center_px(odet)
                 if c_other is not None:
                     other_dists.append(float(np.linalg.norm(c_target - c_other)))
-            if not other_dists or min(other_dists) >= iso_dist_px * 0.75:
+            if other_dists and min(other_dists) >= iso_dist_px * 0.75:
                 obs_isolated_frames.append(fn)
 
         if not obs_all_frames:
@@ -432,20 +447,26 @@ def refine_isolation_segments(
                         break
                     cs = rem[0]
                 if (true_e - cs) <= max_frames:
-                    sub_intervals.append((cs, true_e))
+                    if cs > true_s:
+                        rem_tail = [f for f in obs_all_frames if cs <= f < true_e]
+                        if rem_tail:
+                            sub_intervals.append((cs, rem_tail[-1] + 1))
+                    else:
+                        sub_intervals.append((cs, true_e))
                     break
                 cap_e = cs + max_frames
                 within = [f for f in obs_all_frames if cs <= f < cap_e]
-                ce = (within[-1] + 1) if within else cap_e
-                if ce <= cs:
-                    break
+                if not within:
+                    cur = cap_e
+                    continue
+                ce = within[-1] + 1
                 sub_intervals.append((cs, ce))
                 cur = ce
 
         for sub_s, sub_e in sub_intervals:
             sub_obs_all = [f for f in obs_all_frames if sub_s <= f < sub_e]
             sub_obs_iso = [f for f in obs_isolated_frames if sub_s <= f < sub_e]
-            if not sub_obs_all:
+            if not sub_obs_all or not sub_obs_iso:
                 continue
             if len(sub_obs_iso) / max(len(sub_obs_all), 1) < min_isolated_fraction:
                 continue
@@ -459,24 +480,26 @@ def refine_isolation_segments(
             cropped = update_segment_bounds(event, sub_s, sub_e, fps, suffix="isolation_crop")
 
             supp_intervals: list[list[int]] = []
-            if sub_obs_iso:
-                curr_s = sub_obs_iso[0]
-                prev = curr_s
-                for fn in sub_obs_iso[1:]:
-                    if fn == prev + 1:
-                        prev = fn
-                    else:
-                        supp_intervals.append([curr_s, prev + 1])
-                        curr_s = fn
-                        prev = fn
-                supp_intervals.append([curr_s, prev + 1])
-            else:
-                supp_intervals = [[sub_s, sub_e]]
+            curr_s = sub_obs_iso[0]
+            prev = curr_s
+            for fn in sub_obs_iso[1:]:
+                if fn == prev + 1:
+                    prev = fn
+                else:
+                    supp_intervals.append([curr_s, prev + 1])
+                    curr_s = fn
+                    prev = fn
+            supp_intervals.append([curr_s, prev + 1])
 
             cropped["canonical_support_frame_intervals"] = supp_intervals
             cropped["canonical_support_frame_count"] = sum(e - s for s, e in supp_intervals)
 
-            if qualify_clip_duration(cropped, fps, parameters=params)["ok"]:
+            if qualify_clip_duration(
+                cropped,
+                fps,
+                parameters=params,
+                enforce_max_duration=(eff_max_duration_s is not None),
+            )["ok"]:
                 refined.append(cropped)
 
     return refined
