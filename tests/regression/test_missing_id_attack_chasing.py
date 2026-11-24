@@ -280,20 +280,16 @@ class TestEvaluationPipeline:
         )
 
     def test_refine_chasing_segments_backtracking_and_disengagement(self):
-        """Verify refine_chasing_segments backtracks onset and trims disengagement."""
+        """Verify refine_chasing_segments backtracks onset and tracks fast pursuit."""
         from mouse_behavior.behavior.segment_clipping import refine_chasing_segments
 
         fps = 30.0
-        # Synthetic chase: 60 frames. Frames 10-50 are active pursuit (mouse 1 chases mouse 2).
-        # Frames 0-9: chaser moving at speed >= 8.0 cm/s towards target with distance <= 12 cm.
-        # Frames 50-60: target moves away and chaser stops -> distance opens up.
+        # Synthetic fast close chase: 60 frames. 10 px = 1 cm.
+        # Moving at 15 px/frame = 45 cm/s with separation 50 px = 5 cm.
         rows = []
         for f in range(60):
-            # 10 px = 1 cm (assume cm_per_px ~ 0.1)
-            # Mouse 2 (leader): starts at 200, moves forward at 15 cm/s (150 px/s = 5 px/frame)
-            p2 = (200.0 + f * 5.0, 200.0)
-            # Mouse 1 (follower): starts at 150 (dist 50px = 5cm), moves at 15 cm/s
-            p1 = (150.0 + f * 5.0, 200.0)
+            p2 = (200.0 + f * 15.0, 200.0)
+            p1 = (150.0 + f * 15.0, 200.0)
             rows.append({
                 "frame": f,
                 "source_frame": f,
@@ -306,7 +302,6 @@ class TestEvaluationPipeline:
         store = InMemoryTrackStore(rows)
         binding = {"fps": fps, "frame_count": 60, "cm_per_pixel": 0.10}
 
-        # Event candidate initially only marked frames [15, 45)
         ev = {
             "canonical_behavior": "chasing",
             "start_frame": 15,
@@ -315,81 +310,118 @@ class TestEvaluationPipeline:
         }
         refined = refine_chasing_segments([ev], store, binding)
         assert len(refined) == 1
-        # Onset backtracked from 15 towards frame 0
         assert refined[0]["start_frame"] < 15
         assert refined[0]["end_frame"] >= 45
+        assert refined[0]["roles"]["initiator_role"] == "chaser"
+        assert refined[0]["actor_id"] == 1
 
     def test_refine_attack_segments_surge_onset_and_grapple_continuation(self):
-        """Verify refine_attack_segments surge onset backtracking and grapple extension."""
+        """Verify refine_attack_segments surge onset backtracking, clinch occlusion, and explosive continuation."""
         from mouse_behavior.behavior.segment_clipping import refine_attack_segments
 
         fps = 30.0
-        # 50 frames:
-        # Frames 5-15: strike surge (dist 60px = 6cm <= 8.5cm, speed 30 cm/s = 300 px/s = 10 px/f)
-        # Frames 15-35: candidate core grapple
-        # Frames 35-45: grapple continuation (dist 40px = 4cm <= 6.5cm)
         rows = []
-        for f in range(50):
-            if f < 15:
-                # Fast surge closing in
-                c1 = (100.0 + f * 10.0, 100.0)
-                c2 = (220.0 + f * 2.0, 100.0)
-            elif f < 35:
-                # Core grapple
-                c1 = (250.0, 100.0)
-                c2 = (280.0, 100.0)
+        for f in range(60):
+            if f < 10:
+                c1, c2 = (140.0, 100.0), (220.0, 100.0)
+            elif f < 18:
+                c1 = (140.0 + (f - 10) * 14.0, 100.0)
+                c2 = (220.0 + (f - 10) * 5.5, 100.0)
+            elif f < 36:
+                c1 = (252.0 + (f - 18) * 10.5, 100.0)
+                c2 = (264.0 + (f - 18) * 10.0, 100.0)
+            elif f < 48:
+                c1 = (441.0 + (f - 36) * 8.0, 100.0)
+                c2 = (444.0 + (f - 36) * 15.0, 100.0)
             else:
-                # Intimate tumble
-                c1 = (255.0, 100.0)
-                c2 = (275.0, 100.0)
+                c1, c2 = (537.0, 100.0), (624.0, 100.0)
+            dets = [{"track_id": 1, "box": [c1[0] - 25, c1[1] - 15, c1[0] + 25, c1[1] + 15]}]
+            if f not in (25, 26, 27):
+                dets.append({"track_id": 2, "box": [c2[0] - 25, c2[1] - 15, c2[0] + 25, c2[1] + 15]})
             rows.append({
                 "frame": f,
                 "source_frame": f,
                 "time": f / fps,
-                "detections": [
-                    {"track_id": 1, "box": [c1[0]-10, c1[1]-10, c1[0]+10, c1[1]+10]},
-                    {"track_id": 2, "box": [c2[0]-10, c2[1]-10, c2[0]+10, c2[1]+10]},
-                ],
+                "detections": dets,
             })
         store = InMemoryTrackStore(rows)
-        binding = {"fps": fps, "frame_count": 50, "cm_per_pixel": 0.10}
+        binding = {"fps": fps, "frame_count": 60, "cm_per_pixel": 0.10}
 
-        # Event candidate initially frames [15, 35)
         ev = {
             "canonical_behavior": "attack",
-            "start_frame": 15,
-            "end_frame": 35,
+            "start_frame": 20,
+            "end_frame": 34,
             "mouse_ids": [1, 2],
         }
         refined = refine_attack_segments([ev], store, binding)
         assert len(refined) == 1
-        # Surge onset backtracked before 15
-        assert refined[0]["start_frame"] < 15
-        # Grapple continuation extended past 35
-        assert refined[0]["end_frame"] > 35
+        assert refined[0]["start_frame"] < 20
+        assert refined[0]["end_frame"] > 34
+        assert refined[0]["roles"]["initiator_role"] == "attacker"
 
-    def test_refinement_fallback_safety_preserves_events(self):
-        """Verify that qualification failures never discard events but safely fall back."""
+    def test_refinement_fallback_safety_rejects_empty_and_sub_minimum(self):
+        """Empty tracks, static mice, and sub-minimum duration must be rejected; valid explosive Attack survives."""
         from mouse_behavior.behavior.segment_clipping import (
             refine_attack_segments,
             refine_chasing_segments,
         )
 
         fps = 30.0
-        # Empty rows / broken tracks
-        store = InMemoryTrackStore([])
-        binding = {"fps": fps, "frame_count": 20}
+        empty_store = InMemoryTrackStore([])
+        binding = {"fps": fps, "frame_count": 60}
+        att_ev = {"canonical_behavior": "attack", "start_frame": 12, "end_frame": 22, "mouse_ids": [1, 2]}
+        ch_short = {"canonical_behavior": "chasing", "start_frame": 5, "end_frame": 15, "mouse_ids": [1, 2]}
 
-        att_ev = {"canonical_behavior": "attack", "start_frame": 5, "end_frame": 15, "mouse_ids": [1, 2]}
-        ch_ev = {"canonical_behavior": "chasing", "start_frame": 5, "end_frame": 15, "mouse_ids": [1, 2]}
+        assert refine_attack_segments([att_ev], empty_store, binding) == []
+        assert refine_chasing_segments([ch_short], empty_store, binding) == []
 
-        ref_att = refine_attack_segments([att_ev], store, binding)
-        ref_ch = refine_chasing_segments([ch_ev], store, binding)
+        rows_static = [
+            {
+                "frame": f,
+                "source_frame": f,
+                "time": f / fps,
+                "detections": [
+                    {"track_id": 1, "box": [100, 100, 120, 120]},
+                    {"track_id": 2, "box": [130, 100, 150, 120]},
+                ],
+            }
+            for f in range(60)
+        ]
+        static_store = InMemoryTrackStore(rows_static)
+        assert refine_chasing_segments([ch_short], static_store, {"fps": fps, "frame_count": 60, "cm_per_pixel": 0.1}) == []
+        assert refine_attack_segments([att_ev], static_store, {"fps": fps, "frame_count": 60, "cm_per_pixel": 0.1}) == []
 
-        assert len(ref_att) == 1, "Attack event was erroneously discarded"
-        assert len(ref_ch) == 1, "Chasing event was erroneously discarded"
-        assert ref_att[0]["start_frame"] == 5 and ref_att[0]["end_frame"] == 15
-        assert ref_ch[0]["start_frame"] == 5 and ref_ch[0]["end_frame"] == 15
+        att_valid = {"canonical_behavior": "attack", "start_frame": 16, "end_frame": 32, "mouse_ids": [1, 2]}
+        rows_active = []
+        for f in range(60):
+            if f < 10:
+                x1, x2 = 150.0, 220.0
+            elif f < 18:
+                x1 = 150.0 + (f - 10) * 14.0
+                x2 = 220.0 + (f - 10) * 6.0
+            elif f < 34:
+                x1 = 262.0 + (f - 18) * 11.0
+                x2 = 268.0 + (f - 18) * 10.5
+            elif f < 44:
+                x1 = 438.0 + (f - 34) * 8.0
+                x2 = 436.0 + (f - 34) * 16.0
+            else:
+                x1, x2 = 518.0, 596.0
+            dets = [{"track_id": 1, "box": [x1 - 25, 85, x1 + 25, 115]}]
+            if f not in (24, 25, 26):
+                dets.append({"track_id": 2, "box": [x2 - 25, 85, x2 + 25, 115]})
+            rows_active.append({
+                "frame": f,
+                "source_frame": f,
+                "time": f / fps,
+                "detections": dets,
+            })
+        res_att = refine_attack_segments(
+            [att_valid], InMemoryTrackStore(rows_active), {"fps": fps, "frame_count": 60, "cm_per_pixel": 0.1}
+        )
+        assert len(res_att) == 1
+        assert res_att[0]["end_frame"] - res_att[0]["start_frame"] > 15
+        assert res_att[0]["roles"]["initiator_role"] == "attacker"
 
 
 

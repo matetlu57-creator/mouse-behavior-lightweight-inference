@@ -69,16 +69,41 @@ contact labels never receive dual-label credit.
 
 | Module | Primary Symbols | Responsibility |
 | --- | --- | --- |
-| [`behavior/segment_clipping_common.py`](../src/mouse_behavior/behavior/segment_clipping_common.py) | `InMemoryTrackStore`, `MIN_PARTICIPANTS_BY_BEHAVIOR`, `MAX_DURATION_S_BY_BEHAVIOR`, `min_participants_for_behavior`, `max_duration_s_for_behavior`, `endpoint_observations`, `endpoints_fully_observed`, `is_process_boundary_closed`, `update_segment_bounds` | Shared track storage, participant/duration policy tables, endpoint visibility checks, and boundary closure helpers. |
+| [`behavior/segment_clipping_common.py`](../src/mouse_behavior/behavior/segment_clipping_common.py) | `InMemoryTrackStore`, `MIN_PARTICIPANTS_BY_BEHAVIOR`, `MIN_CLIP_DURATION_S_BY_BEHAVIOR`, `MAX_DURATION_S_BY_BEHAVIOR`, `min_clip_duration_policy_for_behavior`, `qualify_clip_duration`, `endpoint_observations`, `endpoints_fully_observed`, `update_segment_bounds` | Shared track storage, authoritative 15-behavior participant and minimum/maximum clip duration policy tables, endpoint visibility checks, and boundary closure helpers. |
 | [`behavior/segment_clipping_individual.py`](../src/mouse_behavior/behavior/segment_clipping_individual.py) | `refine_static_segments`, `refine_locomotion_segments`, `refine_rearing_segments`, `refine_grooming_segments` | Fine-cropping for single-mouse behaviors centered on measured kinematic/posture support. |
-| [`behavior/segment_clipping_social.py`](../src/mouse_behavior/behavior/segment_clipping_social.py) | `refine_approach_segments`, `refine_attack_segments`, `refine_chasing_segments`, `refine_contact_and_together_segments` | Fine-cropping and boundary requalification for pair interactions (`min_participants >= 2`). |
-| [`behavior/segment_clipping_group_dispersal.py`](../src/mouse_behavior/behavior/segment_clipping_group_dispersal.py) | `refine_dispersal_segments`, `_recover_dispersal_origin_members` | Recovers `>= 3` observed compact origin members, trims reconvergence/quiet tails, and enforces the `15.0 s` duration cap. |
-| [`behavior/segment_clipping_group_clustering.py`](../src/mouse_behavior/behavior/segment_clipping_group_clustering.py) | `refine_social_clustering_segments`, `_sc_occluded_members_verified`, `_has_preexisting_scene_cluster_veto` | Enforces `>= 3` participants, vetoes pre-existing scene clusters, supports bounded pile occlusion, trims idle prefixes, and caps post-arrival hold at `3.0 s`. |
-| [`behavior/segment_clipping_group_motion.py`](../src/mouse_behavior/behavior/segment_clipping_group_motion.py) | `refine_huddle_segments`, `refine_group_locomotion_segments`, `refine_isolation_segments` | Huddle sliding (`<= 15.0 s`), synchronous-motion bout extraction for `group_locomotion`, and preserved `isolation` clipping. |
+| [`behavior/segment_clipping_social_approach.py`](../src/mouse_behavior/behavior/segment_clipping_social_approach.py) | `refine_approach_segments` | Approach bout completion from distant non-contact approach up to initial box touch, crowd exclusion, final directionality checks, directed roles, and `>= 1.0 s` enforcement. |
+| [`behavior/segment_clipping_social_attack_chasing.py`](../src/mouse_behavior/behavior/segment_clipping_social_attack_chasing.py) | `refine_attack_segments`, `discover_fight_ball_attack_episodes`, `refine_chasing_segments`, `discover_fast_chasing_candidates`, `discover_id_switch_chasing_candidates` | High-intensity clinch/fight-ball Attack (`> 0.5 s`) and high-speed direction-aligned Chasing (`> 0.7 s`) cropping and discovery with directed roles and zero sub-threshold fallbacks. |
+| [`behavior/segment_clipping_social_contact.py`](../src/mouse_behavior/behavior/segment_clipping_social_contact.py) | `refine_contact_and_together_segments`, `attach_social_roles`, `_directed_head_distance_cm`, `_box_gap_cm` | Context-extended snout-head/rear contact (`> 0.4 s`) and Together (`>= 1.0 s`) bout completion with directed sniffer roles (`together` stays undirected) and observed endpoint gates. |
+| [`behavior/segment_clipping_social.py`](../src/mouse_behavior/behavior/segment_clipping_social.py) | Re-export facade | Backward-compatible facade over the three `segment_clipping_social_*` submodules. |
+| [`behavior/segment_clipping_group_dispersal.py`](../src/mouse_behavior/behavior/segment_clipping_group_dispersal.py) | `refine_dispersal_segments`, `_recover_dispersal_origin_members` | Recovers `>= 3` observed compact origin members, trims reconvergence/quiet tails, and enforces `> 5.0 s` minimum and `15.0 s` maximum duration. |
+| [`behavior/segment_clipping_group_clustering.py`](../src/mouse_behavior/behavior/segment_clipping_group_clustering.py) | `refine_social_clustering_segments`, `_sc_occluded_members_verified`, `_has_preexisting_scene_cluster_veto` | Enforces `>= 3` participants, vetoes pre-existing scene clusters, supports bounded pile occlusion, trims idle prefixes, and enforces `> 3.0 s` minimum total duration (including post-arrival stable gathering hold capped at `3.0 s`). |
+| [`behavior/segment_clipping_group_motion.py`](../src/mouse_behavior/behavior/segment_clipping_group_motion.py) | `refine_huddle_segments`, `refine_group_locomotion_segments`, `refine_isolation_segments` | Huddle sliding (`>= 5.0 s`, `<= 15.0 s`), synchronous-motion bout extraction for `group_locomotion` (`> 3.0 s`, `<= 9.0 s`), and `isolation` (`> 10.0 s`, `<= 20.0 s`) clipping. |
 | [`behavior/segment_clipping_group.py`](../src/mouse_behavior/behavior/segment_clipping_group.py) | Re-export facade | Backward-compatible facade over the three `segment_clipping_group_*` submodules. |
-| [`behavior/segment_clipping.py`](../src/mouse_behavior/behavior/segment_clipping.py) | `refine_behavior_segments`, `select_behavior_segments` | Dispatches all individual/social/group refiners, enforces `min_participants_for_behavior`, deduplicates with `strict_non_overlapping_shared_mouse=True`, and leaves `max_per_behavior=None` (unlimited) by default. |
+| [`behavior/segment_clipping.py`](../src/mouse_behavior/behavior/segment_clipping.py) | `refine_behavior_segments`, `select_behavior_segments` | Dispatches all individual/social/group refiners, enforces `min_participants_for_behavior` and `qualify_clip_duration`, deduplicates with `strict_non_overlapping_shared_mouse=True`, and leaves `max_per_behavior=None` (unlimited). |
 
-`canonical_video_pipeline.py` tracks all `segment_clipping_group_*` submodules and
+### Per-Behavior Clipping Duration & Unlimited Export Policy
+
+All 15 retained canonical behaviors enforce an explicit minimum clip duration via `MIN_CLIP_DURATION_S_BY_BEHAVIOR` and `qualify_clip_duration()`, and default selectors (`select_behavior_segments`, `select_social_review_clips`, `select_group_review_clips`, `infer_all_behavior_events`, and long-video validation scripts) impose **no default output count cap** (`max_per_behavior=None` / `max_events_per_behavior=None` / `max_clips_per_behavior=None`):
+
+| Layer | Canonical Behavior | Min Duration Gate | Max Duration Cap | Directed Role Attribution | Default Output Count Limit |
+| --- | --- | --- | --- | --- | --- |
+| Individual | `stationary` (`static`) | `>= 1.0 s` | — | N/A | Unlimited (`None`) |
+| Individual | `locomotion` | `>= 0.5 s` | — | N/A | Unlimited (`None`) |
+| Individual | `grooming` | `>= 0.3 s` | — | N/A | Unlimited (`None`) |
+| Individual | `rearing` | `>= 0.5 s` | — | N/A | Unlimited (`None`) |
+| Social | `approach` | `>= 1.0 s` | — | `approacher -> approached` | Unlimited (`None`) |
+| Social | `attack` | `> 0.5 s` | — | `attacker -> victim` | Unlimited (`None`) |
+| Social | `chase` (`chasing`) | `> 0.7 s` | — | `chaser -> chased` | Unlimited (`None`) |
+| Social | `nose_head_contact` (`head_contact`) | `> 0.4 s` | — | `sniffer -> sniffed` | Unlimited (`None`) |
+| Social | `nose_tail_contact` (`tail_contact`) | `> 0.4 s` | — | `sniffer -> sniffed` | Unlimited (`None`) |
+| Social | `together` | `>= 1.0 s` | — | Undirected (`actor_id=-1`) | Unlimited (`None`) |
+| Group | `huddle` | `>= 5.0 s` | `<= 15.0 s` | N/A (`>= 3` mice) | Unlimited (`None`) |
+| Group | `social_clustering` | `> 3.0 s` (incl. stable gathering) | `3.0 s` post-arrival hold cap | N/A (`>= 3` mice) | Unlimited (`None`) |
+| Group | `dispersal` | `> 5.0 s` | `<= 15.0 s` | N/A (`>= 3` mice) | Unlimited (`None`) |
+| Group | `group_locomotion` | `> 3.0 s` | `<= 9.0 s` | N/A (`>= 3` mice) | Unlimited (`None`) |
+| Group | `isolation` | `> 10.0 s` | `<= 20.0 s` | Target mouse | Unlimited (`None`) |
+
+`canonical_video_pipeline.py` tracks all `segment_clipping_social_*`, `segment_clipping_group_*`, and
 `EXPORTED_DATASET_SOURCE_FILES` modules inside `rule_execution_binding()` so
 provenance receipts detect changes in any submodule.
 

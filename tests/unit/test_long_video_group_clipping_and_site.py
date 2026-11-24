@@ -125,8 +125,8 @@ def test_group_cropping_validation_and_historical_alignment(tmp_path: Path) -> N
 def test_group_cropping_validation_social_clustering_uses_group_config() -> None:
     fps = 10.0
     rows = []
-    # 3 mice start spread out before frame 10 and converge into a compact cluster by frame 20..30
-    for f in range(40):
+    # 3 mice start spread out before frame 10, converge by frame 25, and hold stable cluster through frame 54
+    for f in range(55):
         spread = max(10.0, 220.0 - f * 8.0) if f < 25 else 10.0
         coords = {
             1: (200.0 - spread, 200.0),
@@ -142,15 +142,26 @@ def test_group_cropping_validation_social_clustering_uses_group_config() -> None
         "canonical_behavior": "social_clustering",
         "mouse_ids": [1, 2, 3],
         "start_frame": 10,
-        "end_frame": 30,
-        "observed_all_participants_frame_count": 20,
-        "canonical_support_frame_count": 20,
+        "end_frame": 45,
+        "observed_all_participants_frame_count": 35,
+        "canonical_support_frame_count": 35,
     }
     kin = audit_group_segment_kinematics(event, store, scale, fps, HeuristicParameters())
     assert kin["duration_ok"] is True
     assert kin["endpoint_observed_ok"] is True
     assert kin["kinematic_ok"] is True
     assert kin["full_crop_precision_ok"] is True
+
+    short_event = {
+        **event,
+        "event_id": "sc_crop_short_2s",
+        "end_frame": 30,
+        "observed_all_participants_frame_count": 20,
+        "canonical_support_frame_count": 20,
+    }
+    kin_short = audit_group_segment_kinematics(short_event, store, scale, fps, HeuristicParameters())
+    assert kin_short["duration_ok"] is False
+    assert kin_short["full_crop_precision_ok"] is False
 
 
 def test_review_site_schema_and_api_resilience(tmp_path: Path) -> None:

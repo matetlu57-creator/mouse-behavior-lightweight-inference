@@ -6,24 +6,30 @@ import hashlib
 import math
 import re
 from collections.abc import Iterator, Mapping, Sequence
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
 
+from mouse_behavior.behavior.duration_policy import qualify_event_duration, resolve_duration_policy
 from mouse_behavior.behavior.event_boundaries import EventBoundary
 from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters, LABEL_TO_CANONICAL
 
 __all__ = [
     "InMemoryTrackStore",
     "MAX_DURATION_S_BY_BEHAVIOR",
+    "MIN_CLIP_DURATION_S_BY_BEHAVIOR",
     "MIN_PARTICIPANTS_BY_BEHAVIOR",
     "endpoint_observations",
     "endpoints_fully_observed",
     "event_participant_ids",
     "is_process_boundary_closed",
     "max_duration_s_for_behavior",
+    "min_clip_duration_policy_for_behavior",
+    "min_clip_duration_s_for_behavior",
     "min_participants_for_behavior",
     "normalize_behavior_key",
+    "qualify_clip_duration",
     "update_segment_bounds",
 ]
 
@@ -48,7 +54,34 @@ MIN_PARTICIPANTS_BY_BEHAVIOR: dict[str, int] = {
 MAX_DURATION_S_BY_BEHAVIOR: dict[str, float] = {
     "huddle": 15.0,
     "dispersal": 15.0,
+    "group_locomotion": 9.0,
+    "isolation": 20.0,
 }
+
+# Canonical per-behavior minimum clipping durations (seconds, comparator) for all 15 retained behaviors.
+# Every exported clip must satisfy its behavior's explicit minimum duration gate.
+MIN_CLIP_DURATION_S_BY_BEHAVIOR: dict[str, tuple[float, str]] = {
+    "static": (1.0, ">="),
+    "locomotion": (0.5, ">="),
+    "grooming": (0.3, ">="),
+    "rearing": (0.5, ">="),
+    "approach": (1.0, ">="),
+    "attack": (0.5, ">"),
+    "chasing": (0.7, ">"),
+    "head_contact": (0.4, ">"),
+    "tail_contact": (0.4, ">"),
+    "together": (1.0, ">="),
+    "huddle": (5.0, ">="),
+    "social_clustering": (3.0, ">"),
+    "dispersal": (5.0, ">"),
+    "group_locomotion": (3.0, ">"),
+    "isolation": (10.0, ">"),
+}
+
+_PARAM_DRIVEN_CLIP_DURATIONS = frozenset(
+    {"static", "locomotion", "huddle", "dispersal", "group_locomotion", "isolation"}
+)
+_CLIP_CALIBRATED_OVERRIDE_DURATIONS = frozenset({"approach", "attack", "chasing"})
 
 _BEHAVIOR_ALIASES: dict[str, str] = {
     "huddle": "huddle",
@@ -105,6 +138,94 @@ def max_duration_s_for_behavior(canonical_behavior: str) -> float | None:
     """Return the optional maximum clip duration in seconds for a behavior."""
     key = normalize_behavior_key(canonical_behavior)
     return MAX_DURATION_S_BY_BEHAVIOR.get(key)
+
+
+def min_clip_duration_policy_for_behavior(
+    canonical_behavior: str,
+    *,
+    parameters: HeuristicParameters | None = None,
+) -> tuple[float, str]:
+    """Return `(required_s, comparator)` minimum clipping duration policy for a behavior."""
+    key = normalize_behavior_key(canonical_behavior)
+    if key not in MIN_CLIP_DURATION_S_BY_BEHAVIOR:
+        raise ValueError(f"no clipping minimum duration policy for behavior: {canonical_behavior!r}")
+    base_req, comp = MIN_CLIP_DURATION_S_BY_BEHAVIOR[key]
+    if parameters is not None and key in _PARAM_DRIVEN_CLIP_DURATIONS:
+        policy = resolve_duration_policy(key, parameters=parameters)
+        return float(policy.required_s), str(policy.comparator)
+    return float(base_req), str(comp)
+
+
+def min_clip_duration_s_for_behavior(
+    canonical_behavior: str,
+    *,
+    parameters: HeuristicParameters | None = None,
+) -> float:
+    """Return minimum clipping duration in seconds for `canonical_behavior`."""
+    req_s, _ = min_clip_duration_policy_for_behavior(canonical_behavior, parameters=parameters)
+    return float(req_s)
+
+
+def qualify_clip_duration(
+    event: Mapping[str, Any],
+    fps: float,
+    *,
+    parameters: HeuristicParameters | None = None,
+) -> dict[str, Any]:
+    """Validate standalone half-open clip bounds against per-behavior minimum duration gates."""
+    result: dict[str, Any] = {
+        "ok": False,
+        "behavior": None,
+        "required_s": None,
+        "comparator": None,
+        "max_duration_s": None,
+        "actual_s": None,
+        "frame_count": None,
+        "reason": "invalid_event",
+    }
+    if not isinstance(event, Mapping):
+        return result
+    beh_raw = event.get("canonical_behavior") or event.get("behavior") or ""
+    if not isinstance(beh_raw, str) or not beh_raw.strip():
+        result["reason"] = "missing_behavior"
+        return result
+    try:
+        key = normalize_behavior_key(beh_raw)
+        req_s, comp = min_clip_duration_policy_for_behavior(key, parameters=parameters)
+        result["behavior"] = key
+        result["required_s"] = req_s
+        result["comparator"] = comp
+        result["max_duration_s"] = max_duration_s_for_behavior(key)
+        if isinstance(fps, bool) or not isinstance(fps, Real) or not math.isfinite(float(fps)) or float(fps) <= 0.0:
+            raise ValueError("fps must be finite and positive")
+        start, end = event.get("start_frame"), event.get("end_frame")
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, Integral)
+            or not isinstance(end, Integral)
+            or not 0 <= int(start) < int(end)
+        ):
+            raise ValueError("event bounds must be nonnegative half-open integer frame indices")
+        span = int(end) - int(start)
+        actual_s = span / float(fps)
+        result["actual_s"] = round(actual_s, 6)
+        result["frame_count"] = span
+        passes = (actual_s > req_s + 1e-9) if comp == ">" else (actual_s >= req_s - 1e-9)
+        if not passes:
+            result["reason"] = "clip_duration_below_requirement"
+            return result
+        if key not in _CLIP_CALIBRATED_OVERRIDE_DURATIONS:
+            base_diag = qualify_event_duration(event, float(fps), parameters=parameters)
+            if not base_diag["ok"]:
+                result["required_s"] = base_diag.get("required_s", req_s)
+                result["comparator"] = base_diag.get("comparator", comp)
+                result["reason"] = str(base_diag.get("reason") or "duration_policy_rejected")
+                return result
+        result.update(ok=True, reason="qualified")
+    except (TypeError, ValueError, OverflowError) as error:
+        result["reason"] = str(error)
+    return result
 
 
 def event_participant_ids(event: Mapping[str, Any]) -> list[int]:
@@ -167,35 +288,115 @@ def _detection_map(row: Mapping[str, Any]) -> dict[int, Mapping[str, Any]]:
     return {int(d["track_id"]): d for d in row.get("detections", ()) if "track_id" in d}
 
 
+def _scalar_median(vals: list[float]) -> float:
+    n = len(vals)
+    if n == 1:
+        return vals[0]
+    if n == 2:
+        return 0.5 * (vals[0] + vals[1])
+    if n == 3:
+        a, b, c = vals[0], vals[1], vals[2]
+        if a <= b:
+            return b if b <= c else (c if a <= c else a)
+        return a if a <= c else (c if b <= c else b)
+    s = sorted(vals)
+    mid = n >> 1
+    return s[mid] if (n & 1) else 0.5 * (s[mid - 1] + s[mid])
+
+
 def _has_valid_measurement(detection: Mapping[str, Any]) -> tuple[bool, bool, bool]:
-    box = np.asarray(detection.get("box", []), dtype=float)
-    points = np.asarray(detection.get("keypoints", []), dtype=float)
-    box_ok = bool(box.shape == (4,) and np.isfinite(box).all() and (box[2:] > box[:2]).all())
-    pts_ok = bool(
-        points.shape == (7, 3) and (np.isfinite(points).all(axis=1) & (points[:, 2] >= 0.25)).any()
-    )
+    box = detection.get("box")
+    box_ok = False
+    if box is not None and isinstance(box, (list, tuple, np.ndarray)) and len(box) == 4:
+        try:
+            b0, b1, b2, b3 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+            box_ok = (
+                math.isfinite(b0)
+                and math.isfinite(b1)
+                and math.isfinite(b2)
+                and math.isfinite(b3)
+                and b2 > b0
+                and b3 > b1
+            )
+        except (TypeError, ValueError):
+            box_ok = False
+    points = detection.get("keypoints")
+    pts_ok = False
+    if points is not None and isinstance(points, (list, tuple, np.ndarray)) and len(points) == 7:
+        try:
+            for pt in points:
+                if not isinstance(pt, (list, tuple, np.ndarray)) or len(pt) != 3:
+                    pts_ok = False
+                    break
+                x, y, c = float(pt[0]), float(pt[1]), float(pt[2])
+                if c >= 0.25 and math.isfinite(x) and math.isfinite(y) and math.isfinite(c):
+                    pts_ok = True
+        except (TypeError, ValueError):
+            pts_ok = False
     return (box_ok or pts_ok), box_ok, pts_ok
 
 
 def _extract_center_px(detection: Mapping[str, Any]) -> np.ndarray | None:
-    points = np.asarray(detection.get("keypoints", []), dtype=float)
-    if points.shape == (7, 3):
-        valid = np.isfinite(points).all(axis=1) & (points[:, 2] >= 0.25)
-        body = valid.copy()
-        body[[0, 1, 2, 6]] = False
-        usable = body if body.any() else valid
-        if usable.any():
-            return np.median(points[usable, :2], axis=0)
-    box = np.asarray(detection.get("box", []), dtype=float)
-    if box.shape == (4,) and np.isfinite(box).all() and (box[2:] > box[:2]).all():
-        return 0.5 * (box[:2] + box[2:])
+    points = detection.get("keypoints")
+    if points is not None and isinstance(points, (list, tuple, np.ndarray)) and len(points) == 7:
+        body_x: list[float] = []
+        body_y: list[float] = []
+        all_x: list[float] = []
+        all_y: list[float] = []
+        try:
+            valid_shape = True
+            for idx, pt in enumerate(points):
+                if not isinstance(pt, (list, tuple, np.ndarray)) or len(pt) != 3:
+                    valid_shape = False
+                    break
+                x, y, c = float(pt[0]), float(pt[1]), float(pt[2])
+                if c >= 0.25 and math.isfinite(x) and math.isfinite(y) and math.isfinite(c):
+                    all_x.append(x)
+                    all_y.append(y)
+                    if 3 <= idx <= 5:
+                        body_x.append(x)
+                        body_y.append(y)
+            if valid_shape:
+                if body_x:
+                    return np.array([_scalar_median(body_x), _scalar_median(body_y)], dtype=float)
+                if all_x:
+                    return np.array([_scalar_median(all_x), _scalar_median(all_y)], dtype=float)
+        except (TypeError, ValueError):
+            pass
+    box = detection.get("box")
+    if box is not None and isinstance(box, (list, tuple, np.ndarray)) and len(box) == 4:
+        try:
+            b0, b1, b2, b3 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+            if (
+                math.isfinite(b0)
+                and math.isfinite(b1)
+                and math.isfinite(b2)
+                and math.isfinite(b3)
+                and b2 > b0
+                and b3 > b1
+            ):
+                return np.array([0.5 * (b0 + b2), 0.5 * (b1 + b3)], dtype=float)
+        except (TypeError, ValueError):
+            pass
     return None
 
 
 def _extract_box_px(detection: Mapping[str, Any]) -> np.ndarray | None:
-    box = np.asarray(detection.get("box", []), dtype=float)
-    if box.shape == (4,) and np.isfinite(box).all() and (box[2:] > box[:2]).all():
-        return box
+    box = detection.get("box")
+    if box is not None and isinstance(box, (list, tuple, np.ndarray)) and len(box) == 4:
+        try:
+            b0, b1, b2, b3 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+            if (
+                math.isfinite(b0)
+                and math.isfinite(b1)
+                and math.isfinite(b2)
+                and math.isfinite(b3)
+                and b2 > b0
+                and b3 > b1
+            ):
+                return np.array([b0, b1, b2, b3], dtype=float)
+        except (TypeError, ValueError):
+            pass
     return None
 
 
@@ -396,22 +597,43 @@ def endpoint_observations(
             "end_keypoints": False,
         }
 
-    def _frame_flags(frame_index: int) -> tuple[bool, bool, bool]:
+    def _frame_flags(frame_index: int, target_ids: Sequence[int]) -> tuple[bool, bool, bool]:
         rows = list(store.rows(frame_index, frame_index + 1))
         if not rows:
             return False, False, False
         detections = _detection_map(rows[0])
-        if not all(track in detections for track in ids):
+        if not all(track in detections for track in target_ids):
             return False, False, False
-        checks = [_has_valid_measurement(detections[track]) for track in ids]
+        checks = [_has_valid_measurement(detections[track]) for track in target_ids]
         return (
             all(item[0] for item in checks),
             all(item[1] for item in checks),
             all(item[2] for item in checks),
         )
 
-    start_obs, start_box, start_kp = _frame_flags(start)
-    end_obs, end_box, end_kp = _frame_flags(end - 1)
+    id_set = set(ids)
+    ep = event.get("endpoint_observed_track_ids")
+    start_ids = (
+        [int(m) for m in ep.get("start", ()) if not isinstance(m, bool)]
+        if isinstance(ep, Mapping)
+        else []
+    )
+    end_ids = (
+        [int(m) for m in ep.get("end", ()) if not isinstance(m, bool)]
+        if isinstance(ep, Mapping)
+        else []
+    )
+    use_phase_ids = bool(
+        event.get("has_visual_id_switch")
+        and len(id_set) >= 2
+        and start_ids
+        and end_ids
+        and set(start_ids) <= id_set
+        and set(end_ids) <= id_set
+    )
+
+    start_obs, start_box, start_kp = _frame_flags(start, start_ids if use_phase_ids else ids)
+    end_obs, end_box, end_kp = _frame_flags(end - 1, end_ids if use_phase_ids else ids)
     return {
         "start_observed": start_obs,
         "end_observed": end_obs,

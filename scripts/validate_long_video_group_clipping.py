@@ -159,7 +159,7 @@ def run_long_video_group_validation(
     historical_review_json: Path | None = None,
     workers: int = 4,
     clip_workers: int = 2,
-    max_clips_per_behavior: int = 30,
+    max_clips_per_behavior: int | None = None,
     clip_context_seconds: float = 0.0,
     skip_clips: bool = False,
     device: str = "0",
@@ -297,7 +297,11 @@ def run_long_video_group_validation(
             cached_store,
             binding,
             per_event_audit=per_event_audit,
-            max_per_behavior=None if max_clips_per_behavior <= 0 else max_clips_per_behavior,
+            max_per_behavior=(
+                None
+                if (max_clips_per_behavior is None or max_clips_per_behavior <= 0)
+                else max_clips_per_behavior
+            ),
         )
     finally:
         cached_store.close()
@@ -393,7 +397,12 @@ def main() -> int:
     parser.add_argument("--historical-review-json", type=Path, default=None)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--clip-workers", type=int, default=2)
-    parser.add_argument("--max-clips-per-behavior", type=int, default=30)
+    parser.add_argument(
+        "--max-clips-per-behavior",
+        type=int,
+        default=0,
+        help="Optional per-behavior clip export cap (<=0 means unlimited; default: 0)",
+    )
     parser.add_argument("--clip-context-seconds", type=float, default=0.0)
     parser.add_argument("--skip-clips", action="store_true")
     parser.add_argument("--device", default="0")

@@ -74,6 +74,9 @@ def rule_execution_binding(parameters, posture_mode: str = "disabled") -> dict:
                     "mouse_behavior.behavior.segment_clipping_group_motion",
                     "mouse_behavior.behavior.segment_clipping_individual",
                     "mouse_behavior.behavior.segment_clipping_social",
+                    "mouse_behavior.behavior.segment_clipping_social_approach",
+                    "mouse_behavior.behavior.segment_clipping_social_attack_chasing",
+                    "mouse_behavior.behavior.segment_clipping_social_contact",
                     "mouse_behavior.evaluation.approach_events",
                     "mouse_behavior.visualization.behavior_packages", "mouse_behavior.evaluation.segment_export",
                     "mouse_behavior.tracking.cache"))
@@ -806,8 +809,12 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
             require_closed_boundaries=False,
             require_endpoint_visibility=False,
         )
+    if enable_fine_cropping:
+        from mouse_behavior.behavior.segment_clipping_common import qualify_clip_duration as _duration_check
+    else:
+        _duration_check = qualify_event_duration
     for event in merged:
-        if not qualify_event_duration(event, fps, parameters=params)["ok"]:
+        if not _duration_check(event, fps, parameters=params)["ok"]:
             raise ValueError("merged event lost standalone duration qualification")
         contexts = event.get("inference_parent_contexts", [])
         if contexts:

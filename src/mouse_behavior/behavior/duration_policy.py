@@ -43,10 +43,19 @@ def resolve_duration_policy(behavior: str, *, parameters: HeuristicParameters | 
     if not isinstance(behavior, str) or not behavior.strip():
         raise ValueError("behavior must be a nonempty canonical or display label")
     canonical = LABEL_TO_CANONICAL.get(behavior, behavior.strip().lower().replace(" ", "_"))
-    canonical = {"static": "stationary", "chasing": "chase", "huddling": "huddle",
-                 "snout-head_contact": "nose_head_contact", "snout-rear_contact": "nose_tail_contact",
-                 "posturereview": "posture_review", "attackreview": "attack_review",
-                 "dispersalreview": "dispersal_review", "爬墙": "rearing"}.get(canonical, canonical)
+    canonical = {
+        "static": "stationary",
+        "chasing": "chase",
+        "huddling": "huddle",
+        "head_contact": "nose_head_contact",
+        "tail_contact": "nose_tail_contact",
+        "snout-head_contact": "nose_head_contact",
+        "snout-rear_contact": "nose_tail_contact",
+        "posturereview": "posture_review",
+        "attackreview": "attack_review",
+        "dispersalreview": "dispersal_review",
+        "爬墙": "rearing",
+    }.get(canonical, canonical)
     individual, social, group = DEFAULT_INDIVIDUAL_CONFIG, DEFAULT_SOCIAL_HEURISTIC_CONFIG, DEFAULT_GROUP_HEURISTIC_CONFIG
     defaults = HeuristicParameters()
     policies = {

@@ -12,6 +12,7 @@ import numpy as np
 
 from mouse_behavior.behavior.duration_policy import qualify_event_duration
 from mouse_behavior.behavior.segment_clipping_common import (
+    MIN_CLIP_DURATION_S_BY_BEHAVIOR,
     _detection_map,
     _extract_center_px,
     _observed_run_velocity_cm_s,
@@ -19,6 +20,7 @@ from mouse_behavior.behavior.segment_clipping_common import (
     _resolve_fps,
     _resolve_parameters,
     _resolve_scale_cm_per_px,
+    qualify_clip_duration,
     update_segment_bounds,
 )
 from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
@@ -235,7 +237,8 @@ def refine_social_clustering_segments(
     *,
     scale: Mapping[str, Any] | None = None,
     parameters: HeuristicParameters | None = None,
-    min_duration_s: float = DEFAULT_GROUP_HEURISTIC_CONFIG.clustering_final_stability_s,
+    min_duration_s: float = MIN_CLIP_DURATION_S_BY_BEHAVIOR["social_clustering"][0],
+    min_stability_s: float = DEFAULT_GROUP_HEURISTIC_CONFIG.clustering_final_stability_s,
     neighbor_distance_cm: float = DEFAULT_GROUP_HEURISTIC_CONFIG.neighbor_distance_cm,
     min_actor_path_cm: float = DEFAULT_GROUP_HEURISTIC_CONFIG.clustering_actor_min_path_cm,
     min_radius_drop_cm: float = DEFAULT_GROUP_HEURISTIC_CONFIG.clustering_distance_drop_cm,
@@ -249,7 +252,8 @@ def refine_social_clustering_segments(
     fps = _resolve_fps(binding)
     params = _resolve_parameters(binding, parameters)
     eff_min_duration_s = float(min_duration_s)
-    min_stable_frames = max(1, int(math.ceil(eff_min_duration_s * fps - 1e-9)))
+    eff_min_stability_s = float(min_stability_s)
+    min_stable_frames = max(1, int(math.ceil(eff_min_stability_s * fps - 1e-9)))
     max_dropout_frames = max(1, int(round(max_dropout_gap_s * fps)))
     lookback_frames = int(round(DEFAULT_GROUP_HEURISTIC_CONFIG.clustering_motion_lookback_s * fps))
     snap_gap_frames = int(round(2.0 * fps))
@@ -513,27 +517,6 @@ def refine_social_clustering_segments(
             if tail_obs and float(np.mean([rad_vis[idx] for idx in tail_obs])) > env_cm * 1.35:
                 new_e = int(f_in[d_e - 1]) + 1
 
-        # Cap post-arrival hold at max_post_arrival_hold_s (default 3.0s)
-        if max_post_arrival_hold_s is not None:
-            hold_frames = max(min_stable_frames, int(math.floor(float(max_post_arrival_hold_s) * fps + 1e-9)))
-            cap_end_frame = int(f_in[arr_s]) + hold_frames
-            if new_e > cap_end_frame:
-                cand_all = [
-                    idx
-                    for idx in range(arr_s + min_stable_frames - 1, n)
-                    if int(f_in[idx]) < cap_end_frame and all_obs[idx] and dense_env[idx]
-                ]
-                cand_vis = [
-                    idx
-                    for idx in range(arr_s + min_stable_frames - 1, n)
-                    if int(f_in[idx]) < cap_end_frame and obs_cnt[idx] >= 2 and dense_env[idx]
-                ]
-                chosen_e = cand_all if cand_all else cand_vis
-                if chosen_e:
-                    new_e = int(f_in[chosen_e[-1]]) + 1
-                else:
-                    new_e = min(new_e, cap_end_frame)
-
         first_obs_idx = int(np.flatnonzero(obs_cnt >= 2)[0])
         new_s = (
             start
@@ -580,7 +563,42 @@ def refine_social_clustering_segments(
                     if np.isfinite(rad_vis[conv_start_idx]) and rad_vis[conv_start_idx] > env_cm:
                         new_s = cand_s_frame
 
-        if (new_e - new_s) / fps + 1e-9 < eff_min_duration_s:
+        # Cap post-arrival hold at max_post_arrival_hold_s (default 3.0s) while preserving >eff_min_duration_s
+        if max_post_arrival_hold_s is not None:
+            hold_frames = max(min_stable_frames, int(math.floor(float(max_post_arrival_hold_s) * fps + 1e-9)))
+            min_total_frames = int(math.floor(eff_min_duration_s * fps + 1e-9)) + 1
+            cap_end_frame = max(int(f_in[arr_s]) + hold_frames, new_s + min_total_frames)
+            if new_e > cap_end_frame:
+                cand_all = [
+                    idx
+                    for idx in range(arr_s + min_stable_frames - 1, n)
+                    if int(f_in[idx]) < cap_end_frame and all_obs[idx] and dense_env[idx]
+                ]
+                cand_vis = [
+                    idx
+                    for idx in range(arr_s + min_stable_frames - 1, n)
+                    if int(f_in[idx]) < cap_end_frame and obs_cnt[idx] >= 2 and dense_env[idx]
+                ]
+                chosen_e = cand_all if cand_all else cand_vis
+                if chosen_e and (
+                    (int(f_in[chosen_e[-1]]) + 1 - new_s) >= min_total_frames
+                    or (new_e - new_s) < min_total_frames
+                ):
+                    new_e = int(f_in[chosen_e[-1]]) + 1
+                else:
+                    post_min = [
+                        idx
+                        for idx in range(arr_s + min_stable_frames - 1, n)
+                        if (new_s + min_total_frames - 1) <= int(f_in[idx]) < new_e
+                        and obs_cnt[idx] >= 2
+                        and dense_env[idx]
+                    ]
+                    if post_min and (new_e - new_s) >= min_total_frames:
+                        new_e = int(f_in[post_min[0]]) + 1
+                    else:
+                        new_e = min(new_e, cap_end_frame)
+
+        if (new_e - new_s) / fps <= eff_min_duration_s + 1e-9:
             continue
 
         first_d_s = arr_s + offset_pre
@@ -724,6 +742,11 @@ def refine_social_clustering_segments(
         supp_intervals = _observed_support_intervals(supp_mask, new_s)
         cropped["canonical_support_frame_intervals"] = supp_intervals
         cropped["canonical_support_frame_count"] = sum(b - a for a, b in supp_intervals)
-        if qualify_event_duration(cropped, fps, parameters=params)["ok"]:
+        dur_ok = (
+            qualify_clip_duration(cropped, fps, parameters=params)["ok"]
+            if eff_min_duration_s >= MIN_CLIP_DURATION_S_BY_BEHAVIOR["social_clustering"][0] - 1e-9
+            else qualify_event_duration(cropped, fps, parameters=params)["ok"]
+        )
+        if dur_ok:
             refined.append(cropped)
     return refined

@@ -103,8 +103,21 @@ def test_heuristics_facade_exports_identity_with_canonical_modules() -> None:
         "select_behavior_segments": (segment_clipping, "select_behavior_segments"),
         "InMemoryTrackStore": (segment_clipping_common, "InMemoryTrackStore"),
         "MIN_PARTICIPANTS_BY_BEHAVIOR": (segment_clipping_common, "MIN_PARTICIPANTS_BY_BEHAVIOR"),
+        "MIN_CLIP_DURATION_S_BY_BEHAVIOR": (
+            segment_clipping_common,
+            "MIN_CLIP_DURATION_S_BY_BEHAVIOR",
+        ),
         "MAX_DURATION_S_BY_BEHAVIOR": (segment_clipping_common, "MAX_DURATION_S_BY_BEHAVIOR"),
         "min_participants_for_behavior": (segment_clipping_common, "min_participants_for_behavior"),
+        "min_clip_duration_policy_for_behavior": (
+            segment_clipping_common,
+            "min_clip_duration_policy_for_behavior",
+        ),
+        "min_clip_duration_s_for_behavior": (
+            segment_clipping_common,
+            "min_clip_duration_s_for_behavior",
+        ),
+        "qualify_clip_duration": (segment_clipping_common, "qualify_clip_duration"),
         "max_duration_s_for_behavior": (segment_clipping_common, "max_duration_s_for_behavior"),
         "endpoint_observations": (segment_clipping_common, "endpoint_observations"),
         "endpoints_fully_observed": (segment_clipping_common, "endpoints_fully_observed"),
