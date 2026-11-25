@@ -158,9 +158,9 @@ def test_strict_non_overlapping_shared_mouse_selection() -> None:
             "behavior": "Social clustering",
             "mouse_ids": [1, 2, 3],
             "start_frame": 0,
-            "end_frame": 90,
-            "observed_all_participants_frame_count": 45,
-            "canonical_support_frame_count": 45,
+            "end_frame": 120,
+            "observed_all_participants_frame_count": 60,
+            "canonical_support_frame_count": 60,
         },
         {
             "event_id": "sc_high_quality",
@@ -168,9 +168,9 @@ def test_strict_non_overlapping_shared_mouse_selection() -> None:
             "behavior": "Social clustering",
             "mouse_ids": [2, 4, 5],
             "start_frame": 30,
-            "end_frame": 110,
-            "observed_all_participants_frame_count": 80,
-            "canonical_support_frame_count": 80,
+            "end_frame": 140,
+            "observed_all_participants_frame_count": 110,
+            "canonical_support_frame_count": 110,
         },
         # Disjoint mouse set of the same behavior overlapping in time -> must coexist
         {
@@ -179,9 +179,9 @@ def test_strict_non_overlapping_shared_mouse_selection() -> None:
             "behavior": "Social clustering",
             "mouse_ids": [6, 7, 8],
             "start_frame": 20,
-            "end_frame": 100,
-            "observed_all_participants_frame_count": 80,
-            "canonical_support_frame_count": 80,
+            "end_frame": 130,
+            "observed_all_participants_frame_count": 110,
+            "canonical_support_frame_count": 110,
         },
         # Different behavior sharing mouse 2 at the exact same time -> must coexist
         {
@@ -527,7 +527,7 @@ def test_refine_social_clustering_scene_veto_occlusion_and_bounds() -> None:
         c3 = (320.0, 280.0 - 180.0 * (1.0 - frac))
         c4 = (320.0, 320.0 + 180.0 * (1.0 - frac))
         dets = [_det(1, c1), _det(2, c2), _det(3, c3)]
-        if f < 72 or f >= 125:
+        if f < 72 or f >= 105:
             dets.append(_det(4, c4))
         rows_occ.append(_row(f, fps, dets))
     ev_occ = {
@@ -545,6 +545,8 @@ def test_refine_social_clustering_scene_veto_occlusion_and_bounds() -> None:
         scale=scale,
     )
     assert len(res_occ) == 1
+    assert res_occ[0]["duration_s"] > 3.0
+    assert res_occ[0]["end_frame"] <= 125
     assert res_occ[0]["canonical_support_frame_count"] <= (res_occ[0]["end_frame"] - res_occ[0]["start_frame"])
 
 
@@ -896,3 +898,197 @@ def test_group_cropping_validation_audits_participants_bounds_and_non_overlap() 
     )
     assert summary_clean["aggregate"]["zero_shared_mouse_overlap_ok"] is True
     assert summary_clean["aggregate"]["min_participants_pass_rate"] == 1.0
+
+
+def test_refine_group_locomotion_caps_at_9s_and_isolation_caps_at_20s() -> None:
+    fps = 30.0
+    scale = {"cm_per_pixel": 0.1}
+    params = HeuristicParameters()
+
+    # 1. Group locomotion spanning 14.0s (420 frames) splits into <= 9.0s, > 3.0s non-overlapping clips
+    rows_gloco = [
+        _row(
+            f,
+            fps,
+            [
+                _det(1, (50.0 + f * 3.0, 100.0)),
+                _det(2, (70.0 + f * 3.0, 105.0)),
+                _det(3, (60.0 + f * 3.0, 120.0)),
+            ],
+        )
+        for f in range(420)
+    ]
+    gloco_store = InMemoryTrackStore(rows_gloco)
+    gloco_ev = {
+        "event_id": "gloco_14s",
+        "canonical_behavior": "group_locomotion",
+        "behavior": "Group locomotion",
+        "mouse_ids": [1, 2, 3],
+        "start_frame": 0,
+        "end_frame": 420,
+    }
+    res_gloco_capped = refine_group_locomotion_segments(
+        [gloco_ev],
+        gloco_store,
+        {"source_video": {"fps": fps, "frame_count": 420}},
+        scale=scale,
+        parameters=params,
+    )
+    assert len(res_gloco_capped) == 2
+    assert res_gloco_capped[0]["end_frame"] <= res_gloco_capped[1]["start_frame"]
+    for seg in res_gloco_capped:
+        dur_s = (seg["end_frame"] - seg["start_frame"]) / fps
+        assert 3.0 < dur_s <= 9.0 + 1e-9
+
+    res_gloco_unbounded = refine_group_locomotion_segments(
+        [gloco_ev],
+        gloco_store,
+        {"source_video": {"fps": fps, "frame_count": 420}},
+        scale=scale,
+        parameters=params,
+        max_duration_s=None,
+    )
+    assert len(res_gloco_unbounded) == 1
+    assert (res_gloco_unbounded[0]["end_frame"] - res_gloco_unbounded[0]["start_frame"]) / fps == 14.0
+
+    # 2. Isolation spanning 35.0s (1050 frames) splits into <= 20.0s, > 10.0s non-overlapping clips
+    rows_iso = [
+        _row(
+            f,
+            fps,
+            [
+                _det(1, (500.0, 500.0)),
+                _det(2, (100.0, 100.0)),
+            ],
+        )
+        for f in range(1050)
+    ]
+    iso_store = InMemoryTrackStore(rows_iso)
+    iso_ev_35s = {
+        "event_id": "iso_35s",
+        "canonical_behavior": "isolation",
+        "behavior": "Isolation",
+        "mouse_ids": [1],
+        "target_mouse_id": 1,
+        "start_frame": 0,
+        "end_frame": 1050,
+    }
+    res_iso_capped = refine_isolation_segments(
+        [iso_ev_35s],
+        iso_store,
+        {"source_video": {"fps": fps, "frame_count": 1050}, "scale_px_per_cm": 10.0},
+        parameters=params,
+    )
+    assert len(res_iso_capped) == 2
+    assert (res_iso_capped[0]["start_frame"], res_iso_capped[0]["end_frame"]) == (0, 600)
+    assert (res_iso_capped[1]["start_frame"], res_iso_capped[1]["end_frame"]) == (600, 1050)
+    for seg in res_iso_capped:
+        dur_s = (seg["end_frame"] - seg["start_frame"]) / fps
+        assert 10.0 < dur_s <= 20.0 + 1e-9
+
+    # 25.0s run keeps 20.0s first slice and drops the 5.0s remainder (below >10.0s minimum)
+    iso_ev_25s = {**iso_ev_35s, "event_id": "iso_25s", "end_frame": 750}
+    res_iso_25s = refine_isolation_segments(
+        [iso_ev_25s],
+        InMemoryTrackStore(rows_iso[:750]),
+        {"source_video": {"fps": fps, "frame_count": 750}, "scale_px_per_cm": 10.0},
+        parameters=params,
+    )
+    assert len(res_iso_25s) == 1
+    assert (res_iso_25s[0]["start_frame"], res_iso_25s[0]["end_frame"]) == (0, 600)
+
+    res_iso_unbounded = refine_isolation_segments(
+        [iso_ev_35s],
+        iso_store,
+        {"source_video": {"fps": fps, "frame_count": 1050}, "scale_px_per_cm": 10.0},
+        parameters=params,
+        max_duration_s=None,
+    )
+    assert len(res_iso_unbounded) == 1
+    assert (res_iso_unbounded[0]["start_frame"], res_iso_unbounded[0]["end_frame"]) == (0, 1050)
+
+    # 3. Audit flags over-cap group_locomotion (>9s), over-cap isolation (>20s), and short social_clustering (<=3s)
+    audit_gloco_over = audit_group_segment_kinematics(
+        {
+            "event_id": "gloco_10s_over",
+            "canonical_behavior": "group_locomotion",
+            "behavior": "Group locomotion",
+            "mouse_ids": [1, 2, 3],
+            "start_frame": 0,
+            "end_frame": 300,
+            "observed_all_participants_frame_count": 300,
+            "canonical_support_frame_count": 300,
+            "canonical_support_frame_intervals": [[0, 300]],
+        },
+        gloco_store,
+        scale,
+        fps,
+        params,
+    )
+    assert audit_gloco_over["max_duration_s"] == 9.0
+    assert audit_gloco_over["duration_bounds_ok"] is False
+    assert audit_gloco_over["full_crop_precision_ok"] is False
+
+    audit_iso_over = audit_group_segment_kinematics(
+        {
+            "event_id": "iso_22s_over",
+            "canonical_behavior": "isolation",
+            "behavior": "Isolation",
+            "mouse_ids": [1],
+            "target_mouse_id": 1,
+            "start_frame": 0,
+            "end_frame": 660,
+            "observed_all_participants_frame_count": 660,
+            "canonical_support_frame_count": 660,
+            "canonical_support_frame_intervals": [[0, 660]],
+        },
+        iso_store,
+        scale,
+        fps,
+        params,
+    )
+    assert audit_iso_over["max_duration_s"] == 20.0
+    assert audit_iso_over["duration_bounds_ok"] is False
+    assert audit_iso_over["full_crop_precision_ok"] is False
+
+    audit_sc_short = audit_group_segment_kinematics(
+        {
+            "event_id": "sc_25s_short",
+            "canonical_behavior": "social_clustering",
+            "behavior": "Social clustering",
+            "mouse_ids": [1, 2, 3],
+            "start_frame": 0,
+            "end_frame": 75,
+            "observed_all_participants_frame_count": 75,
+            "canonical_support_frame_count": 75,
+        },
+        iso_store,
+        scale,
+        fps,
+        params,
+    )
+    assert audit_sc_short["duration_bounds_ok"] is False
+    assert audit_sc_short["full_crop_precision_ok"] is False
+
+    # Frames where no other mouse is detected must NOT count as confirmed isolation support
+    rows_missing_other = []
+    for f in range(360):
+        dets = [_det(1, (500.0, 500.0))]
+        if f >= 180:
+            dets.append(_det(2, (100.0, 100.0)))
+        rows_missing_other.append(_row(f, fps, dets))
+    iso_partial_other = {
+        **iso_ev_35s,
+        "event_id": "iso_missing_other",
+        "start_frame": 0,
+        "end_frame": 360,
+    }
+    assert (
+        refine_isolation_segments(
+            [iso_partial_other],
+            InMemoryTrackStore(rows_missing_other),
+            {"source_video": {"fps": fps, "frame_count": 360}, "scale_px_per_cm": 10.0},
+            parameters=params,
+        )
+        == []
+    )

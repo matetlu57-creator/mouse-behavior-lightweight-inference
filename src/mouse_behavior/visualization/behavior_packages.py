@@ -22,6 +22,7 @@ from mouse_behavior.evaluation.segment_export import _sha256, _verify_video, _wr
 from mouse_behavior.behavior.individual_rules import INDIVIDUAL_RULE_REVISION
 from mouse_behavior.behavior.duration_policy import require_event_duration
 from mouse_behavior.behavior.event_boundaries import EventBoundary
+from mouse_behavior.behavior.segment_clipping_common import qualify_clip_duration
 from mouse_behavior.evaluation.group_event_rules import GROUP_RULE_REVISION
 from mouse_behavior.evaluation.confirmed_rules import policy_receipt
 from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
@@ -44,6 +45,26 @@ def _duration_parameters(binding: dict):
     if not isinstance(effective, dict):
         raise ValueError("effective_parameters binding must be a parameter object")
     return HeuristicParameters(**effective)
+
+
+def _require_package_event_duration(
+    event: dict,
+    fps: float,
+    *,
+    parameters=None,
+    binding: dict | None = None,
+) -> dict:
+    """Enforce standalone event duration, honoring trusted binding clip-duration policy."""
+    if isinstance(binding, dict) and binding.get("clipping_duration_policy") == "calibrated_clip_v1":
+        diag = qualify_clip_duration(event, fps, parameters=parameters, enforce_max_duration=True)
+        if not diag["ok"]:
+            raise ValueError(
+                f"standalone clip duration rejected: {diag.get('reason')} "
+                f"(actual={diag.get('actual_s')}, required {diag.get('comparator')} {diag.get('required_s')} s, "
+                f"max={diag.get('max_duration_s')} s) for {event.get('event_id')}"
+            )
+        return diag
+    return require_event_duration(event, fps, parameters=parameters)
 
 
 def _verify_rule_binding(binding: dict, events: list[dict]) -> None:
@@ -111,14 +132,27 @@ def draw_overlay(frame: np.ndarray, row: dict, events: list[dict], source_frame:
             cv2.putText(frame, label, position, cv2.FONT_HERSHEY_SIMPLEX, .55, (0, 255, 0), 2, cv2.LINE_AA)
     displayed = sorted(active_events, key=lambda event: (DISPLAY_PRIORITY.get(event["canonical_behavior"], 7),
                                                  event["start_frame"], event["event_id"]))
+    _role_names = {
+        "approach": ("Approaching", "Approached"),
+        "attack": ("Attacker", "Attacked"),
+        "chase": ("Chasing", "Chased"),
+        "chasing": ("Chasing", "Chased"),
+        "nose_head_contact": ("Snout_contacting", "Head_contacted"),
+        "head_contact": ("Snout_contacting", "Head_contacted"),
+        "nose_tail_contact": ("Snout_contacting", "Rear_contacted"),
+        "tail_contact": ("Snout_contacting", "Rear_contacted"),
+    }
     for event in displayed:
+        beh_cb = str(event.get("canonical_behavior", "")).lower()
+        if beh_cb == "together":
+            continue
         actor, target = event.get("actor_id", -1), event.get("target_id", -1)
         support = event.get("role_support_frame_intervals", [])
         a, b = measured_positions.get(actor), measured_positions.get(target)
-        if (actor < 0 or a is None or b is None
+        if (actor < 0 or target < 0 or a is None or b is None
                 or not any(start <= source_frame < end for start, end in support)):
             continue
-        names = ("Approaching", "Approached") if event["canonical_behavior"] == "approach" else ("Chaser", "Chased")
+        names = _role_names.get(beh_cb, ("Actor", "Target"))
         relation_color = (0, 165, 255)
         cv2.arrowedLine(frame, a, b, relation_color, 2, cv2.LINE_AA, tipLength=.15)
         for position, name, track in zip((a, b), names, (actor, target)):
@@ -136,10 +170,12 @@ def draw_overlay(frame: np.ndarray, row: dict, events: list[dict], source_frame:
             support = event.get("role_support_frame_intervals", [])
             if not any(start <= source_frame < end for start, end in support):
                 relation += " (event role; frame unmeasured)"
-        elif event["canonical_behavior"] in {"approach", "chase"}:
+        elif str(event.get("canonical_behavior", "")).lower() in _role_names:
             relation = " role unknown"
         missing = [f"V{track}" for track in event["mouse_ids"] if track not in measured_boxes]
-        if missing:
+        if event.get("has_visual_id_switch"):
+            relation += " (ID-switch bout; raw visual IDs)"
+        elif missing:
             relation += f" ({','.join(missing)} not detected)"
         lines.append(f"{event['behavior']} [{ids}]{relation}")
     if len(active_events) > 8:
@@ -266,6 +302,9 @@ def _annotation(event: dict | None, events: list[dict], count: int, fps: float, 
                        "actor_observed_path_lower_bound_cm", "observed_motion_by_track",
                        "approach_endpoints_requalified_after_split", "approach_union_endpoints_requalified",
                        "unknown_comparisons_are_not_far_evidence",
+                       "initiator_id", "receiver_id", "roles",
+                       "has_visual_id_switch", "endpoint_observed_track_ids",
+                       "observed_onset_pair", "id_switch_note", "discovery_source",
                        "parent_candidate_event_id", "review_queue_only", "biological_label_confirmed",
                        "review_reason", "source_static", "source_grooming", "source_rearing",
                        "source_event_ids", "source_canonical_behaviors", "process_boundary_status"}:
@@ -318,7 +357,9 @@ def _metadata(binding: dict, scale: dict, start: int, end: int, video_variant: s
         metadata["provenance"]["boundary"] = EventBoundary(
             event["start_frame"], event["end_frame"], start, end, info["fps"]).as_dict()
         context = qualification_context or {}
-        duration_qualification = require_event_duration(event, info["fps"], parameters=_duration_parameters(binding))
+        duration_qualification = _require_package_event_duration(
+            event, info["fps"], parameters=_duration_parameters(binding), binding=binding
+        )
         metadata["provenance"]["event_qualification"] = dict(
             export_unit="standalone_candidate_process_interval",
             standalone_duration_qualification=duration_qualification,
@@ -489,7 +530,9 @@ def _export_one_package(root: Path, rendered: Path, store, event: dict,
                         clip_codec: str = "libx264", target_overlay: bool = False) -> dict:
     info = binding["source_video"]
     start, end, context_metadata = crop_bounds(event, info, clip_context_seconds)
-    require_event_duration(event, info["fps"], parameters=_duration_parameters(binding))
+    _require_package_event_duration(
+        event, info["fps"], parameters=_duration_parameters(binding), binding=binding
+    )
     target = root / event["behavior"] / event["event_id"]
     _new_directory(target)
     if target_overlay:
@@ -528,7 +571,9 @@ def _export_one_package(root: Path, rendered: Path, store, event: dict,
     encoded_event = dict(event)
     # Context is playback only. Recheck just the true event frame count at the
     # actual encoded FPS, never the longer decoded crop duration.
-    encoded_qualification = require_event_duration(encoded_event, verified["fps"], parameters=_duration_parameters(binding))
+    encoded_qualification = _require_package_event_duration(
+        encoded_event, verified["fps"], parameters=_duration_parameters(binding), binding=binding
+    )
     _write_json(target / "annotation.json", _annotation(event, [], end - start, info["fps"], crop_start=start))
     variant = ("frame_exact_event_target_overlay" if target_overlay else
                "frame_exact_cut_of_original_video" if original_video else "frame_exact_cut_of_canonical_overlay_full")
@@ -842,7 +887,9 @@ def export_packages(root: Path, rendered: Path, store, events: list[dict], bindi
     # Validate the complete batch before any directory, decoder or encoder is
     # opened, so one rejected child interval cannot leave partial packages.
     for event in events:
-        require_event_duration(event, info["fps"], parameters=_duration_parameters(binding))
+        _require_package_event_duration(
+            event, info["fps"], parameters=_duration_parameters(binding), binding=binding
+        )
     capture = cv2.VideoCapture(str(rendered))
     try:
         seek_fps = float(capture.get(cv2.CAP_PROP_FPS))

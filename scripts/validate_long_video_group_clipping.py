@@ -159,7 +159,7 @@ def run_long_video_group_validation(
     historical_review_json: Path | None = None,
     workers: int = 4,
     clip_workers: int = 2,
-    max_clips_per_behavior: int = 30,
+    max_clips_per_behavior: int | None = None,
     clip_context_seconds: float = 0.0,
     skip_clips: bool = False,
     device: str = "0",
@@ -205,6 +205,7 @@ def run_long_video_group_validation(
     if db_path.is_file() and binding_path.is_file() and scale_path.is_file() and pre_path.is_file():
         LOGGER.info("Reusing pre-crop inference results in %s", inf_dir)
         binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        binding["clipping_duration_policy"] = "calibrated_clip_v1"
         scale = json.loads(scale_path.read_text(encoding="utf-8"))
         pre_events = json.loads(pre_path.read_text(encoding="utf-8"))
         store = TrackStore(db_path)
@@ -215,6 +216,7 @@ def run_long_video_group_validation(
         binding, scale = bind_cache(source_video, cache_dir, db_path, source_receipt=source_receipt)
         store = TrackStore(db_path)
         binding.update(rule_execution_binding(params, "calibrated"))
+        binding["clipping_duration_policy"] = "calibrated_clip_v1"
         pre_events, _pre_audit = infer_video_events(
             store,
             binding,
@@ -297,7 +299,11 @@ def run_long_video_group_validation(
             cached_store,
             binding,
             per_event_audit=per_event_audit,
-            max_per_behavior=None if max_clips_per_behavior <= 0 else max_clips_per_behavior,
+            max_per_behavior=(
+                None
+                if (max_clips_per_behavior is None or max_clips_per_behavior <= 0)
+                else max_clips_per_behavior
+            ),
         )
     finally:
         cached_store.close()
@@ -393,7 +399,12 @@ def main() -> int:
     parser.add_argument("--historical-review-json", type=Path, default=None)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--clip-workers", type=int, default=2)
-    parser.add_argument("--max-clips-per-behavior", type=int, default=30)
+    parser.add_argument(
+        "--max-clips-per-behavior",
+        type=int,
+        default=0,
+        help="Optional per-behavior clip export cap (<=0 means unlimited; default: 0)",
+    )
     parser.add_argument("--clip-context-seconds", type=float, default=0.0)
     parser.add_argument("--skip-clips", action="store_true")
     parser.add_argument("--device", default="0")

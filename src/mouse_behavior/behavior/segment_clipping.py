@@ -18,9 +18,9 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from mouse_behavior.behavior.duration_policy import qualify_event_duration
 from mouse_behavior.behavior.segment_clipping_common import (
     InMemoryTrackStore,
+    MIN_CLIP_DURATION_S_BY_BEHAVIOR,
     MIN_PARTICIPANTS_BY_BEHAVIOR,
     _resolve_fps,
     _resolve_parameters,
@@ -29,8 +29,11 @@ from mouse_behavior.behavior.segment_clipping_common import (
     endpoints_fully_observed,
     event_participant_ids,
     is_process_boundary_closed,
+    min_clip_duration_policy_for_behavior,
+    min_clip_duration_s_for_behavior,
     min_participants_for_behavior,
     normalize_behavior_key,
+    qualify_clip_duration,
     update_segment_bounds,
 )
 from mouse_behavior.behavior.segment_clipping_group import (
@@ -56,11 +59,15 @@ from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameter
 
 __all__ = [
     "InMemoryTrackStore",
+    "MIN_CLIP_DURATION_S_BY_BEHAVIOR",
     "MIN_PARTICIPANTS_BY_BEHAVIOR",
     "endpoint_observations",
     "endpoints_fully_observed",
     "is_process_boundary_closed",
+    "min_clip_duration_policy_for_behavior",
+    "min_clip_duration_s_for_behavior",
     "min_participants_for_behavior",
+    "qualify_clip_duration",
     "refine_approach_segments",
     "refine_attack_segments",
     "refine_behavior_segments",
@@ -99,6 +106,7 @@ def refine_behavior_segments(
         "huddle_audit": [],
         "approach_audit": [],
         "rejected_insufficient_participants": 0,
+        "rejected_below_min_duration": 0,
     }
     if enable_huddle_sliding and scale is not None and any(e.get("canonical_behavior") == "huddle" for e in current):
         current, huddle_audit = refine_huddle_segments(current, store, binding, scale)
@@ -122,6 +130,18 @@ def refine_behavior_segments(
     if enable_fine_cropping:
         current = refine_rearing_segments(current, store, binding, scale=scale, parameters=parameters)
         current = refine_grooming_segments(current, store, binding, scale=scale, parameters=parameters)
+        if not enable_approach_requalification:
+            current, approach_crop_audit = refine_approach_segments(
+                current,
+                store,
+                binding,
+                scale=scale,
+                parameters=parameters,
+                scene_guard=scene_guard,
+                requalify=False,
+            )
+            if approach_crop_audit:
+                audit["approach_audit"] = approach_crop_audit
         current = refine_attack_segments(current, store, binding, scale=scale, parameters=parameters)
         current = refine_chasing_segments(current, store, binding, scale=scale, parameters=parameters)
         current = refine_contact_and_together_segments(
@@ -134,16 +154,30 @@ def refine_behavior_segments(
         current = refine_static_segments(current, store, binding, scale=scale, parameters=parameters)
         current = refine_locomotion_segments(current, store, binding, scale=scale, parameters=parameters)
 
+    fps_val = _resolve_fps(binding)
+    eff_params = _resolve_parameters(binding, parameters)
     filtered: list[dict[str, Any]] = []
     for ev in current:
         beh = str(ev.get("canonical_behavior") or ev.get("behavior") or "")
         if len(event_participant_ids(ev)) < min_participants_for_behavior(beh):
             audit["rejected_insufficient_participants"] += 1
             continue
+        if enable_fine_cropping and not qualify_clip_duration(ev, fps_val, parameters=eff_params)["ok"]:
+            audit["rejected_below_min_duration"] += 1
+            continue
         filtered.append(ev)
 
     audit["output_count"] = len(filtered)
     return filtered, audit
+
+
+def _event_duration_ok(
+    event: Mapping[str, Any],
+    fps: float,
+    *,
+    parameters: HeuristicParameters | None = None,
+) -> bool:
+    return bool(qualify_clip_duration(event, fps, parameters=parameters)["ok"])
 
 
 def _segment_priority_key(
@@ -159,7 +193,7 @@ def _segment_priority_key(
     beh = str(event.get("canonical_behavior") or event.get("behavior") or "")
     unique_ids = event_participant_ids(event)
     valid_participants = 1 if len(unique_ids) >= min_participants_for_behavior(beh) else 0
-    duration_ok = 1 if qualify_event_duration(event, fps, parameters=params)["ok"] else 0
+    duration_ok = 1 if _event_duration_ok(event, fps, parameters=params) else 0
     audit_blk = event.get("audit") if isinstance(event.get("audit"), Mapping) else {}
     kin_raw = event.get(
         "kinematic_ok",
@@ -267,7 +301,7 @@ def select_behavior_segments(
         if len(event_participant_ids(event)) < min_participants_for_behavior(canonical):
             rejected_counts["insufficient_participants"] += 1
             continue
-        if not qualify_event_duration(event, fps, parameters=params)["ok"]:
+        if not _event_duration_ok(event, fps, parameters=params):
             rejected_counts["duration_policy"] += 1
             continue
         if require_closed_boundaries and not is_process_boundary_closed(event):

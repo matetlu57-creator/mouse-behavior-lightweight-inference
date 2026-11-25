@@ -1,6 +1,8 @@
 """Unit and regression tests for modular behavior segment clipping and selection."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -86,6 +88,16 @@ def test_endpoint_observations_and_boundary_checks():
     # Frames [0, 18) miss mouse 2 at start=0
     ev_bad_start = {"canonical_behavior": "chase", "mouse_ids": [1, 2], "start_frame": 0, "end_frame": 18}
     assert not endpoints_fully_observed(store, ev_bad_start, info)
+
+    # Isolation checks target_mouse_id rather than context mouse_ids
+    ev_iso_target = {
+        "canonical_behavior": "isolation",
+        "mouse_ids": [1, 2],
+        "target_mouse_id": 1,
+        "start_frame": 0,
+        "end_frame": 20,
+    }
+    assert endpoints_fully_observed(store, ev_iso_target, info)
 
     # Boundary closure checks
     assert is_process_boundary_closed({"canonical_behavior": "attack"})
@@ -211,29 +223,44 @@ def test_refine_rearing_segments_standalone_vs_mounted_and_curled():
 
 def test_refine_attack_dispersal_and_group_locomotion():
     fps = 30.0
-    # 1. Attack: 30 frames (1.0s > 0.7s), fast co-observed motion
-    attack_rows = [
-        {
-            "frame": f,
-            "source_frame": f,
-            "time": f / fps,
-            "detections": [
-                _make_detection(1, (50.0 + f * 4.0, 100.0)),
-                _make_detection(2, (60.0 + f * 4.0, 100.0)),
-            ],
-        }
-        for f in range(30)
-    ]
+    # 1. Attack: >0.5s genuine clinch fight with heavy box overlap, 3 occlusion frames & active struggle (cm_per_px ~ 0.36)
+    attack_rows = []
+    for f in range(45):
+        if f < 8:
+            x1, x2 = 50.0, 74.0
+        elif f < 14:
+            x1 = 50.0 + (f - 8) * 5.0
+            x2 = 74.0 + (f - 8) * 1.5
+        elif f < 28:
+            x1 = 80.0 + (f - 14) * 3.8
+            x2 = 83.0 + (f - 14) * 3.6
+        else:
+            x1 = 133.2 + (f - 28) * 2.5
+            x2 = 133.4 + (f - 28) * 6.0
+        dets = [_make_detection(1, (x1, 100.0), (26.0, 20.0))]
+        if f not in (18, 19, 20):
+            dets.append(_make_detection(2, (x2, 100.0), (26.0, 20.0)))
+        attack_rows.append(
+            {
+                "frame": f,
+                "source_frame": f,
+                "time": f / fps,
+                "detections": dets,
+            }
+        )
     attack_ev = {
-        "event_id": "attack_00000000_00000030_aa",
+        "event_id": "attack_00000000_00000045_aa",
         "canonical_behavior": "attack",
         "behavior": "Attack",
         "mouse_ids": [1, 2],
-        "start_frame": 0,
-        "end_frame": 30,
+        "start_frame": 12,
+        "end_frame": 28,
     }
     res_attack = refine_attack_segments([attack_ev], _DummyStore(attack_rows), {"source_video": {"fps": fps}})
     assert len(res_attack) == 1
+    assert res_attack[0]["roles"]["initiator_role"] == "Attacker"
+    assert res_attack[0]["roles"]["target_role"] == "Attacked"
+    assert [p["role_name"] for p in res_attack[0]["participants"]] == ["Attacker", "Attacked"]
 
     # 2. Dispersal: 180 frames (6.0s > 5.0s), starts compact, expands outward > 35px
     disp_rows = []
@@ -1053,27 +1080,39 @@ def test_refine_locomotion_segments_trims_static_prefix():
 
 
 def test_refine_attack_lookforward_is_bounded_on_long_videos():
-    """Attack forward extension must stop at end + lookforward, not scan to frame_count."""
+    """Attack forward extension must stop cleanly at end + lookforward, not scan to frame_count."""
     fps = 30.0
     rows = []
     for f in range(1000):
-        dx = (f % 2) * 15.0 if 100 <= f < 130 else 0.0
+        if f < 95:
+            x1, x2 = 100.0, 160.0
+        elif f < 104:
+            x1 = 100.0 + (f - 95) * 5.0
+            x2 = 160.0 - (f - 95) * 1.0
+        elif f < 122:
+            x1 = 145.0 + (f - 104) * 3.8
+            x2 = 151.0 + (f - 104) * 3.6
+        elif f < 140:
+            x1 = 213.4 + (f - 122) * 2.5
+            x2 = 215.8 + (f - 122) * 5.5
+        else:
+            x1, x2 = 258.4, 314.8
+        dets = [_make_detection(1, (x1, 100.0), (40.0, 22.0))]
+        if f not in (112, 113, 114):
+            dets.append(_make_detection(2, (x2, 100.0), (40.0, 22.0)))
         rows.append({
             "frame": f,
             "source_frame": f,
             "time": f / fps,
-            "detections": [
-                _make_detection(1, (110.0, 100.0), (40.0, 20.0)),
-                _make_detection(2, (150.0 + dx, 100.0), (40.0, 20.0)),
-            ],
+            "detections": dets,
         })
     ev = {
         "event_id": "att_bounded",
         "canonical_behavior": "attack",
         "behavior": "Attack",
         "mouse_ids": [1, 2],
-        "start_frame": 100,
-        "end_frame": 130,
+        "start_frame": 102,
+        "end_frame": 128,
     }
     res = refine_attack_segments([ev], _DummyStore(rows), {"source_video": {"fps": fps, "frame_count": 1000}})
     assert len(res) == 1
@@ -1183,7 +1222,7 @@ def test_refine_group_locomotion_respects_15fps_support_frames():
 
 def test_refine_social_clustering_retains_convergence_and_dense_cluster_and_dispatches():
     fps = 30.0
-    n = 90
+    n = 120
     scale = {"cm_per_pixel": 0.1}
     rows = []
     for f in range(n):
@@ -1216,7 +1255,14 @@ def test_refine_social_clustering_retains_convergence_and_dense_cluster_and_disp
     res_direct = refine_social_clustering_segments([ev], store, binding, scale=scale)
     assert len(res_direct) == 1
     assert res_direct[0]["start_frame"] == 0
-    assert res_direct[0]["end_frame"] == 90
+    assert 100 <= res_direct[0]["end_frame"] <= 120
+    assert res_direct[0]["duration_s"] > 3.0
+
+    res_unbounded_hold = refine_social_clustering_segments(
+        [ev], store, binding, scale=scale, max_post_arrival_hold_s=None
+    )
+    assert len(res_unbounded_hold) == 1
+    assert res_unbounded_hold[0]["end_frame"] == 120
 
     res_pipeline, _ = refine_behavior_segments(
         [ev],
@@ -1229,16 +1275,16 @@ def test_refine_social_clustering_retains_convergence_and_dense_cluster_and_disp
     )
     assert len(res_pipeline) == 1
     assert res_pipeline[0]["start_frame"] == 0
-    assert res_pipeline[0]["end_frame"] == 90
+    assert res_pipeline[0]["end_frame"] == res_direct[0]["end_frame"]
 
 
 def test_refine_social_clustering_coalesces_short_dropout_without_fabricating_frames():
     fps = 30.0
     scale = {"cm_per_pixel": 0.1}
 
-    # Short occlusion gap (20 frames = 0.67s <= 2.0s): coalesce while keeping exact support
+    # Short occlusion gap (20 frames = 0.67s <= 2.0s): coalesce while keeping exact support (> 3.0s total)
     rows_gap = []
-    for f in range(90):
+    for f in range(120):
         dets = [
             _make_detection(1, (300.0, 300.0)),
             _make_detection(2, (330.0, 300.0)),
@@ -1265,23 +1311,24 @@ def test_refine_social_clustering_coalesces_short_dropout_without_fabricating_fr
         "behavior": "Social clustering",
         "mouse_ids": [1, 2, 3],
         "start_frame": 60,
-        "end_frame": 90,
-        "canonical_support_frame_intervals": [[60, 90]],
+        "end_frame": 120,
+        "canonical_support_frame_intervals": [[60, 120]],
     }
     res_coalesced = refine_social_clustering_segments(
         [frag_b, frag_a],
         _DummyStore(rows_gap),
-        {"source_video": {"fps": fps, "frame_count": 90}},
+        {"source_video": {"fps": fps, "frame_count": 120}},
         scale=scale,
     )
     assert len(res_coalesced) == 1
     assert res_coalesced[0]["start_frame"] == 0
-    assert res_coalesced[0]["end_frame"] == 90
-    assert res_coalesced[0]["canonical_support_frame_intervals"] == [[0, 40], [60, 90]]
+    assert 100 <= res_coalesced[0]["end_frame"] <= 120
+    assert res_coalesced[0]["duration_s"] > 3.0
+    assert res_coalesced[0]["canonical_support_frame_intervals"] == [[0, 40], [60, res_coalesced[0]["end_frame"]]]
 
     # Confirmed all-observed dispersal in the gap must prevent coalescing + reject zero-motion teleport
     rows_disp = []
-    for f in range(110):
+    for f in range(170):
         dets = [
             _make_detection(1, (300.0, 300.0)),
             _make_detection(2, (330.0, 300.0)),
@@ -1289,13 +1336,13 @@ def test_refine_social_clustering_coalesces_short_dropout_without_fabricating_fr
         if f < 25:
             t = f / 24.0
             dets.append(_make_detection(3, (550.0 - 230.0 * t, 300.0 + 20.0 * t)))
-        elif f < 45:
+        elif f < 105:
             dets.append(_make_detection(3, (320.0, 320.0)))
-        elif f < 60:
+        elif f < 120:
             # All 3 mice observed dispersed > 1.25 * 10 cm
             dets.append(_make_detection(3, (600.0, 300.0)))
-        elif f >= 65:
-            # Frames 60..64 drop out, then mouse 3 reappears dense with zero adjacent convergence
+        elif f >= 125:
+            # Frames 120..124 drop out, then mouse 3 reappears dense with zero adjacent convergence
             dets.append(_make_detection(3, (320.0, 320.0)))
         rows_disp.append({"frame": f, "source_frame": f, "time": f / fps, "detections": dets})
 
@@ -1307,38 +1354,39 @@ def test_refine_social_clustering_coalesces_short_dropout_without_fabricating_fr
                 "behavior": "Social clustering",
                 "mouse_ids": [1, 2, 3],
                 "start_frame": 0,
-                "end_frame": 45,
+                "end_frame": 105,
             },
             {
                 "event_id": "sc_2",
                 "canonical_behavior": "social_clustering",
                 "behavior": "Social clustering",
                 "mouse_ids": [1, 2, 3],
-                "start_frame": 65,
-                "end_frame": 110,
+                "start_frame": 125,
+                "end_frame": 170,
             },
         ],
         _DummyStore(rows_disp),
-        {"source_video": {"fps": fps, "frame_count": 110}},
+        {"source_video": {"fps": fps, "frame_count": 170}},
         scale=scale,
     )
     assert len(res_split) == 1
     assert res_split[0]["start_frame"] == 0
-    assert res_split[0]["end_frame"] <= 50
+    assert res_split[0]["end_frame"] <= 110
 
 
 def test_refine_social_clustering_trims_tail_redispersal_and_rejects_invalid():
     fps = 30.0
     scale = {"cm_per_pixel": 0.1}
     binding_120 = {"source_video": {"fps": fps, "frame_count": 120}}
+    binding_150 = {"source_video": {"fps": fps, "frame_count": 150}}
 
-    # 1. Sustained tail re-dispersal is trimmed cleanly after dense hold
+    # 1. Sustained tail re-dispersal is trimmed cleanly after >3.0s convergence + dense hold
     rows_redisp = []
-    for f in range(120):
+    for f in range(150):
         if f < 30:
             t = f / 29.0
             x3, y3 = 600.0 - 280.0 * t, 300.0 + 20.0 * t
-        elif f < 75:
+        elif f < 105:
             x3, y3 = 320.0, 320.0
         else:
             x3, y3 = 600.0, 300.0
@@ -1362,15 +1410,16 @@ def test_refine_social_clustering_trims_tail_redispersal_and_rejects_invalid():
                 "behavior": "Social clustering",
                 "mouse_ids": [1, 2, 3],
                 "start_frame": 0,
-                "end_frame": 120,
+                "end_frame": 150,
             }
         ],
         _DummyStore(rows_redisp),
-        binding_120,
+        binding_150,
         scale=scale,
     )
     assert len(res_redisp) == 1
-    assert 70 <= res_redisp[0]["end_frame"] <= 80
+    assert 100 <= res_redisp[0]["end_frame"] <= 110
+    assert res_redisp[0]["duration_s"] > 3.0
 
     # 2. Brief <0.5s pass-through rejected (rad <= 10 cm for 12 frames = 0.40s < 0.50s)
     rows_brief = []
@@ -1530,6 +1579,26 @@ def test_refine_social_clustering_trims_tail_redispersal_and_rejects_invalid():
             ],
             _DummyStore(rows_gloco),
             binding_120,
+            scale=scale,
+        )
+        == []
+    )
+
+    # 5. Convergence + dense gathering <= 3.0s (90 frames at 30fps) must be rejected
+    assert (
+        refine_social_clustering_segments(
+            [
+                {
+                    "event_id": "sc_exact_3s",
+                    "canonical_behavior": "social_clustering",
+                    "behavior": "Social clustering",
+                    "mouse_ids": [1, 2, 3],
+                    "start_frame": 0,
+                    "end_frame": 90,
+                }
+            ],
+            _DummyStore(rows_redisp[:90]),
+            {"source_video": {"fps": fps, "frame_count": 90}},
             scale=scale,
         )
         == []
@@ -1744,4 +1813,103 @@ def test_refine_group_locomotion_respects_strict_duration_and_parameters():
         )
         == []
     )
+
+
+def test_all_15_behaviors_have_explicit_clip_min_duration_and_strict_enforcement() -> None:
+    from mouse_behavior.behavior.duration_policy import resolve_duration_policy
+    from mouse_behavior.behavior.segment_clipping_common import (
+        MAX_DURATION_S_BY_BEHAVIOR,
+        MIN_CLIP_DURATION_S_BY_BEHAVIOR,
+        MIN_PARTICIPANTS_BY_BEHAVIOR,
+        min_clip_duration_policy_for_behavior,
+        min_clip_duration_s_for_behavior,
+        qualify_clip_duration,
+    )
+
+    assert set(MIN_CLIP_DURATION_S_BY_BEHAVIOR) == set(MIN_PARTICIPANTS_BY_BEHAVIOR)
+    assert len(MIN_CLIP_DURATION_S_BY_BEHAVIOR) == 15
+    assert MIN_CLIP_DURATION_S_BY_BEHAVIOR["head_contact"] == (0.4, ">")
+    assert MIN_CLIP_DURATION_S_BY_BEHAVIOR["tail_contact"] == (0.4, ">")
+    assert MIN_CLIP_DURATION_S_BY_BEHAVIOR["social_clustering"] == (3.0, ">")
+    assert MAX_DURATION_S_BY_BEHAVIOR == {
+        "huddle": 15.0,
+        "dispersal": 15.0,
+        "group_locomotion": 9.0,
+        "isolation": 20.0,
+    }
+    assert resolve_duration_policy("head_contact").behavior == "nose_head_contact"
+    assert resolve_duration_policy("tail_contact").behavior == "nose_tail_contact"
+
+    fps = 30.0
+    for beh, (req_s, comp) in MIN_CLIP_DURATION_S_BY_BEHAVIOR.items():
+        assert req_s > 0.0
+        assert comp in {">", ">="}
+        assert min_clip_duration_policy_for_behavior(beh) == (req_s, comp)
+        assert min_clip_duration_s_for_behavior(beh) == req_s
+
+        mids = list(range(1, MIN_PARTICIPANTS_BY_BEHAVIOR[beh] + 1))
+        exact_frames = max(1, int(round(req_s * fps)))
+        bad_frames = exact_frames if comp == ">" else max(1, exact_frames - 1)
+        if comp == ">=" and bad_frames / fps >= req_s - 1e-9:
+            bad_frames = max(1, exact_frames - 1)
+        good_frames = exact_frames + 1 if comp == ">" else max(1, int(math.ceil(req_s * fps - 1e-9)))
+        if bad_frames < good_frames and not (comp == ">=" and (bad_frames / fps) >= req_s - 1e-9):
+            bad_ev = {
+                "event_id": f"{beh}_bad",
+                "canonical_behavior": beh,
+                "behavior": beh,
+                "mouse_ids": mids,
+                "start_frame": 0,
+                "end_frame": bad_frames,
+                "canonical_support_frame_intervals": [[0, bad_frames]],
+            }
+            assert qualify_clip_duration(bad_ev, fps)["ok"] is False, f"{beh} accepted {bad_frames} frames"
+
+        good_ev = {
+            "event_id": f"{beh}_good",
+            "canonical_behavior": beh,
+            "behavior": beh,
+            "mouse_ids": mids,
+            "start_frame": 0,
+            "end_frame": good_frames,
+            "canonical_support_frame_intervals": [[0, good_frames]],
+        }
+        assert qualify_clip_duration(good_ev, fps)["ok"] is True, f"{beh} rejected {good_frames} frames"
+
+    # select_behavior_segments enforces calibrated clip minimums across updated thresholds
+    candidates = [
+        {"event_id": "app_short", "canonical_behavior": "approach", "mouse_ids": [1, 2], "start_frame": 0, "end_frame": 24},
+        {"event_id": "app_ok", "canonical_behavior": "approach", "mouse_ids": [3, 4], "start_frame": 30, "end_frame": 60},
+        {"event_id": "att_exact_05", "canonical_behavior": "attack", "mouse_ids": [1, 2], "start_frame": 100, "end_frame": 115},
+        {"event_id": "att_ok", "canonical_behavior": "attack", "mouse_ids": [3, 4], "start_frame": 130, "end_frame": 146},
+        {"event_id": "ch_exact_07", "canonical_behavior": "chase", "mouse_ids": [1, 2], "start_frame": 200, "end_frame": 221},
+        {"event_id": "ch_ok", "canonical_behavior": "chase", "mouse_ids": [3, 4], "start_frame": 240, "end_frame": 262},
+        {"event_id": "hc_exact_04", "canonical_behavior": "nose_head_contact", "mouse_ids": [1, 2], "start_frame": 300, "end_frame": 312},
+        {"event_id": "hc_ok", "canonical_behavior": "nose_head_contact", "mouse_ids": [3, 4], "start_frame": 300, "end_frame": 313},
+        {"event_id": "tc_exact_04", "canonical_behavior": "nose_tail_contact", "mouse_ids": [1, 2], "start_frame": 400, "end_frame": 412},
+        {"event_id": "tc_ok", "canonical_behavior": "nose_tail_contact", "mouse_ids": [3, 4], "start_frame": 400, "end_frame": 413},
+        {"event_id": "sc_exact_30", "canonical_behavior": "social_clustering", "mouse_ids": [1, 2, 3], "start_frame": 500, "end_frame": 590},
+        {"event_id": "sc_ok", "canonical_behavior": "social_clustering", "mouse_ids": [4, 5, 6], "start_frame": 500, "end_frame": 591},
+    ]
+    selected, summary = select_behavior_segments(
+        candidates,
+        binding={"source_video": {"fps": fps}},
+        require_closed_boundaries=False,
+        require_endpoint_visibility=False,
+    )
+    assert [e["event_id"] for e in selected] == ["app_ok", "att_ok", "ch_ok", "hc_ok", "tc_ok", "sc_ok"]
+    assert summary["rejected_counts"]["duration_policy"] == 6
+    assert summary["max_per_behavior"] is None
+
+    # Max duration cap enforcement in qualify_clip_duration (default enforce_max_duration=True)
+    for over_ev in (
+        {"event_id": "hud_16s", "canonical_behavior": "huddle", "mouse_ids": [1, 2, 3], "start_frame": 0, "end_frame": 480, "canonical_support_frame_intervals": [[0, 480]]},
+        {"event_id": "disp_16s", "canonical_behavior": "dispersal", "mouse_ids": [1, 2, 3], "start_frame": 0, "end_frame": 480},
+        {"event_id": "gl_10s", "canonical_behavior": "group_locomotion", "mouse_ids": [1, 2, 3], "start_frame": 0, "end_frame": 300, "canonical_support_frame_intervals": [[0, 300]]},
+        {"event_id": "iso_21s", "canonical_behavior": "isolation", "mouse_ids": [1], "target_mouse_id": 1, "start_frame": 0, "end_frame": 630, "canonical_support_frame_intervals": [[0, 630]]},
+    ):
+        diag_rej = qualify_clip_duration(over_ev, fps)
+        assert diag_rej["ok"] is False
+        assert diag_rej["reason"] == "clip_duration_exceeds_max_cap"
+        assert qualify_clip_duration(over_ev, fps, enforce_max_duration=False)["ok"] is True
 

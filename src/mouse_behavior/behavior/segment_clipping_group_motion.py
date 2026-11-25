@@ -9,8 +9,8 @@ from typing import Any
 
 import numpy as np
 
-from mouse_behavior.behavior.duration_policy import qualify_event_duration
 from mouse_behavior.behavior.segment_clipping_common import (
+    MAX_DURATION_S_BY_BEHAVIOR,
     _clip_multi_track_series,
     _detection_map,
     _extract_center_px,
@@ -19,6 +19,7 @@ from mouse_behavior.behavior.segment_clipping_common import (
     _resolve_fps,
     _resolve_parameters,
     _resolve_scale_cm_per_px,
+    qualify_clip_duration,
     update_segment_bounds,
 )
 from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
@@ -59,6 +60,7 @@ def refine_group_locomotion_segments(
     scale: Mapping[str, Any] | None = None,
     parameters: HeuristicParameters | None = None,
     min_duration_s: float = 3.0,
+    max_duration_s: float | None = MAX_DURATION_S_BY_BEHAVIOR["group_locomotion"],
     min_support_frames: int | None = None,
     min_participation_ratio: float = 0.40,
     max_end_radius_px: float = 145.0,
@@ -75,6 +77,15 @@ def refine_group_locomotion_segments(
         float(params.group_locomotion_min_duration_s)
         if min_duration_s == 3.0
         else float(min_duration_s)
+    )
+    if max_duration_s is not None:
+        if isinstance(max_duration_s, bool) or not math.isfinite(float(max_duration_s)) or float(max_duration_s) <= 0:
+            raise ValueError("max_duration_s must be None or a finite positive number")
+    eff_max_duration_s = float(max_duration_s) if max_duration_s is not None else None
+    max_frames = (
+        max(1, int(math.floor(eff_max_duration_s * fps + 1e-9)))
+        if eff_max_duration_s is not None
+        else None
     )
     eff_min_support_frames = (
         int(min_support_frames)
@@ -211,74 +222,129 @@ def refine_group_locomotion_segments(
 
             b_s = true_s - start
             b_e = true_e - start
-            dur_s = (true_e - true_s) / fps
-            if dur_s <= eff_min_duration_s + 1e-9:
-                continue
 
-            bout_sync = sync_mask[b_s:b_e]
-            sync_count = int(bout_sync.sum())
-            if sync_count < eff_min_support_frames:
-                continue
-            if (sync_count / max(1, true_e - true_s)) + 1e-9 < min_sync_ratio:
-                continue
-            valid_dir = np.isfinite(dir_cos[b_s:b_e])
-            if not valid_dir.any():
-                continue
-            if float(np.mean(dir_cos[b_s:b_e][valid_dir])) + 1e-9 < min(0.20, dir_thresh):
-                continue
+            def _evaluate_gloco_subbout(sub_b_s: int, sub_b_e: int) -> dict[str, Any] | None:
+                sub_true_s = start + sub_b_s
+                sub_true_e = start + sub_b_e
+                dur_s = (sub_true_e - sub_true_s) / fps
+                if dur_s <= eff_min_duration_s + 1e-9:
+                    return None
+                if eff_max_duration_s is not None and dur_s > eff_max_duration_s + 1e-9:
+                    return None
 
-            bout_rads = rads_cm[b_s:b_e]
-            bout_rads_valid = bout_rads[np.isfinite(bout_rads)]
-            if not len(bout_rads_valid):
-                continue
-            end_rad_cm = float(np.mean(bout_rads_valid[-min(15, len(bout_rads_valid)) :]))
-            if end_rad_cm > eff_max_end_radius_cm:
-                continue
+                bout_sync = sync_mask[sub_b_s:sub_b_e]
+                sync_count = int(bout_sync.sum())
+                if sync_count < eff_min_support_frames:
+                    return None
+                if (sync_count / max(1, sub_true_e - sub_true_s)) + 1e-9 < min_sync_ratio:
+                    return None
+                valid_dir = np.isfinite(dir_cos[sub_b_s:sub_b_e])
+                if not valid_dir.any():
+                    return None
+                if float(np.mean(dir_cos[sub_b_s:sub_b_e][valid_dir])) + 1e-9 < min(0.20, dir_thresh):
+                    return None
 
-            bout_c = centroids_cm[b_s:b_e]
-            c_valid = bout_c[np.isfinite(bout_c).all(axis=1)]
-            if len(c_valid) < 2:
-                continue
-            c_path_cm = float(np.linalg.norm(np.diff(c_valid, axis=0), axis=1).sum())
-            if (c_path_cm / max(dur_s, 1e-6)) < eff_min_speed_cm_s:
-                continue
+                bout_rads = rads_cm[sub_b_s:sub_b_e]
+                bout_rads_valid = bout_rads[np.isfinite(bout_rads)]
+                if not len(bout_rads_valid):
+                    return None
+                end_rad_cm = float(np.mean(bout_rads_valid[-min(15, len(bout_rads_valid)) :]))
+                if end_rad_cm > eff_max_end_radius_cm:
+                    return None
 
-            mouse_paths: list[float] = []
-            disps_cm: list[np.ndarray] = []
-            for col in range(k):
-                obs_idx = np.flatnonzero(observed[b_s:b_e, col])
-                if len(obs_idx) < 2:
-                    mouse_paths.append(0.0)
-                    continue
-                pts_m = centers_cm[b_s:b_e, col][obs_idx]
-                mouse_paths.append(float(np.linalg.norm(np.diff(pts_m, axis=0), axis=1).sum()))
-                disps_cm.append(pts_m[-1] - pts_m[0])
-            if not mouse_paths or max(mouse_paths) <= 0.0:
-                continue
-            if (min(mouse_paths) / max(mouse_paths)) < min_participation_ratio:
-                continue
-            if len(disps_cm) != k:
-                continue
-            norms = [float(np.linalg.norm(d)) for d in disps_cm]
-            if min(norms) <= 1e-6:
-                continue
-            min_net_req = float(cfg.locomotion_min_net_displacement_cm) * 0.7 * min(1.0, eff_min_duration_s / 3.0)
-            if min(norms) + 1e-9 < min_net_req:
-                continue
-            units = [d / max(n, 1e-9) for d, n in zip(disps_cm, norms)]
-            pair_cos = [
-                float(np.dot(units[a], units[b]))
-                for a, b in combinations(range(k), 2)
-            ]
-            if not pair_cos or float(np.mean(pair_cos)) < dir_thresh - 0.1:
-                continue
+                bout_c = centroids_cm[sub_b_s:sub_b_e]
+                c_valid = bout_c[np.isfinite(bout_c).all(axis=1)]
+                if len(c_valid) < 2:
+                    return None
+                c_path_cm = float(np.linalg.norm(np.diff(c_valid, axis=0), axis=1).sum())
+                if (c_path_cm / max(dur_s, 1e-6)) < eff_min_speed_cm_s:
+                    return None
 
-            cropped = update_segment_bounds(event, true_s, true_e, fps, suffix="gloco_crop")
-            supp_intervals = _observed_support_intervals(bout_sync, true_s)
-            cropped["canonical_support_frame_intervals"] = supp_intervals
-            cropped["canonical_support_frame_count"] = sync_count
-            if qualify_event_duration(cropped, fps, parameters=params)["ok"]:
-                refined.append(cropped)
+                mouse_paths: list[float] = []
+                disps_cm: list[np.ndarray] = []
+                for col in range(k):
+                    obs_idx = np.flatnonzero(observed[sub_b_s:sub_b_e, col])
+                    if len(obs_idx) < 2:
+                        mouse_paths.append(0.0)
+                        continue
+                    pts_m = centers_cm[sub_b_s:sub_b_e, col][obs_idx]
+                    mouse_paths.append(float(np.linalg.norm(np.diff(pts_m, axis=0), axis=1).sum()))
+                    disps_cm.append(pts_m[-1] - pts_m[0])
+                if not mouse_paths or max(mouse_paths) <= 0.0:
+                    return None
+                if (min(mouse_paths) / max(mouse_paths)) < min_participation_ratio:
+                    return None
+                if len(disps_cm) != k:
+                    return None
+                norms = [float(np.linalg.norm(d)) for d in disps_cm]
+                if min(norms) <= 1e-6:
+                    return None
+                min_net_req = float(cfg.locomotion_min_net_displacement_cm) * 0.7 * min(
+                    1.0, eff_min_duration_s / 3.0
+                )
+                if min(norms) + 1e-9 < min_net_req:
+                    return None
+                units = [d / max(n, 1e-9) for d, n in zip(disps_cm, norms)]
+                pair_cos = [
+                    float(np.dot(units[a], units[b]))
+                    for a, b in combinations(range(k), 2)
+                ]
+                if not pair_cos or float(np.mean(pair_cos)) < dir_thresh - 0.1:
+                    return None
+
+                cropped = update_segment_bounds(event, sub_true_s, sub_true_e, fps, suffix="gloco_crop")
+                supp_intervals = _observed_support_intervals(bout_sync, sub_true_s)
+                cropped["canonical_support_frame_intervals"] = supp_intervals
+                cropped["canonical_support_frame_count"] = sync_count
+                if qualify_clip_duration(
+                    cropped,
+                    fps,
+                    parameters=params,
+                    enforce_max_duration=(eff_max_duration_s is not None),
+                )["ok"]:
+                    return cropped
+                return None
+
+            if max_frames is None or (b_e - b_s) <= max_frames:
+                cand_ev = _evaluate_gloco_subbout(b_s, b_e)
+                if cand_ev is not None:
+                    refined.append(cand_ev)
+            else:
+                cur = b_s
+                while cur < b_e:
+                    cs = cur
+                    if cs > b_s:
+                        rem_obs = np.flatnonzero(all_obs[cs:b_e])
+                        if not len(rem_obs):
+                            break
+                        cs = cs + int(rem_obs[0])
+                    if (b_e - cs) <= max_frames:
+                        if cs > b_s:
+                            tail_obs = np.flatnonzero(all_obs[cs:b_e])
+                            if not len(tail_obs):
+                                break
+                            ce_tail = cs + int(tail_obs[-1]) + 1
+                        else:
+                            ce_tail = b_e
+                        cand_ev = _evaluate_gloco_subbout(cs, ce_tail)
+                        if cand_ev is not None:
+                            refined.append(cand_ev)
+                        break
+                    cap_e = cs + max_frames
+                    win_obs = np.flatnonzero(all_obs[cs:cap_e])
+                    if not len(win_obs):
+                        cur = cap_e
+                        continue
+                    ce = cs + int(win_obs[-1]) + 1
+                    cand_ev = _evaluate_gloco_subbout(cs, ce) if ce > cs else None
+                    if cand_ev is not None:
+                        refined.append(cand_ev)
+                        cur = ce
+                    else:
+                        nxt_sync = np.flatnonzero(sync_mask[cs + 1 : b_e])
+                        if not len(nxt_sync):
+                            break
+                        cur = cs + 1 + int(nxt_sync[0])
     return refined
 
 
@@ -290,12 +356,22 @@ def refine_isolation_segments(
     scale: Mapping[str, Any] | None = None,
     parameters: HeuristicParameters | None = None,
     min_duration_s: float = 10.0,
+    max_duration_s: float | None = MAX_DURATION_S_BY_BEHAVIOR["isolation"],
     isolation_distance_cm: float = 20.0,
     min_isolated_fraction: float = 0.85,
 ) -> list[dict[str, Any]]:
     """Fine-crop and validate isolation segments for single mice separated from conspecifics."""
     fps = _resolve_fps(binding)
     params = _resolve_parameters(binding, parameters)
+    if max_duration_s is not None:
+        if isinstance(max_duration_s, bool) or not math.isfinite(float(max_duration_s)) or float(max_duration_s) <= 0:
+            raise ValueError("max_duration_s must be None or a finite positive number")
+    eff_max_duration_s = float(max_duration_s) if max_duration_s is not None else None
+    max_frames = (
+        max(1, int(math.floor(eff_max_duration_s * fps + 1e-9)))
+        if eff_max_duration_s is not None
+        else None
+    )
     refined: list[dict[str, Any]] = []
 
     req_dur = getattr(params, "isolation_min_duration_s", min_duration_s)
@@ -321,13 +397,16 @@ def refine_isolation_segments(
         scale_cm_per_px = _resolve_scale_cm_per_px(rows, mids, binding, scale=scale)
         iso_dist_px = req_dist_cm / scale_cm_per_px
 
-        obs_isolated_indices = []
-        obs_all_indices = []
+        obs_isolated_frames: list[int] = []
+        obs_all_frames: list[int] = []
         for idx, row in enumerate(rows):
+            fn = int(row.get("frame", row.get("source_frame", start + idx)))
+            if not (start <= fn < end):
+                continue
             det_map = _detection_map(row)
             if target_id not in det_map:
                 continue
-            obs_all_indices.append(idx)
+            obs_all_frames.append(fn)
             c_target = _extract_center_px(det_map[target_id])
             if c_target is None:
                 continue
@@ -338,46 +417,89 @@ def refine_isolation_segments(
                 c_other = _extract_center_px(odet)
                 if c_other is not None:
                     other_dists.append(float(np.linalg.norm(c_target - c_other)))
-            if not other_dists or min(other_dists) >= iso_dist_px * 0.75:
-                obs_isolated_indices.append(idx)
+            if other_dists and min(other_dists) >= iso_dist_px * 0.75:
+                obs_isolated_frames.append(fn)
 
-        if not obs_all_indices:
+        if not obs_all_frames:
             continue
 
-        if len(obs_isolated_indices) / max(len(obs_all_indices), 1) < min_isolated_fraction:
+        if len(obs_isolated_frames) / max(len(obs_all_frames), 1) < min_isolated_fraction:
             continue
 
-        true_s = start if int(obs_all_indices[0]) <= int(round(2.0 * fps)) else (start + int(obs_all_indices[0]))
-        if end - (start + int(obs_all_indices[-1]) + 1) <= int(round(2.0 * fps)):
+        snap_frames = int(round(2.0 * fps))
+        true_s = start if (obs_all_frames[0] - start) <= snap_frames else obs_all_frames[0]
+        if end - (obs_all_frames[-1] + 1) <= snap_frames:
             true_e = end
         else:
-            true_e = start + int(obs_all_indices[-1]) + 1
+            true_e = obs_all_frames[-1] + 1
 
-        dur_s = (true_e - true_s) / fps
-        if dur_s < req_dur - 1e-9:
-            continue
-
-        cropped = update_segment_bounds(event, true_s, true_e, fps, suffix="isolation_crop")
-
-        supp_intervals = []
-        if obs_isolated_indices:
-            curr_s = obs_isolated_indices[0]
-            prev = curr_s
-            for idx in obs_isolated_indices[1:]:
-                if idx == prev + 1:
-                    prev = idx
-                else:
-                    supp_intervals.append([start + curr_s, start + prev + 1])
-                    curr_s = idx
-                    prev = idx
-            supp_intervals.append([start + curr_s, start + prev + 1])
+        sub_intervals: list[tuple[int, int]] = []
+        if max_frames is None or (true_e - true_s) <= max_frames:
+            sub_intervals.append((true_s, true_e))
         else:
-            supp_intervals = [[true_s, true_e]]
+            cur = true_s
+            while cur < true_e:
+                if cur == true_s:
+                    cs = true_s
+                else:
+                    rem = [f for f in obs_all_frames if cur <= f < true_e]
+                    if not rem:
+                        break
+                    cs = rem[0]
+                if (true_e - cs) <= max_frames:
+                    if cs > true_s:
+                        rem_tail = [f for f in obs_all_frames if cs <= f < true_e]
+                        if rem_tail:
+                            sub_intervals.append((cs, rem_tail[-1] + 1))
+                    else:
+                        sub_intervals.append((cs, true_e))
+                    break
+                cap_e = cs + max_frames
+                within = [f for f in obs_all_frames if cs <= f < cap_e]
+                if not within:
+                    cur = cap_e
+                    continue
+                ce = within[-1] + 1
+                sub_intervals.append((cs, ce))
+                cur = ce
 
-        cropped["canonical_support_frame_intervals"] = supp_intervals
-        cropped["canonical_support_frame_count"] = sum(e - s for s, e in supp_intervals)
+        for sub_s, sub_e in sub_intervals:
+            sub_obs_all = [f for f in obs_all_frames if sub_s <= f < sub_e]
+            sub_obs_iso = [f for f in obs_isolated_frames if sub_s <= f < sub_e]
+            if not sub_obs_all or not sub_obs_iso:
+                continue
+            if len(sub_obs_iso) / max(len(sub_obs_all), 1) < min_isolated_fraction:
+                continue
 
-        if qualify_event_duration(cropped, fps, parameters=params)["ok"]:
-            refined.append(cropped)
+            dur_s = (sub_e - sub_s) / fps
+            if dur_s <= req_dur + 1e-9:
+                continue
+            if eff_max_duration_s is not None and dur_s > eff_max_duration_s + 1e-9:
+                continue
+
+            cropped = update_segment_bounds(event, sub_s, sub_e, fps, suffix="isolation_crop")
+
+            supp_intervals: list[list[int]] = []
+            curr_s = sub_obs_iso[0]
+            prev = curr_s
+            for fn in sub_obs_iso[1:]:
+                if fn == prev + 1:
+                    prev = fn
+                else:
+                    supp_intervals.append([curr_s, prev + 1])
+                    curr_s = fn
+                    prev = fn
+            supp_intervals.append([curr_s, prev + 1])
+
+            cropped["canonical_support_frame_intervals"] = supp_intervals
+            cropped["canonical_support_frame_count"] = sum(e - s for s, e in supp_intervals)
+
+            if qualify_clip_duration(
+                cropped,
+                fps,
+                parameters=params,
+                enforce_max_duration=(eff_max_duration_s is not None),
+            )["ok"]:
+                refined.append(cropped)
 
     return refined

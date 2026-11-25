@@ -21,7 +21,6 @@ from typing import Any
 
 import numpy as np
 
-from mouse_behavior.behavior.duration_policy import qualify_event_duration
 from mouse_behavior.behavior.event_boundaries import EventBoundary
 from mouse_behavior.behavior.segment_clipping import (
     refine_behavior_segments,
@@ -39,6 +38,7 @@ from mouse_behavior.behavior.segment_clipping_common import (
     max_duration_s_for_behavior,
     min_participants_for_behavior,
     normalize_behavior_key,
+    qualify_clip_duration,
 )
 from mouse_behavior.evaluation.exported_dataset_models import HeuristicParameters
 from mouse_behavior.evaluation.group_heuristic_config import DEFAULT_GROUP_HEURISTIC_CONFIG
@@ -324,7 +324,7 @@ def audit_group_segment_kinematics(
     span = max(1, end - start)
     duration_s = span / fps
 
-    dur_check = qualify_event_duration(dict(event), fps, parameters=parameters)
+    dur_check = qualify_clip_duration(dict(event), fps, parameters=parameters)
     min_duration_ok = bool(dur_check.get("ok", False))
     max_dur_s = max_duration_s_for_behavior(beh)
     duration_bounds_ok = bool(min_duration_ok and (max_dur_s is None or duration_s <= max_dur_s + 1e-6))
@@ -844,7 +844,7 @@ def select_group_review_clips(
     binding: Mapping[str, Any],
     *,
     per_event_audit: Mapping[str, Mapping[str, Any]] | None = None,
-    max_per_behavior: int | None = 30,
+    max_per_behavior: int | None = None,
 ) -> list[dict[str, Any]]:
     """Select diverse endpoint-observed, non-overlapping group segments for MP4 clip export."""
     fps = float(binding["source_video"]["fps"])

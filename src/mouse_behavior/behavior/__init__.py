@@ -11,12 +11,16 @@ from typing import Any
 
 __all__ = [
     "InMemoryTrackStore",
+    "MIN_CLIP_DURATION_S_BY_BEHAVIOR",
     "ParallelBehaviorFSM",
     "apply_standard_behavior_engine",
     "endpoint_observations",
     "endpoints_fully_observed",
     "extract_standard_behavior_events",
     "is_process_boundary_closed",
+    "min_clip_duration_policy_for_behavior",
+    "min_clip_duration_s_for_behavior",
+    "qualify_clip_duration",
     "refine_approach_segments",
     "refine_attack_segments",
     "refine_behavior_segments",
@@ -35,9 +39,13 @@ __all__ = [
 
 _SEGMENT_CLIPPING_EXPORTS = {
     "InMemoryTrackStore",
+    "MIN_CLIP_DURATION_S_BY_BEHAVIOR",
     "endpoint_observations",
     "endpoints_fully_observed",
     "is_process_boundary_closed",
+    "min_clip_duration_policy_for_behavior",
+    "min_clip_duration_s_for_behavior",
+    "qualify_clip_duration",
     "refine_approach_segments",
     "refine_attack_segments",
     "refine_behavior_segments",

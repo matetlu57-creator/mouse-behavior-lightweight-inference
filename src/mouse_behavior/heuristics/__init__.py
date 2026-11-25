@@ -22,6 +22,7 @@ __all__ = [
     "IndividualHeuristicConfig",
     "IndividualRuleResult",
     "MAX_DURATION_S_BY_BEHAVIOR",
+    "MIN_CLIP_DURATION_S_BY_BEHAVIOR",
     "MIN_PARTICIPANTS_BY_BEHAVIOR",
     "SocialHeuristicConfig",
     "confirmed_profiles",
@@ -35,11 +36,14 @@ __all__ = [
     "isolation_candidates",
     "isolation_summaries",
     "max_duration_s_for_behavior",
+    "min_clip_duration_policy_for_behavior",
+    "min_clip_duration_s_for_behavior",
     "min_participants_for_behavior",
     "pair_rule_masks",
     "pair_rule_roles",
     "policy_receipt",
     "predict_features",
+    "qualify_clip_duration",
     "refine_approach_segments",
     "refine_attack_segments",
     "refine_behavior_segments",
@@ -163,6 +167,10 @@ _EXPORT_SOURCES: dict[str, tuple[str, str]] = {
         "mouse_behavior.behavior.segment_clipping_common",
         "MIN_PARTICIPANTS_BY_BEHAVIOR",
     ),
+    "MIN_CLIP_DURATION_S_BY_BEHAVIOR": (
+        "mouse_behavior.behavior.segment_clipping_common",
+        "MIN_CLIP_DURATION_S_BY_BEHAVIOR",
+    ),
     "MAX_DURATION_S_BY_BEHAVIOR": (
         "mouse_behavior.behavior.segment_clipping_common",
         "MAX_DURATION_S_BY_BEHAVIOR",
@@ -170,6 +178,18 @@ _EXPORT_SOURCES: dict[str, tuple[str, str]] = {
     "min_participants_for_behavior": (
         "mouse_behavior.behavior.segment_clipping_common",
         "min_participants_for_behavior",
+    ),
+    "min_clip_duration_policy_for_behavior": (
+        "mouse_behavior.behavior.segment_clipping_common",
+        "min_clip_duration_policy_for_behavior",
+    ),
+    "min_clip_duration_s_for_behavior": (
+        "mouse_behavior.behavior.segment_clipping_common",
+        "min_clip_duration_s_for_behavior",
+    ),
+    "qualify_clip_duration": (
+        "mouse_behavior.behavior.segment_clipping_common",
+        "qualify_clip_duration",
     ),
     "max_duration_s_for_behavior": (
         "mouse_behavior.behavior.segment_clipping_common",

@@ -74,6 +74,9 @@ def rule_execution_binding(parameters, posture_mode: str = "disabled") -> dict:
                     "mouse_behavior.behavior.segment_clipping_group_motion",
                     "mouse_behavior.behavior.segment_clipping_individual",
                     "mouse_behavior.behavior.segment_clipping_social",
+                    "mouse_behavior.behavior.segment_clipping_social_approach",
+                    "mouse_behavior.behavior.segment_clipping_social_attack_chasing",
+                    "mouse_behavior.behavior.segment_clipping_social_contact",
                     "mouse_behavior.evaluation.approach_events",
                     "mouse_behavior.visualization.behavior_packages", "mouse_behavior.evaluation.segment_export",
                     "mouse_behavior.tracking.cache"))
@@ -330,12 +333,22 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(np.flatnonzero(edges == 1).tolist(), np.flatnonzero(edges == -1).tolist()))
 
 
+_PIPELINE_DIRECTED_ROLE_NAMES: dict[str, tuple[str, str]] = {
+    "approach": ("Approaching", "Approached"),
+    "attack": ("Attacker", "Attacked"),
+    "chase": ("Chasing", "Chased"),
+    "nose_head_contact": ("Snout_contacting", "Head_contacted"),
+    "nose_tail_contact": ("Snout_contacting", "Rear_contacted"),
+}
+
+
 def _event(behavior: str, ids, start: int, end: int, actor: int = -1, target: int = -1) -> dict:
     participants = []
     if actor >= 0 and target >= 0:
-        role_names = ("Approaching", "Approached") if behavior == "approach" else ("Chasing", "Chased")
-        participants = [dict(role_name=name, role_key=name.lower(), track_ids=[track])
-                        for name, track in zip(role_names, (actor, target))]
+        role_names = _PIPELINE_DIRECTED_ROLE_NAMES.get(behavior)
+        if role_names is not None:
+            participants = [dict(role_name=name, role_key=name.lower(), track_ids=[track])
+                            for name, track in zip(role_names, (actor, target))]
     return dict(behavior=DISPLAY_LABELS[behavior], canonical_behavior=behavior,
                 mouse_ids=sorted(map(int, ids)), actor_id=actor, target_id=target,
                 participants=participants, start_frame=start, end_frame=end,
@@ -806,8 +819,12 @@ def infer_video_events(store: TrackStore, binding: dict, scale: dict, params, *,
             require_closed_boundaries=False,
             require_endpoint_visibility=False,
         )
+    if enable_fine_cropping:
+        from mouse_behavior.behavior.segment_clipping_common import qualify_clip_duration as _duration_check
+    else:
+        _duration_check = qualify_event_duration
     for event in merged:
-        if not qualify_event_duration(event, fps, parameters=params)["ok"]:
+        if not _duration_check(event, fps, parameters=params)["ok"]:
             raise ValueError("merged event lost standalone duration qualification")
         contexts = event.get("inference_parent_contexts", [])
         if contexts:
