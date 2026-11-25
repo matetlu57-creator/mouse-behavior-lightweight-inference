@@ -333,12 +333,22 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(np.flatnonzero(edges == 1).tolist(), np.flatnonzero(edges == -1).tolist()))
 
 
+_PIPELINE_DIRECTED_ROLE_NAMES: dict[str, tuple[str, str]] = {
+    "approach": ("Approaching", "Approached"),
+    "attack": ("Attacker", "Attacked"),
+    "chase": ("Chasing", "Chased"),
+    "nose_head_contact": ("Snout_contacting", "Head_contacted"),
+    "nose_tail_contact": ("Snout_contacting", "Rear_contacted"),
+}
+
+
 def _event(behavior: str, ids, start: int, end: int, actor: int = -1, target: int = -1) -> dict:
     participants = []
     if actor >= 0 and target >= 0:
-        role_names = ("Approaching", "Approached") if behavior == "approach" else ("Chasing", "Chased")
-        participants = [dict(role_name=name, role_key=name.lower(), track_ids=[track])
-                        for name, track in zip(role_names, (actor, target))]
+        role_names = _PIPELINE_DIRECTED_ROLE_NAMES.get(behavior)
+        if role_names is not None:
+            participants = [dict(role_name=name, role_key=name.lower(), track_ids=[track])
+                            for name, track in zip(role_names, (actor, target))]
     return dict(behavior=DISPLAY_LABELS[behavior], canonical_behavior=behavior,
                 mouse_ids=sorted(map(int, ids)), actor_id=actor, target_id=target,
                 participants=participants, start_frame=start, end_frame=end,

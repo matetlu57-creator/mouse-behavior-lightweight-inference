@@ -37,11 +37,11 @@ __all__ = [
 ]
 
 _DIRECTED_SOCIAL_ROLE_LABELS: dict[str, tuple[str, str, str, str]] = {
-    "approach": ("approacher", "approached", "主动接近者", "被接近者"),
-    "attack": ("attacker", "victim", "攻击发起者", "被攻击者"),
-    "chase": ("chaser", "chased", "追逐者", "被追逐者"),
-    "nose_head_contact": ("sniffer", "sniffed", "主动鼻嗅者", "被嗅头部鼠"),
-    "nose_tail_contact": ("sniffer", "sniffed", "主动尾嗅者", "被尾嗅者"),
+    "approach": ("Approaching", "Approached", "主动接近者", "被接近者"),
+    "attack": ("Attacker", "Attacked", "攻击发起者", "被攻击者"),
+    "chase": ("Chasing", "Chased", "追逐者", "被追逐者"),
+    "nose_head_contact": ("Snout_contacting", "Head_contacted", "主动鼻嗅者", "被嗅头部鼠"),
+    "nose_tail_contact": ("Snout_contacting", "Rear_contacted", "主动尾嗅者", "被尾嗅者"),
 }
 
 
@@ -114,6 +114,7 @@ def attach_social_roles(
         event["receiver_id"] = None
         event["role_status"] = "undirected_not_applicable"
         event["roles"] = None
+        event["participants"] = []
         return
 
     aid, tid = int(actor_id), int(target_id)
@@ -122,7 +123,15 @@ def attach_social_roles(
     event["initiator_id"] = aid
     event["receiver_id"] = tid
     event["role_status"] = "measured_directed_role"
-    event["roles"] = build_social_roles(key, aid, tid)
+    roles_obj = build_social_roles(key, aid, tid)
+    event["roles"] = roles_obj
+    if roles_obj is not None:
+        init_role = str(roles_obj["initiator_role"])
+        tgt_role = str(roles_obj["target_role"])
+        event["participants"] = [
+            {"role_name": init_role, "role_key": init_role.lower(), "track_ids": [aid]},
+            {"role_name": tgt_role, "role_key": tgt_role.lower(), "track_ids": [tid]},
+        ]
     if support_intervals:
         event["role_support_frame_intervals"] = [[int(a), int(b)] for a, b in support_intervals]
     elif "start_frame" in event and "end_frame" in event:

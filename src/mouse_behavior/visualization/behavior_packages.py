@@ -134,13 +134,13 @@ def draw_overlay(frame: np.ndarray, row: dict, events: list[dict], source_frame:
                                                  event["start_frame"], event["event_id"]))
     _role_names = {
         "approach": ("Approaching", "Approached"),
-        "attack": ("Attacker", "Victim"),
-        "chase": ("Chaser", "Chased"),
-        "chasing": ("Chaser", "Chased"),
-        "nose_head_contact": ("Sniffer", "Head-Sniffed"),
-        "head_contact": ("Sniffer", "Head-Sniffed"),
-        "nose_tail_contact": ("Sniffer", "Tail-Sniffed"),
-        "tail_contact": ("Sniffer", "Tail-Sniffed"),
+        "attack": ("Attacker", "Attacked"),
+        "chase": ("Chasing", "Chased"),
+        "chasing": ("Chasing", "Chased"),
+        "nose_head_contact": ("Snout_contacting", "Head_contacted"),
+        "head_contact": ("Snout_contacting", "Head_contacted"),
+        "nose_tail_contact": ("Snout_contacting", "Rear_contacted"),
+        "tail_contact": ("Snout_contacting", "Rear_contacted"),
     }
     for event in displayed:
         beh_cb = str(event.get("canonical_behavior", "")).lower()

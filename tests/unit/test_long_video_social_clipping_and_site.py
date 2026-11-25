@@ -102,7 +102,11 @@ def test_social_validation_summary_and_review_clip_selection() -> None:
         "initiator_id": 1,
         "receiver_id": 2,
         "role_status": "measured_directed_role",
-        "roles": {"initiator_role": "chaser", "target_role": "chased", "summary_zh": "V1(追逐者) → V2(被追逐者)"},
+        "roles": {"initiator_role": "Chasing", "target_role": "Chased", "summary_zh": "V1(追逐者) → V2(被追逐者)"},
+        "participants": [
+            {"role_name": "Chasing", "role_key": "chasing", "track_ids": [1]},
+            {"role_name": "Chased", "role_key": "chased", "track_ids": [2]},
+        ],
         "start_frame": 10,
         "end_frame": 34,
         "chase_min_duration_policy_s": 0.7,
@@ -124,6 +128,9 @@ def test_social_validation_summary_and_review_clip_selection() -> None:
     assert ann["target_id"] == 2
     assert ann["initiator_id"] == 1
     assert ann["receiver_id"] == 2
+    assert ann["roles"]["initiator_role"] == "Chasing"
+    assert ann["roles"]["target_role"] == "Chased"
+    assert [p["role_name"] for p in ann["participants"]] == ["Chasing", "Chased"]
     assert ann["roles"]["summary_zh"] == "V1(追逐者) → V2(被追逐者)"
 
     idsw_att = {
@@ -136,7 +143,7 @@ def test_social_validation_summary_and_review_clip_selection() -> None:
         "initiator_id": 1,
         "receiver_id": 2,
         "role_status": "measured_directed_role",
-        "roles": {"initiator_role": "attacker", "target_role": "victim", "summary_zh": "V1(攻击发起者) → V2(被攻击者)"},
+        "roles": {"initiator_role": "Attacker", "target_role": "Attacked", "summary_zh": "V1(攻击发起者) → V2(被攻击者)"},
         "has_visual_id_switch": True,
         "endpoint_observed_track_ids": {"start": [1, 2], "end": [3, 4]},
         "observed_onset_pair": [1, 2],
@@ -250,7 +257,7 @@ def test_social_review_site_build_resilience_and_http_routes(tmp_path: Path) -> 
                     "initiator_id": 1,
                     "receiver_id": 2,
                     "role_status": "measured_directed_role",
-                    "roles": {"initiator_role": "attacker", "target_role": "victim", "summary_zh": "V1(攻击发起者) → V2(被攻击者)"},
+                    "roles": {"initiator_role": "Attacker", "target_role": "Attacked", "summary_zh": "V1(攻击发起者) → V2(被攻击者)"},
                     "start_frame": 10,
                     "end_frame": 30,
                     "frame_count": 20,

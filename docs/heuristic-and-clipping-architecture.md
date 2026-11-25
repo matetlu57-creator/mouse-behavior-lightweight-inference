@@ -91,11 +91,11 @@ All 15 retained canonical behaviors enforce an explicit minimum clip duration vi
 | Individual | `locomotion` | `>= 0.5 s` | — | N/A | Unlimited (`None`) |
 | Individual | `grooming` | `>= 0.3 s` | — | N/A | Unlimited (`None`) |
 | Individual | `rearing` | `>= 0.5 s` | — | N/A | Unlimited (`None`) |
-| Social | `approach` | `>= 1.0 s` | — | `approacher -> approached` | Unlimited (`None`) |
-| Social | `attack` | `> 0.5 s` | — | `attacker -> victim` | Unlimited (`None`) |
-| Social | `chase` (`chasing`) | `> 0.7 s` | — | `chaser -> chased` | Unlimited (`None`) |
-| Social | `nose_head_contact` (`head_contact`) | `> 0.4 s` | — | `sniffer -> sniffed` | Unlimited (`None`) |
-| Social | `nose_tail_contact` (`tail_contact`) | `> 0.4 s` | — | `sniffer -> sniffed` | Unlimited (`None`) |
+| Social | `approach` | `>= 1.0 s` | — | `Approaching -> Approached` | Unlimited (`None`) |
+| Social | `attack` | `> 0.5 s` | — | `Attacker -> Attacked` | Unlimited (`None`) |
+| Social | `chase` (`chasing`) | `> 0.7 s` | — | `Chasing -> Chased` | Unlimited (`None`) |
+| Social | `nose_head_contact` (`head_contact`) | `> 0.4 s` | — | `Snout_contacting -> Head_contacted` | Unlimited (`None`) |
+| Social | `nose_tail_contact` (`tail_contact`) | `> 0.4 s` | — | `Snout_contacting -> Rear_contacted` | Unlimited (`None`) |
 | Social | `together` | `>= 1.0 s` | — | Undirected (`actor_id=-1`) | Unlimited (`None`) |
 | Group | `huddle` | `>= 5.0 s` | `<= 15.0 s` | N/A (`>= 3` mice) | Unlimited (`None`) |
 | Group | `social_clustering` | `> 3.0 s` (incl. stable gathering) | `3.0 s` post-arrival hold cap | N/A (`>= 3` mice) | Unlimited (`None`) |

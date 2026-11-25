@@ -312,7 +312,9 @@ class TestEvaluationPipeline:
         assert len(refined) == 1
         assert refined[0]["start_frame"] < 15
         assert refined[0]["end_frame"] >= 45
-        assert refined[0]["roles"]["initiator_role"] == "chaser"
+        assert refined[0]["roles"]["initiator_role"] == "Chasing"
+        assert refined[0]["roles"]["target_role"] == "Chased"
+        assert [p["role_name"] for p in refined[0]["participants"]] == ["Chasing", "Chased"]
         assert refined[0]["actor_id"] == 1
 
     def test_refine_attack_segments_surge_onset_and_grapple_continuation(self):
@@ -357,7 +359,9 @@ class TestEvaluationPipeline:
         assert len(refined) == 1
         assert refined[0]["start_frame"] < 20
         assert refined[0]["end_frame"] > 34
-        assert refined[0]["roles"]["initiator_role"] == "attacker"
+        assert refined[0]["roles"]["initiator_role"] == "Attacker"
+        assert refined[0]["roles"]["target_role"] == "Attacked"
+        assert [p["role_name"] for p in refined[0]["participants"]] == ["Attacker", "Attacked"]
 
     def test_refinement_fallback_safety_rejects_empty_and_sub_minimum(self):
         """Empty tracks, static mice, and sub-minimum duration must be rejected; valid explosive Attack survives."""
@@ -421,7 +425,8 @@ class TestEvaluationPipeline:
         )
         assert len(res_att) == 1
         assert res_att[0]["end_frame"] - res_att[0]["start_frame"] > 15
-        assert res_att[0]["roles"]["initiator_role"] == "attacker"
+        assert res_att[0]["roles"]["initiator_role"] == "Attacker"
+        assert res_att[0]["roles"]["target_role"] == "Attacked"
 
 
 

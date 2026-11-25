@@ -258,7 +258,9 @@ def test_refine_attack_dispersal_and_group_locomotion():
     }
     res_attack = refine_attack_segments([attack_ev], _DummyStore(attack_rows), {"source_video": {"fps": fps}})
     assert len(res_attack) == 1
-    assert res_attack[0]["roles"]["initiator_role"] == "attacker"
+    assert res_attack[0]["roles"]["initiator_role"] == "Attacker"
+    assert res_attack[0]["roles"]["target_role"] == "Attacked"
+    assert [p["role_name"] for p in res_attack[0]["participants"]] == ["Attacker", "Attacked"]
 
     # 2. Dispersal: 180 frames (6.0s > 5.0s), starts compact, expands outward > 35px
     disp_rows = []

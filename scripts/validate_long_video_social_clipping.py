@@ -230,6 +230,7 @@ def run_long_video_social_validation(
                     "receiver_id": ev.get("receiver_id"),
                     "role_status": ev.get("role_status", "not_applicable"),
                     "roles": ev.get("roles"),
+                    "participants": ev.get("participants", []),
                     "has_visual_id_switch": bool(ev.get("has_visual_id_switch", False)),
                     "id_switch_note": ev.get("id_switch_note"),
                     "discovery_source": ev.get("discovery_source"),

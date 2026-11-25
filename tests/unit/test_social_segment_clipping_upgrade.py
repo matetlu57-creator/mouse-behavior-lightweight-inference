@@ -316,10 +316,12 @@ def test_social_clipping_completes_truncated_bouts_and_observed_endpoints() -> N
         scale=scale,
     )
     assert len(res_hc) == 1
-    # Contact (directed sniffer->sniffed) & Together (undirected) role outputs
+    # Contact (directed Snout_contacting->Head_contacted) & Together (undirected) role outputs
     assert res_hc[0]["role_status"] == "measured_directed_role"
     assert res_hc[0]["actor_id"] in (1, 2) and res_hc[0]["target_id"] in (1, 2)
-    assert res_hc[0]["roles"]["initiator_role"] == "sniffer"
+    assert res_hc[0]["roles"]["initiator_role"] == "Snout_contacting"
+    assert res_hc[0]["roles"]["target_role"] == "Head_contacted"
+    assert [p["role_name"] for p in res_hc[0]["participants"]] == ["Snout_contacting", "Head_contacted"]
 
     assert (res_hc[0]["start_frame"], res_hc[0]["end_frame"]) == (15, 45)
     assert endpoints_fully_observed(hc_store, res_hc[0], binding["source_video"])
@@ -346,6 +348,7 @@ def test_social_clipping_completes_truncated_bouts_and_observed_endpoints() -> N
     assert res_tog[0]["actor_id"] == -1
     assert res_tog[0]["target_id"] == -1
     assert res_tog[0]["roles"] is None
+    assert res_tog[0]["participants"] == []
     assert endpoints_fully_observed(tog_store, res_tog[0], binding["source_video"])
 
     # Approach closing from frame 10..26 (d_start=21.0cm), boxes just touch at f=26 (end_bg<=0.15cm) -> ends cleanly at f=27
@@ -375,7 +378,9 @@ def test_social_clipping_completes_truncated_bouts_and_observed_endpoints() -> N
     assert res_app[0]["approach_end_box_gap_cm"] <= 0.15
     assert res_app[0]["min_pair_box_gap_cm"] > 0.0
     assert res_app[0]["role_status"] == "measured_directed_role"
-    assert res_app[0]["roles"]["initiator_role"] == "approacher"
+    assert res_app[0]["roles"]["initiator_role"] == "Approaching"
+    assert res_app[0]["roles"]["target_role"] == "Approached"
+    assert [p["role_name"] for p in res_app[0]["participants"]] == ["Approaching", "Approached"]
     assert endpoints_fully_observed(app_store, res_app[0], binding["source_video"])
 
     # select_behavior_segments guarantees zero shared-mouse overlaps on overlapping refined social clips
@@ -448,7 +453,9 @@ def test_social_clipping_completes_truncated_bouts_and_observed_endpoints() -> N
     assert res_sentinel[0]["attack_max_iou"] >= 0.42
     assert res_sentinel[0]["attack_clinch_occlusion_frames"] >= 3
     assert res_sentinel[0]["role_status"] == "measured_directed_role"
-    assert res_sentinel[0]["roles"]["initiator_role"] == "attacker"
+    assert res_sentinel[0]["roles"]["initiator_role"] == "Attacker"
+    assert res_sentinel[0]["roles"]["target_role"] == "Attacked"
+    assert [p["role_name"] for p in res_sentinel[0]["participants"]] == ["Attacker", "Attacked"]
 
     # Crowded 3rd mouse right next to the clinch (>25% within 11 cm) -> rejected as corner huddle
     crowded_att_rows = [
@@ -614,6 +621,9 @@ def test_approach_zero_contact_outside_crowd_and_fast_chase() -> None:
     assert res_fast[0]["chase_median_dist_cm"] <= 15.0
     assert res_fast[0]["chase_trail_error_cm"] <= 3.2
     assert res_fast[0]["role_status"] == "measured_directed_role"
+    assert res_fast[0]["roles"]["initiator_role"] == "Chasing"
+    assert res_fast[0]["roles"]["target_role"] == "Chased"
+    assert [p["role_name"] for p in res_fast[0]["participants"]] == ["Chasing", "Chased"]
     assert res_fast[0]["roles"]["summary_zh"] == "V1(追逐者) → V2(被追逐者)"
 
     # Intervening 3rd mouse right on the segment between chaser and chased -> rejected
@@ -855,7 +865,8 @@ def test_approach_final_directionality_chasing_bystander_and_id_switch_discovery
     assert fb_cands[0]["has_visual_id_switch"] is True
     assert fb_cands[0]["duration_s"] > 0.5
     assert set(fb_cands[0]["mouse_ids"]) >= {1, 2, 3, 4}
-    assert fb_cands[0]["roles"]["initiator_role"] == "attacker"
+    assert fb_cands[0]["roles"]["initiator_role"] == "Attacker"
+    assert fb_cands[0]["roles"]["target_role"] == "Attacked"
     assert endpoints_fully_observed(fb_store, fb_cands[0], {"fps": fps, "frame_count": 90})
 
     # 5. ID-switched fast Chasing discovery -> recovers pursuit spanning track ID change
@@ -876,6 +887,8 @@ def test_approach_final_directionality_chasing_bystander_and_id_switch_discovery
     ) or idsw_chases[0]["chase_min_duration_policy_s"] == 0.7
     assert idsw_chases[0]["actor_id"] == 10
     assert idsw_chases[0]["target_id"] == 20
+    assert idsw_chases[0]["roles"]["initiator_role"] == "Chasing"
+    assert idsw_chases[0]["roles"]["target_role"] == "Chased"
     assert endpoints_fully_observed(idsw_store, idsw_chases[0], {"fps": fps, "frame_count": 45})
     assert isinstance(binding, dict)
 
@@ -1025,3 +1038,42 @@ def test_chasing_speed_and_directional_consistency_gates() -> None:
         )
         == []
     )
+
+
+def test_canonical_social_role_names_and_participants() -> None:
+    expected = {
+        "approach": ("Approaching", "Approached"),
+        "attack": ("Attacker", "Attacked"),
+        "chase": ("Chasing", "Chased"),
+        "chasing": ("Chasing", "Chased"),
+        "nose_head_contact": ("Snout_contacting", "Head_contacted"),
+        "head_contact": ("Snout_contacting", "Head_contacted"),
+        "nose_tail_contact": ("Snout_contacting", "Rear_contacted"),
+        "tail_contact": ("Snout_contacting", "Rear_contacted"),
+    }
+    for beh, (init_role, tgt_role) in expected.items():
+        built = segment_clipping_social_contact.build_social_roles(beh, 3, 7)
+        assert built is not None
+        assert built["initiator_role"] == init_role
+        assert built["target_role"] == tgt_role
+
+        ev = {"canonical_behavior": beh, "start_frame": 10, "end_frame": 40}
+        segment_clipping_social_contact.attach_social_roles(ev, beh, 3, 7, [[10, 40]])
+        assert ev["actor_id"] == 3
+        assert ev["target_id"] == 7
+        assert ev["role_status"] == "measured_directed_role"
+        assert ev["roles"]["initiator_role"] == init_role
+        assert ev["roles"]["target_role"] == tgt_role
+        assert ev["participants"] == [
+            {"role_name": init_role, "role_key": init_role.lower(), "track_ids": [3]},
+            {"role_name": tgt_role, "role_key": tgt_role.lower(), "track_ids": [7]},
+        ]
+
+    assert segment_clipping_social_contact.build_social_roles("together", 3, 7) is None
+    tog_ev = {"canonical_behavior": "together", "start_frame": 10, "end_frame": 40}
+    segment_clipping_social_contact.attach_social_roles(tog_ev, "together", 3, 7)
+    assert tog_ev["actor_id"] == -1
+    assert tog_ev["target_id"] == -1
+    assert tog_ev["role_status"] == "undirected_not_applicable"
+    assert tog_ev["roles"] is None
+    assert tog_ev["participants"] == []
